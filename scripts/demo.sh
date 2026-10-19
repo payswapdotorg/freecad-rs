@@ -21,11 +21,19 @@ echo "==> new document"
 echo "==> adding primitives + a parametric transform"
 # NOTE: `--name` belongs to `add` itself, so it comes *before* the shape
 # subcommand (clap 4 rule for mixed positional/subcommand commands).
+# Scene: a slab, a ball and a cylinder resting on it, and a transformed
+# copy of the ball stacked on top of it (all objects visible in the SVG).
 "$BIN" add examples/demo.fcstd --name Base box --length 30 --width 20 --height 5
 "$BIN" add examples/demo.fcstd --name Ball sphere --radius 4
 "$BIN" add examples/demo.fcstd --name Stem cylinder --radius 1.5 --height 12
+# Placements: Ball rests on the slab (slab top z=5, ball r -> center z=11),
+# Stem stands on the slab beside it (cylinder h=12, center z=11).
+"$BIN" set examples/demo.fcstd Ball Placement "pos=(-6,0,11);axis=(0,0,1);angle=0"
+"$BIN" set examples/demo.fcstd Stem Placement "pos=(8,0,11);axis=(0,0,1);angle=0"
+# TransformFeature composes onto the (canonical) source mesh, so the
+# translated copy sits on the ball's top: center z = 11 + 12 = 23.
 "$BIN" add examples/demo.fcstd --name Lift transform --source Ball \
-    --translate 0,0,12 --rotate-deg 25
+    --translate=-6,0,23 --rotate-deg 25
 
 echo "==> parametric change: Ball.Radius 4 -> 6 (touches Ball and Lift)"
 "$BIN" set examples/demo.fcstd Ball Radius 6

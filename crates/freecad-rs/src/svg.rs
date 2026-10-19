@@ -208,10 +208,15 @@ pub fn render_svg<W: Write>(
         r##"  <rect x="0" y="0" width="960" height="720" fill="#ffffff"/>"##
     )?;
     for (_, name, tris) in groups {
-        writeln!(
-            out,
-            r##"  <g stroke="#333333" stroke-width="0.5" stroke-linejoin="round">"##
-        )?;
+        // Hairline strokes look crisp on sparse geometry (boxes) but read
+        // as "wireframe" on dense tessellations (spheres at fine
+        // deflection) — curved surfaces shade smoothly without strokes.
+        let stroke_attrs = if tris.len() > 400 {
+            ""
+        } else {
+            r##" stroke="#333333" stroke-width="0.5" stroke-linejoin="round""##
+        };
+        writeln!(out, "  <g{stroke_attrs}>")?;
         writeln!(out, "    <title>{}</title>", xml_escape(name))?;
         for t in tris {
             writeln!(
