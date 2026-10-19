@@ -1,0 +1,12 @@
+[package]
+name = "fc-part"
+description = "Geometry kernel: parametric primitives, tessellation, part features — mirroring FreeCAD's Mod/Part"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fc-base.workspace = true
+fc-app.workspace = true

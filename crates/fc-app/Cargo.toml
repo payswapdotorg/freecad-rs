@@ -1,0 +1,11 @@
+[package]
+name = "fc-app"
+description = "Document model, property system and dependency-driven recompute, mirroring FreeCAD's App layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fc-base.workspace = true

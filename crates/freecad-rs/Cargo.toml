@@ -1,0 +1,19 @@
+[package]
+name = "freecad-rs"
+description = "CLI for the fc-* crates: create, edit and recompute FreeCAD-style parametric documents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "freecad-rs"
+path = "src/main.rs"
+
+[dependencies]
+fc-base.workspace = true
+fc-app.workspace = true
+fc-part.workspace = true
+fc-io.workspace = true
+clap.workspace = true

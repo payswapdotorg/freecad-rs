@@ -1,0 +1,15 @@
+[package]
+name = "fc-io"
+description = ".FCStd document format: zip container + Document.xml reader/writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fc-base.workspace = true
+fc-app.workspace = true
+fc-part.workspace = true
+zip.workspace = true
+quick-xml.workspace = true

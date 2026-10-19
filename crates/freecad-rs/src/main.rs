@@ -1,0 +1,155 @@
+//! `freecad-rs` — command-line front-end for the Rust FreeCAD core.
+//!
+//! Stateless-by-file CLI: every command loads `FILE`, mutates, recomputes
+//! (when needed) and saves back, mirroring how a document lives on disk.
+//! Run `docs/cli.md` for the full walkthrough.
+
+mod commands;
+mod svg;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "freecad-rs",
+    version,
+    about = "FreeCAD-style parametric documents in Rust (clean-room reimplementation of the core)",
+    after_help = "Files are .FCStd zip archives. Every mutating command saves the file back."
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Create a new empty document.
+    New {
+        file: String,
+        /// Document label.
+        #[arg(long, default_value = "untitled")]
+        label: String,
+    },
+    /// Add a shape or transform feature, then save.
+    Add {
+        file: String,
+        #[command(subcommand)]
+        shape: AddShape,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Set a property; touches the object + dependents, then saves.
+    Set {
+        file: String,
+        /// Object name.
+        object: String,
+        /// Property name.
+        property: String,
+        /// Value in the property's text form (see `docs/cli.md`).
+        value: String,
+    },
+    /// Print a property's value.
+    Get {
+        file: String,
+        object: String,
+        property: String,
+    },
+    /// List objects (name, type, status).
+    List {
+        file: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recompute touched objects, save, and print what ran.
+    Recompute {
+        file: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Document metadata.
+    Info { file: String },
+    /// Per-object analytic volume / surface area.
+    Stats { file: String },
+    /// Render a shaded orthographic SVG of the document.
+    Export {
+        file: String,
+        output: String,
+        /// Projection: iso | top | front | right.
+        #[arg(long, default_value = "iso")]
+        view: String,
+    },
+    /// Write the dependency graph as Graphviz DOT.
+    Graph { file: String, output: String },
+}
+
+#[derive(Subcommand)]
+pub enum AddShape {
+    /// FreeCAD Part::Box.
+    Box {
+        #[arg(long, default_value_t = 10.0)]
+        length: f64,
+        #[arg(long, default_value_t = 10.0)]
+        width: f64,
+        #[arg(long, default_value_t = 10.0)]
+        height: f64,
+    },
+    /// FreeCAD Part::Sphere.
+    Sphere {
+        #[arg(long, default_value_t = 5.0)]
+        radius: f64,
+    },
+    /// FreeCAD Part::Cylinder.
+    Cylinder {
+        #[arg(long, default_value_t = 2.0)]
+        radius: f64,
+        #[arg(long, default_value_t = 10.0)]
+        height: f64,
+    },
+    /// FreeCAD Part::Cone.
+    Cone {
+        #[arg(long, default_value_t = 2.0)]
+        radius1: f64,
+        #[arg(long, default_value_t = 0.0)]
+        radius2: f64,
+        #[arg(long, default_value_t = 10.0)]
+        height: f64,
+    },
+    /// FreeCAD Part::Torus.
+    Torus {
+        #[arg(long, default_value_t = 10.0)]
+        radius1: f64,
+        #[arg(long, default_value_t = 2.0)]
+        radius2: f64,
+    },
+    /// Part::Transform — link, place and scale another object.
+    Transform {
+        /// Source object name.
+        #[arg(long)]
+        source: String,
+        /// Translation `x,y,z`.
+        #[arg(long, value_delimiter = ',', default_values_t = [0.0, 0.0, 0.0])]
+        translate: Vec<f64>,
+        /// Rotation axis `x,y,z` (with --rotate-deg).
+        #[arg(long, value_delimiter = ',', default_values_t = [0.0, 0.0, 1.0])]
+        rotate_axis: Vec<f64>,
+        /// Rotation angle in degrees (about --rotate-axis).
+        #[arg(long, default_value_t = 0.0)]
+        rotate_deg: f64,
+        /// Uniform scale factor.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f64,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let code = match commands::dispatch(cli.command) {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("error: {err}");
+            1
+        }
+    };
+    std::process::exit(code);
+}

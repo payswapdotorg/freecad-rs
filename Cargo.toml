@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fc-base",
+    "crates/fc-app",
+    "crates/fc-part",
+    "crates/fc-io",
+    "crates/freecad-rs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/payswapdotorg/freecad-rs"
+rust-version = "1.75"
+
+[workspace.dependencies]
+fc-base = { path = "crates/fc-base" }
+fc-app = { path = "crates/fc-app" }
+fc-part = { path = "crates/fc-part" }
+fc-io = { path = "crates/fc-io" }
+zip = "2.2"
+quick-xml = "0.36"
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
