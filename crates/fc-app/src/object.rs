@@ -15,20 +15,15 @@ use crate::property::Property;
 pub struct ObjectId(pub u64);
 
 /// Recompute state of an object (FreeCAD object status, distilled).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ObjectStatus {
     /// Needs recompute (FreeCAD `Touched`).
+    #[default]
     Touched,
     /// Successfully executed at least once.
     Valid,
     /// Last execution failed; carries the reason.
     Error(String),
-}
-
-impl Default for ObjectStatus {
-    fn default() -> Self {
-        Self::Touched
-    }
 }
 
 impl std::fmt::Display for ObjectStatus {
@@ -74,24 +69,40 @@ impl PropertyContainer {
 
     /// Typed getters return `None` on wrong variant or missing key.
     pub fn get_float(&self, key: &str) -> Option<f64> {
-        todo!()
+        match self.properties.get(key)? {
+            Property::Float(value) => Some(*value),
+            _ => None,
+        }
     }
 
     pub fn get_string(&self, key: &str) -> Option<String> {
-        todo!()
+        match self.properties.get(key)? {
+            Property::String(value) => Some(value.clone()),
+            _ => None,
+        }
     }
 
     pub fn get_vector(&self, key: &str) -> Option<Vector3> {
-        todo!()
+        match self.properties.get(key)? {
+            Property::Vector(value) => Some(*value),
+            _ => None,
+        }
     }
 
     pub fn get_placement(&self, key: &str) -> Option<Placement> {
-        todo!()
+        match self.properties.get(key)? {
+            Property::Placement(value) => Some(*value),
+            _ => None,
+        }
     }
 
     /// Link or LinkList targets as a flat list.
     pub fn get_links(&self, key: &str) -> Option<Vec<String>> {
-        todo!()
+        match self.properties.get(key)? {
+            Property::Link(target) => Some(vec![target.clone()]),
+            Property::LinkList(targets) => Some(targets.clone()),
+            _ => None,
+        }
     }
 
     pub fn set(&mut self, key: &str, value: Property) {
@@ -126,6 +137,11 @@ pub trait DocumentObject: Send {
     /// by the document, never renamed.
     fn name(&self) -> &str;
 
+    /// Write back the (re)assigned unique name. Document-internal: used by
+    /// [`crate::Document::add`] after suffixing the base name for
+    /// uniqueness (`Box`, `Box001`, ...).
+    fn set_name(&mut self, name: &str);
+
     fn properties(&self) -> &BTreeMap<String, Property>;
 
     fn properties_mut(&mut self) -> &mut BTreeMap<String, Property>;
@@ -156,10 +172,15 @@ macro_rules! impl_document_object {
             fn name(&self) -> &str {
                 self.container.name()
             }
+            fn set_name(&mut self, name: &str) {
+                self.container.set_name(name)
+            }
             fn properties(&self) -> &std::collections::BTreeMap<String, $crate::Property> {
                 &self.container.properties
             }
-            fn properties_mut(&mut self) -> &mut std::collections::BTreeMap<String, $crate::Property> {
+            fn properties_mut(
+                &mut self,
+            ) -> &mut std::collections::BTreeMap<String, $crate::Property> {
                 &mut self.container.properties
             }
             fn execute(&mut self, doc: &$crate::Document) -> Result<(), String> {
@@ -179,4 +200,19 @@ macro_rules! impl_document_object {
             }
         }
     };
+}
+
+/// All link targets (`Link` + `LinkList` properties) of an object, in
+/// property-key order. Shared by the document graph walks (link listing,
+/// dependent traversal, topological recompute, DOT export).
+pub(crate) fn link_targets(object: &dyn DocumentObject) -> Vec<String> {
+    let mut targets = Vec::new();
+    for property in object.properties().values() {
+        match property {
+            Property::Link(target) => targets.push(target.clone()),
+            Property::LinkList(list) => targets.extend(list.iter().cloned()),
+            _ => {}
+        }
+    }
+    targets
 }

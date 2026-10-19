@@ -47,24 +47,39 @@ cargo install --path crates/freecad-rs   # install the CLI
 
 ```sh
 freecad-rs new demo.fcstd --label "Playground"
-freecad-rs add box demo.fcstd --name Base --length 30 --width 20 --height 5
-freecad-rs add sphere demo.fcstd --name Ball --radius 4
-freecad-rs add transform demo.fcstd --name Lift --source Ball --translate 0,0,10
-freecad-rs recompute demo.fcstd
+freecad-rs add demo.fcstd --name Base box --length 30 --width 20 --height 5
+freecad-rs add demo.fcstd --name Ball sphere --radius 4
+freecad-rs add demo.fcstd --name Stem cylinder --radius 1.5 --height 12
+freecad-rs add demo.fcstd --name Lift transform --source Ball --translate 0,0,12 --rotate-deg 25
 freecad-rs stats demo.fcstd
 freecad-rs export svg demo.fcstd demo.svg --view iso
 freecad-rs graph demo.fcstd graph.dot
 ```
 
-Parametric behavior in one command:
+`stats` output (exact analytic values — the parametric core at work):
+
+```text
+  Base (Box): volume 3000.000 mm³, area 1700.000 mm², 12 triangles
+  Ball (Sphere): volume 904.779 mm³, area 452.389 mm², 9024 triangles
+  Stem (Cylinder): volume 84.823 mm³, area 127.235 mm², 96 triangles
+  Lift (Mesh): volume 903.165 mm³, area 451.986 mm², 9024 triangles
+total: 4 objects, volume 4892.767 mm³
+```
+
+Parametric behavior in one command — changing the sphere touches its
+dependent transform, and recompute runs dependencies-first:
 
 ```sh
-freecad-rs set demo.fcstd Ball Radius=6   # touches Ball AND Lift
-freecad-rs recompute demo.fcstd           # recomputes both, dependencies first
+freecad-rs set demo.fcstd Ball Radius 6
+#   touched Ball
+#   touched Lift
+#   recomputed Ball (Part::Sphere)
+#   recomputed Lift (Part::Transform)
 ```
 
 Full walkthrough: [`docs/cli.md`](docs/cli.md) · rendered example:
-[`examples/demo.svg`](examples/demo.svg) · roadmap:
+[`examples/demo.svg`](examples/demo.svg) · runnable script:
+[`scripts/demo.sh`](scripts/demo.sh) · roadmap:
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Workspace layout

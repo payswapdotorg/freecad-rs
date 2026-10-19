@@ -17,40 +17,80 @@ impl BoundBox3 {
 
     /// Smallest box containing all points; `None` when `points` is empty.
     pub fn from_points(points: &[Vector3]) -> Option<Self> {
-        todo!()
+        let (first, rest) = points.split_first()?;
+        let mut b = Self {
+            min: *first,
+            max: *first,
+        };
+        for p in rest {
+            b.add_point(p);
+        }
+        Some(b)
     }
 
-    /// Grow to include `p` (no-op semantics undefined for empty boxes are
-    /// not acceptable: initialize from the first point).
+    /// Grow to include `p`. An empty box (see `is_empty`) initializes from
+    /// the first point instead of staying degenerate.
     pub fn add_point(&mut self, p: &Vector3) {
-        todo!()
+        if self.is_empty() {
+            self.min = *p;
+            self.max = *p;
+        } else {
+            self.min = Vector3::new(
+                self.min.x.min(p.x),
+                self.min.y.min(p.y),
+                self.min.z.min(p.z),
+            );
+            self.max = Vector3::new(
+                self.max.x.max(p.x),
+                self.max.y.max(p.y),
+                self.max.z.max(p.z),
+            );
+        }
     }
 
-    /// Grow to include `other`.
+    /// Grow to include `other`. Adding an empty box is a no-op.
     pub fn add_box(&mut self, other: &Self) {
-        todo!()
+        if other.is_empty() {
+            return;
+        }
+        // An empty `self` initializes from `other`; otherwise both corners
+        // extend the box to the union.
+        self.add_point(&other.min);
+        self.add_point(&other.max);
     }
 
     pub fn contains_point(&self, p: &Vector3) -> bool {
-        todo!()
+        p.x >= self.min.x
+            && p.x <= self.max.x
+            && p.y >= self.min.y
+            && p.y <= self.max.y
+            && p.z >= self.min.z
+            && p.z <= self.max.z
     }
 
     pub fn center(&self) -> Vector3 {
-        todo!()
+        (self.min + self.max) * 0.5
     }
 
     /// Extent per axis (`max - min`).
     pub fn size(&self) -> Vector3 {
-        todo!()
+        self.max - self.min
     }
 
     /// True when min exceeds max on any axis.
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.min.x > self.max.x || self.min.y > self.max.y || self.min.z > self.max.z
     }
 
+    /// Box volume. Empty boxes report 0 rather than a meaningless product
+    /// of negative extents.
     pub fn volume(&self) -> f64 {
-        todo!()
+        if self.is_empty() {
+            0.0
+        } else {
+            let s = self.size();
+            s.x * s.y * s.z
+        }
     }
 }
 

@@ -24,15 +24,26 @@ impl Placement {
     /// Composition. `a.multiply(&b)` applies `a` first, then `b`
     /// (consistent with `a.to_matrix().multiply(&b.to_matrix())`).
     pub fn multiply(&self, other: &Self) -> Self {
-        todo!()
+        // `p * M(a) * M(b) = (p * R(a) + t(a)) * R(b) + t(b)`, so the
+        // rotation composes a-then-b and `a`'s position is carried
+        // through `b`'s rotation.
+        Self {
+            position: other.rotation.rotate_vector(&self.position) + other.position,
+            rotation: self.rotation.multiply(&other.rotation),
+        }
     }
 
     pub fn to_matrix(&self) -> Matrix4 {
-        todo!()
+        Matrix4::from_placement(self)
     }
 
     pub fn inverse(&self) -> Self {
-        todo!()
+        // `p' = p * R + t` inverts to `p = (p' - t) * R^-1`, i.e. rotate by
+        // `R^-1` and translate by `-(t * R^-1)`.
+        let rotation = self.rotation.inverse();
+        let neg_position = -self.position;
+        let position = rotation.rotate_vector(&neg_position);
+        Self { position, rotation }
     }
 }
 

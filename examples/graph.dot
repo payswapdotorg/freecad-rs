@@ -1,0 +1,7 @@
+digraph dependencies {
+    "Base" [label="Base\nPart::Box"];
+    "Ball" [label="Ball\nPart::Sphere"];
+    "Stem" [label="Stem\nPart::Cylinder"];
+    "Lift" [label="Lift\nPart::Transform"];
+    "Lift" -> "Ball";
+}

@@ -3,9 +3,41 @@
 # Run from anywhere; artifacts land in examples/.
 set -euo pipefail
 
-# The CLI worker (Task FC-2-e) implements this script:
-#   cargo run -p freecad-rs -- new examples/demo.fcstd --label "Demo model"
-#   ... add box/sphere/cylinder/transform ...
-#   ... recompute, stats, export svg, graph ...
-echo "not implemented yet — owned by worker FC-2-e" >&2
-exit 1
+# Repo root = parent of this script's directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$ROOT"
+
+echo "==> building freecad-rs (release)"
+cargo build --release
+BIN=target/release/freecad-rs
+
+mkdir -p examples
+rm -f examples/demo.fcstd examples/demo.svg examples/graph.dot
+
+echo "==> new document"
+"$BIN" new examples/demo.fcstd --label "Demo model"
+
+echo "==> adding primitives + a parametric transform"
+# NOTE: `--name` belongs to `add` itself, so it comes *before* the shape
+# subcommand (clap 4 rule for mixed positional/subcommand commands).
+"$BIN" add examples/demo.fcstd --name Base box --length 30 --width 20 --height 5
+"$BIN" add examples/demo.fcstd --name Ball sphere --radius 4
+"$BIN" add examples/demo.fcstd --name Stem cylinder --radius 1.5 --height 12
+"$BIN" add examples/demo.fcstd --name Lift transform --source Ball \
+    --translate 0,0,12 --rotate-deg 25
+
+echo "==> parametric change: Ball.Radius 4 -> 6 (touches Ball and Lift)"
+"$BIN" set examples/demo.fcstd Ball Radius 6
+
+echo "==> explicit recompute (idempotent: nothing is touched anymore)"
+"$BIN" recompute examples/demo.fcstd
+
+echo "==> document stats (analytic volume / area, tessellation counts)"
+"$BIN" stats examples/demo.fcstd
+
+echo "==> render + dependency graph"
+"$BIN" export svg examples/demo.fcstd examples/demo.svg --view iso
+"$BIN" graph examples/demo.fcstd examples/graph.dot
+
+echo "done — see examples/ (demo.fcstd, demo.svg, graph.dot)"

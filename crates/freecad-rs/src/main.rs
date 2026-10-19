@@ -71,13 +71,13 @@ pub enum Command {
     Info { file: String },
     /// Per-object analytic volume / surface area.
     Stats { file: String },
-    /// Render a shaded orthographic SVG of the document.
+    /// Export the document to another format.
+    // FC-2-e fix: the task spec, README quick tour and roadmap all invoke
+    // `export svg FILE OUT --view V`; the scaffolded variant had no
+    // format subcommand, making that documented form unparseable.
     Export {
-        file: String,
-        output: String,
-        /// Projection: iso | top | front | right.
-        #[arg(long, default_value = "iso")]
-        view: String,
+        #[command(subcommand)]
+        format: ExportFormat,
     },
     /// Write the dependency graph as Graphviz DOT.
     Graph { file: String, output: String },
@@ -139,6 +139,18 @@ pub enum AddShape {
         /// Uniform scale factor.
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExportFormat {
+    /// Render a shaded orthographic SVG of the document.
+    Svg {
+        file: String,
+        output: String,
+        /// Projection: iso | top | front | right.
+        #[arg(long, default_value = "iso")]
+        view: String,
     },
 }
 
