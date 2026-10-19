@@ -130,6 +130,8 @@ pub fn render_svg<W: Write>(
 ) -> std::io::Result<()> {
     let view_matrix = view.matrix();
     let light = normalized([0.35, 0.35, 0.87]);
+    // Blinn half-vector for a modest specular highlight (view = +z).
+    let halfway = normalized([light[0], light[1], light[2] + 1.0]);
 
     // Pass 1: world -> camera space, and the extent of the projection.
     let mut lo = [f64::INFINITY, f64::INFINITY];
@@ -183,10 +185,14 @@ pub fn render_svg<W: Write>(
                 continue; // degenerate sliver
             }
             let lambert = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
+            let spec = {
+                let h = (n[0] * halfway[0] + n[1] * halfway[1] + n[2] * halfway[2]) / len;
+                h.max(0.0).powi(48) * 0.22
+            };
             tris.push(Tri {
                 depth: (a[2] + b[2] + c[2]) / 3.0,
                 pts: [project(a), project(b), project(c)],
-                shade: 0.30 + 0.62 * lambert.max(0.0),
+                shade: (0.30 + 0.62 * lambert.max(0.0) + spec).min(1.0),
             });
         }
         if tris.is_empty() {
@@ -208,27 +214,24 @@ pub fn render_svg<W: Write>(
         r##"  <rect x="0" y="0" width="960" height="720" fill="#ffffff"/>"##
     )?;
     for (_, name, tris) in groups {
-        // Hairline strokes look crisp on sparse geometry (boxes) but read
-        // as "wireframe" on dense tessellations (spheres at fine
-        // deflection) — curved surfaces shade smoothly without strokes.
-        let stroke_attrs = if tris.len() > 400 {
-            ""
-        } else {
-            r##" stroke="#333333" stroke-width="0.5" stroke-linejoin="round""##
-        };
-        writeln!(out, "  <g{stroke_attrs}>")?;
+        writeln!(out, "  <g>")?;
         writeln!(out, "    <title>{}</title>", xml_escape(name))?;
         for t in tris {
+            let fill = gray(t.shade);
+            // Same-color hairline stroke: SVG rasterizers antialias shared
+            // polygon edges, which leaves visible 1px seams between
+            // adjacent tessellation triangles. Painting each triangle with
+            // its own color as stroke covers the seam exactly — the
+            // standard SVG-mesh trick for smooth-looking surfaces.
             writeln!(
                 out,
-                "    <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\"/>",
+                "    <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{fill}\" stroke=\"{fill}\" stroke-width=\"0.4\" stroke-linejoin=\"round\"/>",
                 t.pts[0][0],
                 t.pts[0][1],
                 t.pts[1][0],
                 t.pts[1][1],
                 t.pts[2][0],
                 t.pts[2][1],
-                gray(t.shade),
             )?;
         }
         writeln!(out, "  </g>")?;
@@ -302,8 +305,11 @@ fn normalized(v: [f64; 3]) -> [f64; 3] {
 /// Map a shade in `[0.30, 0.92]` onto a grayscale color between `#202020`
 /// and `#e8e8e8`.
 fn gray(shade: f64) -> String {
-    let v = (32.0 + 200.0 * shade).round().clamp(0.0, 255.0) as u8;
-    format!("#{v:02x}{v:02x}{v:02x}")
+    // Float-precision rgb() — CSS color values accept decimals. Integer
+    // 8-bit quantization here produced visible contour banding between
+    // adjacent flat-shaded triangles (read as a wireframe mesh).
+    let v = (32.0 + 200.0 * shade).clamp(0.0, 255.0);
+    format!("rgb({v:.2},{v:.2},{v:.2})")
 }
 
 /// Escape text for XML content (`&`, `<`, `>`).
