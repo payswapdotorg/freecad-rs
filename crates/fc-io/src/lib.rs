@@ -62,4 +62,6 @@
 pub mod fcstd;
 pub mod mesh_export;
 
-pub use fcstd::{load_document, save_document, FcstdError, LoadReport};
+pub use fcstd::{
+    load_document, load_document_with_hook, save_document, FcstdError, LoadReport, ObjectHook,
+};

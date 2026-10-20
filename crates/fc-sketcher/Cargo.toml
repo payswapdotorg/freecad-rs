@@ -8,4 +8,5 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+fc-app.workspace = true
 fc-base.workspace = true

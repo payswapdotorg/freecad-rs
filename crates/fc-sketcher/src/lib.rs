@@ -22,6 +22,9 @@
 //! - [`solver`] — `Sketch::solve`, `Sketch::dof`, [`SolveResult`]
 //! - [`xml`] — FreeCAD-style XML fragments (`Sketch::to_xml`,
 //!   [`xml::from_xml`])
+//! - [`sketch_object`] — the document-object wrapper
+//!   ([`SketchObject`], mirroring FreeCAD `Sketcher::SketchObject`;
+//!   depends on `fc-app`, just like Mod/Sketcher depends on App)
 //!
 //! # v1 scope, honestly stated
 //!
@@ -65,11 +68,13 @@
 
 pub mod constraint;
 pub mod geometry;
+pub mod sketch_object;
 pub mod solver;
 pub mod xml;
 
 pub use constraint::{Constraint, ConstraintId, PointPos};
 pub use geometry::{GeoId, Geometry, Point, PointId, Sketch};
+pub use sketch_object::{SketchObject, SolveInfo};
 pub use solver::SolveResult;
 
 use std::fmt;
