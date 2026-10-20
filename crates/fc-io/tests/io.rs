@@ -533,3 +533,43 @@ fn load_report_has_the_documented_fields() {
     assert_eq!(report.skipped, 1);
     assert_eq!(report.warnings.len(), 1);
 }
+
+/// FC-6.1 follow-up regression: a solved-and-saved sketch reloads with
+/// its persisted status (`Valid`), exactly like every other object kind
+/// (FreeCAD stores solved geometry; the solve *info* is the only thing
+/// not persisted — the loader restores content through the non-touching
+/// `restore_sketch` path).
+#[test]
+fn sketch_reloads_with_persisted_status() {
+    let path = temp_path("sketch-status");
+    // A single line segment: no constraints, so the solve trivially
+    // succeeds (0 residual) and the object goes Valid on recompute.
+    let fragment = "<Sketch><Geometry type=\"1\" startx=\"0\" starty=\"0\" \
+                    endx=\"40\" endy=\"0\"/></Sketch>";
+    let sketch = fc_sketcher::xml::from_xml(fragment).unwrap();
+
+    let mut doc = Document::new("t");
+    doc.add(Box::new(fc_sketcher::SketchObject::with_sketch(
+        "Sketch", sketch,
+    )));
+    doc.recompute_all().unwrap();
+    save_document(&doc, &path).unwrap();
+
+    let (doc, report) = load_document(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let object = doc
+        .get_by_name("Sketch")
+        .expect("sketch survived the round-trip");
+    assert_eq!(
+        format!("{:?}", object.status()),
+        format!("{:?}", ObjectStatus::Valid),
+        "loaded sketch keeps its persisted status"
+    );
+    let sketch = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap();
+    assert!(sketch.solved.is_none(), "solve info is not persisted");
+    assert_eq!(sketch.sketch.geometry().len(), 1);
+    cleanup(&path);
+}

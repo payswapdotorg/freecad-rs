@@ -636,7 +636,23 @@ fn sketch_info(file: &str, object: &str) -> Result<(), String> {
         ),
         None => match sketch_object.status() {
             ObjectStatus::Error(reason) => println!("  solve: failed ({reason})"),
-            _ => println!("  solve: not yet solved"),
+            _ => {
+                // No solve info this session and no recorded failure (the
+                // solve info is a recompute product and is not persisted).
+                // Re-derive it read-only: solve a clone of the sketch and
+                // report that outcome, marked as in-memory.
+                let mut probe = sketch_object.sketch.clone();
+                match probe.solve() {
+                    Ok(fc_sketcher::SolveResult::Solved { iterations, residual }) => println!(
+                        "  solve: Solved in {} iteration(s), residual {:.3e}, dof {} (re-derived in memory)",
+                        iterations, residual, probe.dof()
+                    ),
+                    Ok(_) => println!(
+                        "  solve: not converged (re-derived in memory; geometry as persisted)"
+                    ),
+                    Err(err) => println!("  solve: {err} (re-derived in memory)"),
+                }
+            }
         },
     }
     Ok(())

@@ -35,8 +35,11 @@
 //! see [`fc_sketcher::xml`]) stored as a child of the object's
 //! `<ObjectData>` entry — a sibling of its `<Properties>` element, not a
 //! `<Property>` itself. Solve results are **not** persisted: a loaded
-//! sketch carries no `SolveInfo` and is `Touched`, so the next recompute
-//! re-solves it (FreeCAD behavior: the solve is a recompute action).
+//! sketch carries no `SolveInfo`, but it keeps the status the file
+//! records (a solved-and-saved sketch reloads as `Valid`, exactly like
+//! every other object kind — FreeCAD stores solved geometry and does not
+//! re-solve on open); the solve info itself is re-derived by the next
+//! recompute that touches the sketch.
 //!
 //! # v1 scope, honestly stated
 //!
@@ -115,6 +118,20 @@ impl SketchObject {
         // PropertyContainer::touch: the whole point of this method —
         // content changed, so the object must re-solve.
         self.container.touch();
+    }
+
+    /// Swap in sketch content **without** touching the object — the
+    /// loader's restore path. The file's persisted status is the truth
+    /// about the object's state (a saved-and-reloaded sketch that had
+    /// solved keeps `Valid`, exactly like every other object kind and
+    /// like FreeCAD, which stores solved geometry); the solve *info* is
+    /// still dropped (it is a recompute product, not persisted data) and
+    /// re-derived by the next recompute. Only the `.FCStd` loader calls
+    /// this; everything user-facing goes through [`Self::replace_sketch`]
+    /// and its touch.
+    pub fn restore_sketch(&mut self, sketch: Sketch) {
+        self.sketch = sketch;
+        self.solved = None;
     }
 
     /// The solve step (`DocumentObject::execute`): solve the sketch.

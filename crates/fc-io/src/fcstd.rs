@@ -867,7 +867,10 @@ fn store_sketch_fragment(
         Ok(sketch) => {
             let any = object.as_any_mut();
             if let Some(sketch_object) = any.downcast_mut::<SketchObject>() {
-                sketch_object.replace_sketch(sketch);
+                // The loader's restore path: no touch — the file's
+                // persisted status is the truth (a solved-and-saved
+                // sketch reloads as Valid, like every other object kind).
+                sketch_object.restore_sketch(sketch);
             } else {
                 report.warnings.push(format!(
                     "{owner}: <Sketch> element on a non-sketch object — ignored"
@@ -1346,10 +1349,11 @@ mod sketch_persistence_tests {
         let sketch_object = object.as_any().downcast_ref::<SketchObject>().unwrap();
         // The strongest round-trip oracle: identical `to_xml()` output.
         assert_eq!(sketch_object.sketch.to_xml(), original);
-        // Solve results are not persisted: loaded sketches are Touched and
-        // re-solve on the next recompute.
+        // Solve results are not persisted (solve info re-derives on the
+        // next recompute), but the STATUS is: a solved-and-saved sketch
+        // reloads as Valid, like every other object kind (FC-6.1 fix).
         assert_eq!(sketch_object.solved, None);
-        assert_eq!(*sketch_object.status(), ObjectStatus::Touched);
+        assert_eq!(*sketch_object.status(), ObjectStatus::Valid);
         assert_eq!(
             sketch_object.container.get_string("Label"),
             Some("Sketch".into())

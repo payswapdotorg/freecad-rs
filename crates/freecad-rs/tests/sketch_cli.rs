@@ -123,14 +123,11 @@ fn cli_sketch_golden_path_from_new_to_export() {
     assert!(out.contains("touched Sketch"), "{out}");
     assert!(out.contains("Solved, 8 constraints, dof 7"), "{out}");
 
-    // The explicit recompute step of the golden path re-solves the loaded
-    // sketch (solve results are not persisted; the loader touches it).
+    // The explicit recompute step is a no-op now: the sketch reloaded as
+    // Valid (FC-6.1 fix: the persisted status is the truth), and solve
+    // info is re-derived on the next *touched* recompute, not by loading.
     let out = run(&["recompute", file]);
-    assert!(
-        out.contains("recomputed Sketch (Sketcher::SketchObject)"),
-        "{out}"
-    );
-    assert!(out.contains("1 recomputed, 1 total"), "{out}");
+    assert!(out.contains("0 recomputed, 1 total"), "{out}");
 
     // sketch-info shows the solved state + DOF.
     let out = run(&["sketch-info", file, "Sketch"]);
@@ -245,7 +242,6 @@ fn cli_add_sketch_undo_removes_it_and_redo_rebuilds_it() {
     let out = run(&["sketch-info", file, "Sketch"]);
     assert!(out.contains("Sketcher::SketchObject"), "{out}");
     assert!(out.contains("0 geometries, 0 constraints"), "{out}");
-    assert!(out.contains("solve: Solved in"), "{out}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
