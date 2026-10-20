@@ -774,3 +774,72 @@ fn quantity_construction_and_getters() {
         Quantity::from_str("2 s").unwrap()
     );
 }
+
+// ------------------------------------------------------- WOJ helpers ---
+
+#[test]
+fn unit_is_angle() {
+    assert!(Unit::degree().is_angle());
+    assert!(!Unit::meter().is_angle());
+    assert!(!Unit::second().is_angle());
+    assert!(!Unit::dimensionless().is_angle());
+}
+
+#[test]
+fn unit_try_sqrt_halves_even_powers() {
+    // Odd power: no unit-exact sqrt.
+    assert_eq!(Unit::meter().try_sqrt(), None);
+    // Even powers halve, positive and negative.
+    assert_eq!(Unit::meter().powi(2).try_sqrt(), Some(Unit::meter()));
+    assert_eq!(
+        Unit::meter().powi(-2).try_sqrt(),
+        Some(Unit::meter().powi(-1))
+    );
+    // Compound signatures work when every power is even ...
+    assert_eq!(
+        (Unit::meter() * Unit::kilogram()).powi(2).try_sqrt(),
+        Some(Unit::meter() * Unit::kilogram())
+    );
+    // ... and fail as a whole when any power is odd.
+    assert_eq!((Unit::meter().powi(2) * Unit::second()).try_sqrt(), None);
+    // Dimensionless is trivially even.
+    assert_eq!(
+        Unit::dimensionless().try_sqrt(),
+        Some(Unit::dimensionless())
+    );
+}
+
+#[test]
+fn unit_checked_powi_rejects_overflow() {
+    assert_eq!(Unit::meter().checked_powi(2), Some(Unit::meter().powi(2)));
+    assert_eq!(Unit::meter().checked_powi(-2), Some(Unit::meter().powi(-2)));
+    assert_eq!(Unit::meter().checked_powi(0), Some(Unit::dimensionless()));
+    assert_eq!(Unit::meter().checked_powi(200), None);
+    assert_eq!(Unit::meter().powi(5).checked_powi(40), None, "5*40 > 127");
+    // The unchecked powi still saturates (existing behavior, unchanged).
+    assert_eq!(Unit::meter().powi(200).power(Dimension::Length), 127);
+}
+
+#[test]
+fn quantity_try_sqrt_and_abs() {
+    assert_eq!(q("16 mm^2").try_sqrt(), Some(q("4 mm")));
+    assert_eq!(q("9").try_sqrt(), Some(q("3")));
+    assert_eq!(q("2 mm").try_sqrt(), None, "odd power is rejected");
+    assert_eq!(q("-3 mm").abs(), q("3 mm"));
+    assert_eq!(q("-2.5").abs(), q("2.5"));
+    // abs never touches the unit.
+    assert_eq!(q("-2 s").abs().unit(), Unit::second());
+}
+
+#[test]
+fn quantity_try_powi_checks_unit_range() {
+    assert_eq!(q("2 mm").try_powi(3), Some(q("8 mm^3")));
+    let inverted = q("2 mm").try_powi(-1).expect("representable");
+    assert_eq!(inverted.value(), 0.5);
+    assert_eq!(inverted.unit().to_string(), "1/mm");
+    assert_eq!(
+        q("1 mm^5").try_powi(40),
+        None,
+        "would overflow the ±127 power limit"
+    );
+}
