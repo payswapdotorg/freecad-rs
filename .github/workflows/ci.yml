@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, "work/**"]
   pull_request:
 
 jobs:
@@ -14,6 +14,8 @@ jobs:
           components: clippy, rustfmt
       - name: Build
         run: cargo build --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format
