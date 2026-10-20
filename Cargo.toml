@@ -5,6 +5,7 @@ members = [
     "crates/fc-app",
     "crates/fc-part",
     "crates/fc-io",
+    "crates/fc-sketcher",
     "crates/freecad-rs",
 ]
 
