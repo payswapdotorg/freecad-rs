@@ -60,5 +60,6 @@
 //!   (geometry loss, parameters kept).
 
 pub mod fcstd;
+pub mod mesh_export;
 
 pub use fcstd::{load_document, save_document, FcstdError, LoadReport};
