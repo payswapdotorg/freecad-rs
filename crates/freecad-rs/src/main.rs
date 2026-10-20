@@ -4,7 +4,9 @@
 //! (when needed) and saves back, mirroring how a document lives on disk.
 //! Run `docs/cli.md` for the full walkthrough.
 
+mod calc;
 mod commands;
+mod sketch;
 mod svg;
 
 use clap::{Parser, Subcommand};
@@ -102,6 +104,23 @@ pub enum Command {
     },
     /// Show the undo/redo history of FILE (undo-stack labels + redo count).
     History { file: String },
+    /// Evaluate a pure-quantity arithmetic expression with unit checking
+    /// (e.g. `"25 mm + 3 cm"`, `"9.8 m/s^2 * 2 kg"`). No document needed.
+    Calc {
+        /// Quantity expression (quote it in the shell).
+        expression: String,
+    },
+    /// Solve a sketch stored as a FreeCAD-style `<Sketch>` XML fragment
+    /// and print the outcome + resulting geometry.
+    SketchSolve {
+        /// Path to the sketch XML fragment.
+        file: String,
+    },
+    /// Print a sketch fragment's geometry and constraints without solving.
+    SketchShow {
+        /// Path to the sketch XML fragment.
+        file: String,
+    },
     /// Document metadata.
     Info { file: String },
     /// Per-object analytic volume / surface area.

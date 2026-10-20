@@ -1,0 +1,15 @@
+<Sketch>
+  <Geometry type="1" startx="0.05" starty="0.02" endx="40.1" endy="0.05"/>
+  <Geometry type="1" startx="40.1" starty="0.05" endx="39.9" endy="30.2"/>
+  <Geometry type="1" startx="39.9" starty="30.2" endx="0.1" endy="29.8"/>
+  <Geometry type="1" startx="0.1" starty="29.8" endx="0.05" endy="0.02"/>
+  <Geometry type="2" centerx="60.0" centery="10.0" radius="7.3"/>
+  <Constraint type="0" first="0" firstpos="2" second="1" secondpos="1"/>
+  <Constraint type="0" first="1" firstpos="2" second="2" secondpos="1"/>
+  <Constraint type="0" first="2" firstpos="2" second="3" secondpos="1"/>
+  <Constraint type="0" first="3" firstpos="2" second="0" secondpos="1"/>
+  <Constraint type="1" first="0"/>
+  <Constraint type="2" first="1"/>
+  <Constraint type="6" first="0" firstpos="1" second="0" secondpos="2" value="40.0"/>
+  <Constraint type="8" first="4" value="9.0"/>
+</Sketch>

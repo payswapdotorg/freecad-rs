@@ -24,13 +24,17 @@ and the `.FCStd` file format:
 | FreeCAD (C++)            | here (Rust)    | what it is                                              |
 | ------------------------ | -------------- | ------------------------------------------------------- |
 | `src/Base`               | `fc-base`      | `Vector3`, `Matrix4`, quaternion `Rotation`, `Placement`, `BoundBox3` |
+| `src/Base/Quantity.cpp`   | `fc-base`      | units & quantity system: 8-dimension `Unit`, `Quantity` arithmetic with dimension checking, parser (`"9.8 m/s^2"`, `"30°"`), conversion table incl. affine `C`/`F` |
 | `src/App`                | `fc-app`       | `Document`, `DocumentObject`, typed `Property` system, dependency-ordered recompute with cycle detection |
-| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans |
+| `src/App/Transactions.cpp`| `fc-app`      | undo/redo: transaction stack with add/del/change records, property snapshots, auto-record on mutation, `undo`/`redo`/`history` CLI |
 | `src/App/Expression.cpp` | `fc-app`       | expression engine: parser, degree-mode trig, `<<Label>>.Property` references, document bindings with dependency-graph edges + cycle detection |
+| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans |
+| `src/Mod/Sketcher` (v1)  | `fc-sketcher`   | 2D geometry (point/line/circle/arc), 13 constraint kinds, Levenberg-Marquardt constraint solver with DOF report, FreeCAD-style `<Sketch>` XML fragments |
 | `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings), OBJ/STL mesh export |
-| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, boolean features, expressions, OBJ/STL/SVG export, dependency graphs |
+| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, expressions, quantity arithmetic (`calc`), sketch solve/show, OBJ/STL/SVG export, dependency graphs |
 
-**Not implemented (yet, if ever):** OCCT NURBS/BRep booleans, sketcher,
+**Not implemented (yet, if ever):** OCCT NURBS/BRep booleans, sketch
+wiring into documents (`Sketcher::SketchObject` + PartDesign features),
 GUI, Python scripting, STEP import/export. Real FreeCAD files load with
 their parameters intact; OCCT `.brp` shape payloads are detected and
 skipped with a warning rather than misparsed — see `fc-io` crate docs.

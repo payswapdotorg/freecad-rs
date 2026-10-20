@@ -16,4 +16,5 @@ fc-base.workspace = true
 fc-app.workspace = true
 fc-part.workspace = true
 fc-io.workspace = true
+fc-sketcher.workspace = true
 clap.workspace = true

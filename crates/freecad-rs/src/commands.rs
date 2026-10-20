@@ -51,6 +51,9 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Undo { file, steps } => undo(&file, steps),
         Command::Redo { file, steps } => redo(&file, steps),
         Command::History { file } => history(&file),
+        Command::Calc { expression } => calc(&expression),
+        Command::SketchSolve { file } => crate::sketch::run_solve(&file),
+        Command::SketchShow { file } => crate::sketch::run_show(&file),
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
         Command::Export { format } => match format {
@@ -817,6 +820,13 @@ fn history(file: &str) -> Result<(), String> {
         );
     }
     println!("redo available: {redo_count}");
+    Ok(())
+}
+
+/// `calc` — quantity arithmetic with unit checking (see `calc.rs`).
+fn calc(expression: &str) -> Result<(), String> {
+    let q = crate::calc::eval(expression)?;
+    println!("{}", crate::calc::format_result(&q));
     Ok(())
 }
 

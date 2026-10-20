@@ -363,3 +363,39 @@ emits one `o` group per document object with shared vertices; STL
 merges everything into one solid (the format carries no names) with
 exact `84 + 50·n` binary sizing and outward normals from the CCW
 winding.
+
+## Quantity arithmetic: `calc`
+
+```sh
+freecad-rs calc "25 mm + 3 cm"          # 55 mm
+freecad-rs calc "9.8 m/s^2 * 2 kg"      # 19600 mm*kg/s^2
+freecad-rs calc "1 m + 1 kg"            # error: dimension mismatch
+freecad-rs calc "30° + 30°"             # 60° ...in canonical form: 60 deg
+```
+
+`calc` evaluates pure-quantity arithmetic with unit checking
+(`fc_base::quantity`): dimension-checked `+`/`-`, unit-combining
+`*`/`/`, unary sign, parentheses, integer `^` powers. Values are stored
+and printed in canonical units (mm, kg, s, A, K, mol, cd, deg).
+
+## Sketches: `sketch-solve` / `sketch-show`
+
+```sh
+freecad-rs sketch-solve examples/sketch-quad.xml
+#   sketch: 5 geometries, 8 constraints, DOF 7 (underconstrained)
+#   solve: Solved in 4 iteration(s), residual 7.9e-14
+#   geometry: ...
+freecad-rs sketch-show examples/sketch-quad.xml
+```
+
+Sketches are FreeCAD-style `<Sketch>` XML fragments: `<Geometry>`
+elements (point `0`, line `1`, circle `2`, arc `3`) and `<Constraint>`
+elements with the crate's documented ordinals (`0` coincident,
+`1` horizontal, `2` vertical, `3` parallel, `4` perpendicular,
+`5`/`6`/`7` distance/X/Y, `8` radius, `9` diameter, `10` equal,
+`11` angle, `12` point-on-object). `sketch-solve` runs the
+Levenberg-Marquardt solver and prints the DOF report plus the solved
+geometry (unsolved sketches are left bit-identical); `sketch-show`
+prints geometry + constraints without solving. Wiring sketches into
+`Document` objects (a `Sketcher::SketchObject`, then PartDesign-style
+features) is the next roadmap wave.

@@ -349,6 +349,7 @@ dependencies = [
  "fc-base",
  "fc-io",
  "fc-part",
+ "fc-sketcher",
 ]
 
 [[package]]
