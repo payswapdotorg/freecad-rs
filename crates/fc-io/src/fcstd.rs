@@ -12,6 +12,7 @@ use fc_part::features::{
     TorusFeature, TransformFeature,
 };
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
+use fc_sketcher::SketchObject;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -174,6 +175,18 @@ fn build_document_xml(
             side_files.push((file, bytes));
         }
         xml.push_str("   </Properties>\n");
+        // Sketch content (`Sketcher::SketchObject`): geometry and
+        // constraints are object data, not properties — FreeCAD keeps them
+        // on the object itself, and so do we, as one `<Sketch>` fragment
+        // (the exact element `Sketch::to_xml()` produces) emitted as a
+        // child of `<Object>`, next to `<Properties>`. The fragment's own
+        // two-space child indent is preserved relative to the 3-space
+        // `<Object>` child base, so it nests consistently with the
+        // surrounding one-space-per-level writer style (see
+        // `push_indented_fragment`).
+        if let Some(fragment) = sketch_fragment(obj) {
+            push_indented_fragment(&mut xml, &fragment, 3);
+        }
         // Expression bindings (FreeCAD persists them as children of the
         // <Object> element, after the properties).
         for (path, expression) in obj.expressions() {
@@ -255,6 +268,34 @@ fn property_xml(value: &Property) -> (&'static str, String) {
     }
 }
 
+/// The `<Sketch>` fragment of a sketch object, if it is one (`None` for
+/// every other object type). Save-side counterpart of the load-side
+/// `store_sketch_fragment`.
+fn sketch_fragment(obj: &dyn DocumentObject) -> Option<String> {
+    obj.as_any()
+        .downcast_ref::<SketchObject>()
+        .map(|sketch_object| sketch_object.sketch.to_xml())
+}
+
+/// Append a `<Sketch>` fragment at `base_indent` spaces. The fragment's
+/// internal indentation is uniform (0 for the `<Sketch>`/`</Sketch>`
+/// lines, 2 for each child), so re-emitting every non-blank line at
+/// `base_indent + <its own leading spaces>` preserves the fragment's
+/// relative shape exactly — the sketch parser is whitespace-tolerant and
+/// the result nests cleanly inside `<Object>`.
+fn push_indented_fragment(xml: &mut String, fragment: &str, base_indent: usize) {
+    for line in fragment.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let relative = line.len() - trimmed.len();
+        xml.push_str(&" ".repeat(base_indent + relative));
+        xml.push_str(trimmed);
+        xml.push('\n');
+    }
+}
+
 /// Computed geometry of a part feature, if any: primitives carry their
 /// analytic `TopoShape`, transform features their result mesh. Objects
 /// without geometry (or transforms without a result) return `None`.
@@ -288,6 +329,30 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
 /// file's ids are cosmetic — links resolve by name) and each gets its
 /// persisted properties, status and geometry where possible.
 pub fn load_document(path: &Path) -> Result<(Document, LoadReport), FcstdError> {
+    load_document_with_hook(path, None)
+}
+
+/// Per-object mutation hook for [`load_document_with_hook`]: receives the
+/// object's file name and the fully-built object (properties, status and
+/// sketch content already restored) just before it is added to the
+/// document.
+pub type ObjectHook<'a> = dyn FnMut(&str, &mut dyn DocumentObject) + 'a;
+
+/// Load a `.FCStd`, letting `mutate` visit every fully-built object with
+/// mutable access right before it enters the document.
+///
+/// This is the load-time escape hatch for content operations the document
+/// API cannot express once an object is inside a `Document` (which
+/// deliberately exposes no mutable object access): e.g. the CLI's
+/// `sketch-import` swaps a `Sketcher::SketchObject`'s content via
+/// `replace_sketch` (which touches the object) and marks the objects that
+/// link to it as `Touched` so they re-execute on the next recompute. The
+/// hook runs while objects are still outside the document, so touch
+/// cascades and journal records are the caller's responsibility.
+pub fn load_document_with_hook(
+    path: &Path,
+    mutate: Option<&mut ObjectHook<'_>>,
+) -> Result<(Document, LoadReport), FcstdError> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(file).map_err(zip_err)?;
 
@@ -307,7 +372,7 @@ pub fn load_document(path: &Path) -> Result<(Document, LoadReport), FcstdError> 
 
     let mut report = LoadReport::default();
     let mut doc = Document::new("untitled");
-    parse_document(&xml_bytes, &mut zip, &mut doc, &mut report)?;
+    parse_document(&xml_bytes, &mut zip, &mut doc, &mut report, mutate)?;
     Ok((doc, report))
 }
 
@@ -419,6 +484,7 @@ fn parse_document(
     zip: &mut zip::ZipArchive<std::fs::File>,
     doc: &mut Document,
     report: &mut LoadReport,
+    mut mutate: Option<&mut ObjectHook<'_>>,
 ) -> Result<(), FcstdError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
@@ -461,7 +527,7 @@ fn parse_document(
                 b"Properties" => parse_document_properties(&mut reader, &mut buf, doc, report)?,
                 b"Objects" => parse_objects_section(&mut reader, &mut buf, &mut built, report)?,
                 b"ObjectData" => {
-                    parse_object_data_section(&mut reader, &mut buf, &mut built, zip, report)?
+                    parse_object_data_section(&mut reader, &mut buf, xml, &mut built, zip, report)?
                 }
                 _ => skip_element(&mut reader, &mut buf)?,
             },
@@ -481,7 +547,12 @@ fn parse_document(
     // here on. `add` may suffix names for uniqueness (Box, Box001, ...) —
     // only possible with duplicate names in the file, which we report.
     for (file_name, object) in built {
-        if let Some(object) = object {
+        if let Some(mut object) = object {
+            // The caller's hook sees the finished object (properties,
+            // status, sketch content) before the document takes ownership.
+            if let Some(mutate) = mutate.as_deref_mut() {
+                mutate(&file_name, object.as_mut());
+            }
             let id = doc.add(object);
             let final_name = doc.get(id).map(DocumentObject::name).unwrap_or_default();
             if final_name != file_name {
@@ -613,6 +684,7 @@ fn parse_objects_section(
 fn parse_object_data_section(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
+    xml: &[u8],
     built: &mut Vec<(String, Option<Box<dyn DocumentObject>>)>,
     zip: &mut zip::ZipArchive<std::fs::File>,
     report: &mut LoadReport,
@@ -633,7 +705,7 @@ fn parse_object_data_section(
                     Some(i) => {
                         let owner = built[i].0.clone();
                         if let Some(object) = built[i].1.as_mut() {
-                            parse_object_properties(reader, buf, object, &owner, zip, report)?;
+                            parse_object_properties(reader, buf, xml, object, &owner, zip, report)?;
                         }
                         // An object that failed to build was already reported
                         // (with its skip) in the <Objects> section.
@@ -659,10 +731,13 @@ fn parse_object_data_section(
 }
 
 /// Consume one `<Object>`'s properties (called after its Start event;
-/// returns at its End event).
+/// returns at its End event). `xml` is the whole Document.xml source —
+/// needed to extract `<Sketch>` fragments byte-exactly (they are object
+/// data, not `<Property>` elements).
 fn parse_object_properties(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
+    xml: &[u8],
     object: &mut Box<dyn DocumentObject>,
     owner: &str,
     zip: &mut zip::ZipArchive<std::fs::File>,
@@ -713,12 +788,96 @@ fn parse_object_properties(
                     expressions.insert(path, expression);
                 }
             }
+            // The sketch content of a `Sketcher::SketchObject`: a
+            // `<Sketch>` fragment that is object data, not a `<Property>`
+            // (our writer emits it as a child of `<Object>`, next to
+            // `<Properties>`; the sketch parser is whitespace-tolerant).
+            Event::Start(e) if e.name().as_ref() == b"Sketch" => {
+                let inner = raw_inner_xml(xml, reader, buf, b"Sketch")?;
+                store_sketch_fragment(object, &format!("<Sketch>{inner}</Sketch>"), owner, report);
+            }
+            Event::Empty(e) if e.name().as_ref() == b"Sketch" => {
+                // A self-closing `<Sketch/>` is an empty sketch.
+                store_sketch_fragment(object, "<Sketch/>", owner, report);
+            }
             Event::End(e) if e.name().as_ref() == b"Object" => return Ok(()),
             Event::Eof => {
                 return Err(FcstdError::Xml("unterminated <Object> element".to_string()));
             }
             // The enclosing <Properties> start/end and stray text.
             _ => continue,
+        }
+    }
+}
+
+/// Called right after a `<name>` Start event: consumes events up to the
+/// matching `</name>` and returns the **raw source bytes** between the
+/// two tags, so the fragment reaches the sketch parser exactly as it was
+/// written (no event re-serialization, no attribute churn).
+fn raw_inner_xml(
+    xml: &[u8],
+    reader: &mut XmlReader<'_>,
+    buf: &mut Vec<u8>,
+    name: &[u8],
+) -> Result<String, FcstdError> {
+    let start = reader.buffer_position() as usize;
+    let mut depth = 1usize;
+    loop {
+        match next_event(reader, buf)? {
+            Event::Start(e) if e.name().as_ref() == name => depth += 1,
+            Event::End(e) if e.name().as_ref() == name => {
+                depth -= 1;
+                if depth == 0 {
+                    // buffer_position() is past the closing tag; the tag's
+                    // own '<' is the LAST '<' in the range, so cutting there
+                    // returns exactly the bytes between the two tags.
+                    let end = reader.buffer_position() as usize;
+                    let range = &xml[start..end];
+                    let tag_start = range.iter().rposition(|&b| b == b'<').ok_or_else(|| {
+                        FcstdError::Xml("malformed element: closing tag not found".to_string())
+                    })?;
+                    return Ok(String::from_utf8_lossy(&range[..tag_start]).into_owned());
+                }
+            }
+            Event::Eof => {
+                return Err(FcstdError::Xml(
+                    "unexpected end of Document.xml".to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parse a `<Sketch>` fragment and store it into `object` when that
+/// object is a `Sketcher::SketchObject` (via `replace_sketch`, which
+/// touches the object — loaded sketch content always re-solves on the
+/// next recompute, exactly like every other loaded object re-executes).
+/// Anything else is a recoverable defect reported through the warnings
+/// channel: a malformed fragment, or a `<Sketch>` element on a non-sketch
+/// object. The loader reports + continues, mirroring how it treats
+/// unreadable shape payloads.
+fn store_sketch_fragment(
+    object: &mut Box<dyn DocumentObject>,
+    fragment: &str,
+    owner: &str,
+    report: &mut LoadReport,
+) {
+    match fc_sketcher::xml::from_xml(fragment) {
+        Ok(sketch) => {
+            let any = object.as_any_mut();
+            if let Some(sketch_object) = any.downcast_mut::<SketchObject>() {
+                sketch_object.replace_sketch(sketch);
+            } else {
+                report.warnings.push(format!(
+                    "{owner}: <Sketch> element on a non-sketch object — ignored"
+                ));
+            }
+        }
+        Err(err) => {
+            report.warnings.push(format!(
+                "{owner}: malformed <Sketch> fragment: {err} — sketch content skipped"
+            ));
         }
     }
 }
@@ -1062,6 +1221,391 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "Part::Transform" => Some(Box::new(TransformFeature::new(name))),
         "Part::Cut" | "Part::Fuse" | "Part::Common" => BooleanKind::from_type_name(type_id)
             .map(|kind| Box::new(BooleanFeature::new(name, kind)) as _),
+        "Sketcher::SketchObject" => Some(Box::new(SketchObject::new(name))),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Sketcher::SketchObject persistence
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sketch_persistence_tests {
+    use super::*;
+    use fc_part::features::TransformFeature;
+    use fc_sketcher::constraint::Constraint;
+    use fc_sketcher::geometry::{Geometry, Point};
+    use fc_sketcher::xml::from_xml;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temp_path(tag: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "fcrs-woi-fcstd-{}-{}.fcstd",
+            tag,
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ))
+    }
+
+    /// Two lines sharing a corner, the corner pinned horizontal: 8
+    /// parameters, 2 (coincident) + 1 (horizontal) = 3 constraint
+    /// dimensions -> DOF 5.
+    fn corner_sketch() -> fc_sketcher::Sketch {
+        let mut sk = fc_sketcher::Sketch::new();
+        let a = sk.add_geometry(Geometry::LineSegment {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(40.5, 0.25),
+        });
+        let b = sk.add_geometry(Geometry::LineSegment {
+            start: Point::new(40.5, 0.25),
+            end: Point::new(40.25, 30.75),
+        });
+        sk.add_constraint(Constraint::Coincident {
+            g1: a,
+            pos1: fc_sketcher::PointPos::End,
+            g2: b,
+            pos2: fc_sketcher::PointPos::Start,
+        })
+        .unwrap();
+        sk.add_constraint(Constraint::Horizontal { g: a }).unwrap();
+        sk
+    }
+
+    /// A one-circle sketch (fresh content for import-style swaps).
+    fn circle_sketch() -> fc_sketcher::Sketch {
+        let mut sk = fc_sketcher::Sketch::new();
+        sk.add_geometry(Geometry::Circle {
+            center: Point::new(5.0, 6.0),
+            radius: 2.5,
+        });
+        sk
+    }
+
+    fn sketch_of(doc: &Document, name: &str) -> fc_sketcher::Sketch {
+        doc.get_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<SketchObject>()
+            .unwrap()
+            .sketch
+            .clone()
+    }
+
+    fn read_document_xml(path: &Path) -> String {
+        let file = std::fs::File::open(path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut entry = zip.by_name("Document.xml").unwrap();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        text
+    }
+
+    /// Write a `.FCStd` archive whose Document.xml is exactly `xml` (the
+    /// craft-a-file style of the io integration tests).
+    fn craft_fcstd(path: &Path, xml: &str) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("Document.xml", options).unwrap();
+        zip.write_all(xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+
+    /// Does `object` carry a Link/LinkList property pointing at `target`?
+    fn links_to(object: &dyn DocumentObject, target: &str) -> bool {
+        object.properties().values().any(|value| match value {
+            Property::Link(name) => name == target,
+            Property::LinkList(names) => names.iter().any(|name| name == target),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn sketch_object_round_trips_byte_identically() {
+        let path = temp_path("roundtrip");
+
+        let mut doc = Document::new("test");
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            corner_sketch(),
+        )));
+        doc.recompute_all().unwrap();
+        let original = sketch_of(&doc, "Sketch").to_xml();
+        save_document(&doc, &path).unwrap();
+
+        let (loaded, report) = load_document(&path).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.objects, 1);
+        assert_eq!(report.skipped, 0);
+
+        let object = loaded.get_by_name("Sketch").unwrap();
+        assert_eq!(object.type_name(), "Sketcher::SketchObject");
+        let sketch_object = object.as_any().downcast_ref::<SketchObject>().unwrap();
+        // The strongest round-trip oracle: identical `to_xml()` output.
+        assert_eq!(sketch_object.sketch.to_xml(), original);
+        // Solve results are not persisted: loaded sketches are Touched and
+        // re-solve on the next recompute.
+        assert_eq!(sketch_object.solved, None);
+        assert_eq!(*sketch_object.status(), ObjectStatus::Touched);
+        assert_eq!(
+            sketch_object.container.get_string("Label"),
+            Some("Sketch".into())
+        );
+        assert_eq!(
+            sketch_object.container.get_placement("Placement"),
+            Some(Placement::IDENTITY)
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn empty_sketch_round_trips() {
+        let path = temp_path("empty");
+        let mut doc = Document::new("test");
+        doc.add(Box::new(SketchObject::new("Sketch")));
+        doc.recompute_all().unwrap();
+        save_document(&doc, &path).unwrap();
+
+        let (loaded, report) = load_document(&path).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let object = loaded.get_by_name("Sketch").unwrap();
+        let sketch_object = object.as_any().downcast_ref::<SketchObject>().unwrap();
+        assert_eq!(sketch_object.sketch.to_xml(), "<Sketch>\n</Sketch>\n");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn document_xml_embeds_the_sketch_fragment_as_object_data() {
+        let path = temp_path("embed");
+        let mut doc = Document::new("test");
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            corner_sketch(),
+        )));
+        doc.recompute_all().unwrap();
+        save_document(&doc, &path).unwrap();
+
+        let xml = read_document_xml(&path);
+        // One <Sketch> element, indented as a child of <Object> (3 spaces),
+        // with its own children kept at the fragment's relative indent.
+        assert!(xml.contains("   <Sketch>\n"), "{xml}");
+        assert!(xml.contains("     <Geometry type=\"1\" "), "{xml}");
+        assert!(xml.contains("     <Constraint type=\"0\" "), "{xml}");
+        assert!(xml.contains("   </Sketch>\n"), "{xml}");
+        // It sits after the object's <Properties> (it is object data, not
+        // a property) and is not itself wrapped in a <Property> element.
+        let object_section = xml.split("<Object name=\"Sketch\">").nth(1).unwrap();
+        let properties_end = object_section.find("</Properties>").unwrap();
+        let sketch_start = object_section.find("<Sketch>").unwrap();
+        assert!(properties_end < sketch_start);
+        assert!(!xml.contains("<Property name=\"Sketch\""));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sketch_and_box_survive_a_round_trip_together() {
+        let path = temp_path("mixed");
+        let mut doc = Document::new("test");
+        doc.add(Box::new(BoxFeature::new("Base"))); // default 10x10x10
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            corner_sketch(),
+        )));
+        doc.recompute_all().unwrap();
+        // The solve may have adjusted the geometry; compare against the
+        // sketch exactly as it was saved.
+        let original = sketch_of(&doc, "Sketch").to_xml();
+        save_document(&doc, &path).unwrap();
+
+        let (loaded, report) = load_document(&path).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.objects, 2);
+
+        let object = loaded.get_by_name("Base").unwrap();
+        assert_eq!(object.type_name(), "Part::Box");
+        assert_eq!(
+            object.properties().get("Length"),
+            Some(&Property::Float(10.0))
+        );
+        assert_eq!(*object.status(), ObjectStatus::Valid);
+
+        let object = loaded.get_by_name("Sketch").unwrap();
+        let sketch_object = object.as_any().downcast_ref::<SketchObject>().unwrap();
+        assert_eq!(sketch_object.sketch.to_xml(), original);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn malformed_sketch_fragment_warns_and_the_rest_loads() {
+        let path = temp_path("malformed");
+        craft_fcstd(
+            &path,
+            r##"<Document SchemaVersion="4" ProgramVersion="test" FileVersion="1">
+ <Objects Count="2" Dependencies="1">
+  <Object type="Part::Box" name="Box" id="1"/>
+  <Object type="Sketcher::SketchObject" name="Sketch" id="2"/>
+ </Objects>
+ <ObjectData Count="2">
+  <Object name="Box">
+   <Properties Count="1">
+    <Property name="Length" type="App::PropertyFloat">
+     <Float value="3.5"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="Sketch">
+   <Properties Count="1">
+    <Property name="Label" type="App::PropertyString">
+     <String value="Mysketch"/>
+    </Property>
+   </Properties>
+   <Sketch>
+    <Bogus/>
+   </Sketch>
+  </Object>
+ </ObjectData>
+</Document>
+"##,
+        );
+
+        let (doc, report) = load_document(&path).unwrap();
+        // The bad fragment is a warning, not an error: the loader reports
+        // and continues.
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Sketch") && w.contains("malformed <Sketch> fragment")),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(report.objects, 2);
+        assert_eq!(report.skipped, 0);
+
+        // The other object is fully intact.
+        let object = doc.get_by_name("Box").unwrap();
+        assert_eq!(
+            object.properties().get("Length"),
+            Some(&Property::Float(3.5))
+        );
+
+        // The sketch object exists with its label but no content.
+        let object = doc.get_by_name("Sketch").unwrap();
+        let sketch_object = object.as_any().downcast_ref::<SketchObject>().unwrap();
+        assert_eq!(
+            sketch_object.container.get_string("Label"),
+            Some("Mysketch".into())
+        );
+        assert!(sketch_object.sketch.geometry().is_empty());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sketch_element_on_a_non_sketch_object_is_ignored_with_a_warning() {
+        let path = temp_path("stray");
+        craft_fcstd(
+            &path,
+            r##"<Document SchemaVersion="4" ProgramVersion="test" FileVersion="1">
+ <Objects Count="1" Dependencies="1">
+  <Object type="Part::Box" name="Box" id="1"/>
+ </Objects>
+ <ObjectData Count="1">
+  <Object name="Box">
+   <Properties Count="0">
+   </Properties>
+   <Sketch>
+    <Geometry type="0" x="1" y="2"/>
+   </Sketch>
+  </Object>
+ </ObjectData>
+</Document>
+"##,
+        );
+
+        let (doc, report) = load_document(&path).unwrap();
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Box") && w.contains("<Sketch> element on a non-sketch object")),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(report.objects, 1);
+        assert!(doc.get_by_name("Box").is_some());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_hook_swaps_sketch_content_and_touches_dependents() {
+        let path = temp_path("hook");
+
+        // Sketch + a dependent that links to it (Part::Transform with
+        // Source=Sketch). The transform cannot execute (a sketch has no
+        // computed mesh), so it sits in Error — which is fine here: the
+        // hook must touch it so the next recompute re-evaluates it.
+        let mut doc = Document::new("test");
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            corner_sketch(),
+        )));
+        let mut transform = TransformFeature::new("Dep");
+        transform
+            .container
+            .set("Source", Property::Link("Sketch".to_string()));
+        doc.add(Box::new(transform));
+        let _ = doc.recompute_all(); // transform fails on purpose
+
+        save_document(&doc, &path).unwrap();
+        let original_status = doc.get_by_name("Dep").unwrap().status().clone();
+        assert!(matches!(original_status, ObjectStatus::Error(_)));
+
+        // Import-style hook: swap the sketch, touch everything linking to
+        // it (this is exactly what `sketch-import` does).
+        let fresh = circle_sketch();
+        let fresh_xml = fresh.to_xml();
+        let mut hook = |name: &str, object: &mut dyn DocumentObject| {
+            if name == "Sketch" {
+                object
+                    .as_any_mut()
+                    .downcast_mut::<SketchObject>()
+                    .expect("target must be a SketchObject")
+                    .replace_sketch(fresh.clone());
+            } else if links_to(object, "Sketch") {
+                object.set_status(ObjectStatus::Touched);
+            }
+        };
+        let (loaded, report) = load_document_with_hook(&path, Some(&mut hook)).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        // The content swap took, byte-identically.
+        assert_eq!(sketch_of(&loaded, "Sketch").to_xml(), fresh_xml);
+        let object = loaded.get_by_name("Sketch").unwrap();
+        assert_eq!(*object.status(), ObjectStatus::Touched);
+        // The dependent was touched (its persisted status was Error).
+        let object = loaded.get_by_name("Dep").unwrap();
+        assert_eq!(*object.status(), ObjectStatus::Touched);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parsed_fragments_round_trip_through_the_parser_too() {
+        // Save-side fragment -> from_xml -> to_xml is the identity, the
+        // property the whole persistence story leans on.
+        let sketch = corner_sketch();
+        let xml = sketch.to_xml();
+        let parsed = from_xml(&xml).unwrap();
+        assert_eq!(parsed.to_xml(), xml);
+        assert_eq!(parsed.dof(), sketch.dof());
     }
 }

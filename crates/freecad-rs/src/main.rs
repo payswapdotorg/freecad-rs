@@ -121,6 +121,32 @@ pub enum Command {
         /// Path to the sketch XML fragment.
         file: String,
     },
+    /// Import a `<Sketch>` XML fragment into an existing
+    /// `Sketcher::SketchObject` in the document (which must exist and be a
+    /// sketch object), touch it + its dependents, recompute and save.
+    SketchImport {
+        file: String,
+        /// Sketch object name.
+        object: String,
+        /// Path to the sketch XML fragment to import.
+        fragment: String,
+    },
+    /// Export a `Sketcher::SketchObject`'s content as a `<Sketch>` XML
+    /// fragment (no recompute).
+    SketchExport {
+        file: String,
+        /// Sketch object name.
+        object: String,
+        /// Output path for the fragment.
+        output: String,
+    },
+    /// Show a sketch object's geometry/constraint counts, DOF and last
+    /// solve result (or "not yet solved").
+    SketchInfo {
+        file: String,
+        /// Sketch object name.
+        object: String,
+    },
     /// Document metadata.
     Info { file: String },
     /// Per-object analytic volume / surface area.
@@ -203,6 +229,9 @@ pub enum AddShape {
         #[arg(long)]
         tool: String,
     },
+    /// Sketcher::SketchObject — a 2D parametric sketch as a document
+    /// object. Created empty; fill it with `sketch-import`.
+    Sketch,
     /// Part::Fuse — union of the Base and Tool meshes.
     Fuse {
         /// Base object name.

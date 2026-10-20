@@ -6,17 +6,18 @@ use std::io::Write;
 use std::path::Path;
 
 use fc_app::{
-    Document, DocumentObject, JournalChange, ObjectSummary, Property, RecomputeError,
+    Document, DocumentObject, JournalChange, ObjectStatus, ObjectSummary, Property, RecomputeError,
     UNDO_STACK_CAP,
 };
 use fc_base::{Placement, Rotation, Vector3};
 use fc_io::mesh_export::{write_obj, write_stl_ascii, write_stl_binary};
-use fc_io::{load_document, save_document};
+use fc_io::{load_document, load_document_with_hook, save_document};
 use fc_part::features::{
     BooleanFeature, BoxFeature, ConeFeature, CylinderFeature, SphereFeature, TorusFeature,
     TransformFeature,
 };
 use fc_part::{mesh_of, shape_of, BooleanKind, Mesh, TopoShape};
+use fc_sketcher::{Geometry, SketchObject};
 
 use crate::{AddShape, Command, ExportFormat};
 
@@ -54,6 +55,17 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Calc { expression } => calc(&expression),
         Command::SketchSolve { file } => crate::sketch::run_solve(&file),
         Command::SketchShow { file } => crate::sketch::run_show(&file),
+        Command::SketchImport {
+            file,
+            object,
+            fragment,
+        } => sketch_import(&file, &object, &fragment),
+        Command::SketchExport {
+            file,
+            object,
+            output,
+        } => sketch_export(&file, &object, &output),
+        Command::SketchInfo { file, object } => sketch_info(&file, &object),
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
         Command::Export { format } => match format {
@@ -237,6 +249,10 @@ fn build_feature(
             f.container.set("Scale", Property::Float(scale));
             Box::new(f)
         }
+        AddShape::Sketch => {
+            let sketch_object = SketchObject::new(name.unwrap_or("Sketch"));
+            Box::new(sketch_object)
+        }
         AddShape::Cut { base, tool } => boolean_feature(doc, name, BooleanKind::Cut, &base, &tool)?,
         AddShape::Fuse { base, tool } => {
             boolean_feature(doc, name, BooleanKind::Fuse, &base, &tool)?
@@ -384,6 +400,245 @@ fn clear_expr(file: &str, object: &str, property: &str) -> Result<(), String> {
     doc.clear_expression(object, property)?;
     recompute_and_save(file, &mut doc)?;
     println!("cleared expression on {object}.{property}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// sketch import / export / info — Sketcher::SketchObject content verbs
+// ---------------------------------------------------------------------------
+
+/// The sketch object `name` of `doc`, or a clear error (unknown object /
+/// not a sketch object). Shared by the three sketch verbs.
+fn sketch_object_of<'a>(
+    doc: &'a Document,
+    file: &str,
+    name: &str,
+) -> Result<&'a SketchObject, String> {
+    let object = doc.get_by_name(name).ok_or_else(|| {
+        format!(
+            "object '{name}' not found in '{file}'; available: {}",
+            names_list(doc)
+        )
+    })?;
+    if object.type_name() != "Sketcher::SketchObject" {
+        return Err(format!(
+            "object '{name}' is a {}, not a Sketcher::SketchObject — this verb needs a sketch object",
+            object.type_name()
+        ));
+    }
+    object
+        .as_any()
+        .downcast_ref::<SketchObject>()
+        .ok_or_else(|| format!("internal error: '{name}' has the sketch type but no sketch body"))
+}
+
+/// `sketch-import FILE OBJECT FRAGMENT.xml`: parse the fragment, swap it
+/// into OBJECT (must be a `Sketcher::SketchObject`), touch the object and
+/// its dependents (the `set` touch flow), recompute and save.
+///
+/// Two honest properties of this command:
+/// - it verifies everything (fragment parses, object exists, object is a
+///   sketch) before anything is written — a failure leaves the file
+///   untouched;
+/// - it is **not** recorded in the session journal: the journal's change
+///   vocabulary is adds / property snapshots / label changes, and a sketch
+///   content swap is none of those (FreeCAD records constraint edits as
+///   transaction-object data; our distilled journal has no such record).
+///   Undo/redo therefore navigate the journal's representable steps and
+///   skip this one.
+fn sketch_import(file: &str, object: &str, fragment: &str) -> Result<(), String> {
+    // 1. The fragment must parse before anything else happens.
+    let text =
+        std::fs::read_to_string(fragment).map_err(|e| format!("cannot read {fragment}: {e}"))?;
+    let sketch = fc_sketcher::xml::from_xml(&text)
+        .map_err(|e| format!("parse error in '{fragment}': {e}"))?;
+
+    // 2. The target must exist and be a sketch object (checked on a plain
+    //    read-only load; nothing is written on failure).
+    let (doc, _) = load(file)?;
+    let dependents: std::collections::BTreeSet<String> =
+        doc.dependents_of(object).into_iter().collect();
+    {
+        let summary = doc.summary().into_iter().find(|s| s.name == object);
+        let Some(summary) = summary else {
+            return Err(format!(
+                "object '{object}' not found in '{file}'; available: {}",
+                names_list(&doc)
+            ));
+        };
+        if summary.type_name != "Sketcher::SketchObject" {
+            return Err(format!(
+                "object '{object}' is a {}, not a Sketcher::SketchObject — \
+                 sketch-import needs a sketch object",
+                summary.type_name
+            ));
+        }
+    }
+
+    // 3. Re-load with the mutation hook: the document API deliberately
+    //    exposes no mutable object access, so the swap happens where
+    //    mutable access legitimately exists — during the load, while the
+    //    freshly built objects are still outside the document. This is the
+    //    same window the loader itself uses to restore sketch content.
+    //    `replace_sketch` touches the target; every transitive dependent
+    //    is touched explicitly (the `set` touch flow).
+    let replaced = std::cell::Cell::new(false);
+    let mut hook = |name: &str, obj: &mut dyn DocumentObject| {
+        if name == object {
+            if let Some(sketch_object) = obj.as_any_mut().downcast_mut::<SketchObject>() {
+                sketch_object.replace_sketch(sketch.clone());
+                replaced.set(true);
+            }
+        } else if dependents.contains(name) {
+            obj.set_status(ObjectStatus::Touched);
+        }
+    };
+    let (mut doc, report) = load_document_with_hook(Path::new(file), Some(&mut hook))
+        .map_err(|e| format!("cannot load '{file}': {e}"))?;
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !replaced.get() {
+        return Err(format!(
+            "object '{object}' not found in '{file}'; available: {}",
+            names_list(&doc)
+        ));
+    }
+    doc.clear_history();
+
+    // 4. Report the touch cascade like `set` does (object first, then the
+    //    transitive dependents in creation order).
+    let order: Vec<String> = doc.summary().into_iter().map(|s| s.name).collect();
+    let mut touched: Vec<String> = vec![object.to_string()];
+    touched.extend(dependents.iter().cloned());
+    touched.sort_by_key(|n| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
+    touched.dedup();
+    for name in &touched {
+        println!("  touched {name}");
+    }
+
+    // 5. Recompute + save (the shared tail of the mutating commands; a
+    //    failed solve still saves the document with the failing object
+    //    marked Error, FreeCAD-style) and print the one-line outcome.
+    let report = doc.recompute_all();
+    let summaries = doc.summary();
+    if let Ok(ids) = &report {
+        for id in ids {
+            if let Some(s) = summaries.iter().find(|s| s.id == *id) {
+                println!("  recomputed {} ({})", s.name, s.type_name);
+            }
+        }
+    }
+    save(file, &doc)?;
+    // The one-line outcome describes the SKETCH's own solve — independent
+    // of whether some *other* object's recompute failed afterwards (that
+    // error is returned below, after the outcome is on record).
+    let object = doc
+        .get_by_name(object)
+        .ok_or_else(|| "internal error: sketch vanished after recompute".to_string())?;
+    let sketch = object
+        .as_any()
+        .downcast_ref::<SketchObject>()
+        .ok_or_else(|| "internal error: not a sketch object".to_string())?;
+    match sketch.solved {
+        Some(info) => println!(
+            "Solved, {} constraints, dof {}, residual {:.3e}",
+            sketch.sketch.constraints().len(),
+            info.dof,
+            info.residual
+        ),
+        None => match sketch.status() {
+            ObjectStatus::Error(reason) => println!("sketch solve failed: {reason}"),
+            _ => println!(
+                "imported {} constraints into '{}', dof {} — not solved",
+                sketch.sketch.constraints().len(),
+                object.name(),
+                sketch.sketch.dof()
+            ),
+        },
+    }
+    match report {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// `sketch-export FILE OBJECT OUT.xml`: write the object's current
+/// `<Sketch>` fragment (no recompute).
+fn sketch_export(file: &str, object: &str, output: &str) -> Result<(), String> {
+    let (doc, _) = load(file)?;
+    let sketch_object = sketch_object_of(&doc, file, object)?;
+    let fragment = sketch_object.sketch.to_xml();
+    std::fs::write(output, fragment).map_err(|e| format!("cannot write '{output}': {e}"))?;
+    println!(
+        "wrote {output} ({} geometries, {} constraints)",
+        sketch_object.sketch.geometry().len(),
+        sketch_object.sketch.constraints().len()
+    );
+    Ok(())
+}
+
+/// `sketch-info FILE OBJECT`: geometry counts by kind, constraint count,
+/// DOF and the last solve result (or "not yet solved").
+///
+/// Solve results are deliberately not persisted (the solve is a recompute
+/// action), so this re-runs the recompute **in memory** — the file is not
+/// modified — and reports the fresh solve state; "not yet solved" is what
+/// remains when the recompute never reached the sketch (e.g. it aborted on
+/// a broken link elsewhere). A failed solve is reported as such.
+fn sketch_info(file: &str, object: &str) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    {
+        // Validate the target before any recompute (clear errors, cheap).
+        let summary = doc.summary().into_iter().find(|s| s.name == object);
+        let Some(summary) = summary else {
+            return Err(format!(
+                "object '{object}' not found in '{file}'; available: {}",
+                names_list(&doc)
+            ));
+        };
+        if summary.type_name != "Sketcher::SketchObject" {
+            return Err(format!(
+                "object '{object}' is a {}, not a Sketcher::SketchObject — \
+                 this verb needs a sketch object",
+                summary.type_name
+            ));
+        }
+    }
+    let recomputed = doc.recompute_all();
+    if let Err(err) = &recomputed {
+        eprintln!("warning: recompute failed: {err}");
+    }
+    let sketch_object = sketch_object_of(&doc, file, object)?;
+    let sketch = &sketch_object.sketch;
+    let count = |predicate: fn(&Geometry) -> bool| {
+        sketch.geometry().iter().filter(|g| predicate(g)).count()
+    };
+    println!(
+        "sketch '{}' (Sketcher::SketchObject, status {}): {} geometries, {} constraints, DOF {}",
+        sketch_object.container.name(),
+        sketch_object.status(),
+        sketch.geometry().len(),
+        sketch.constraints().len(),
+        sketch.dof()
+    );
+    println!(
+        "  geometry: {} point(s), {} line(s), {} circle(s), {} arc(s)",
+        count(|g| matches!(g, Geometry::Point { .. })),
+        count(|g| matches!(g, Geometry::LineSegment { .. })),
+        count(|g| matches!(g, Geometry::Circle { .. })),
+        count(|g| matches!(g, Geometry::ArcOfCircle { .. })),
+    );
+    match sketch_object.solved {
+        Some(info) => println!(
+            "  solve: Solved in {} iteration(s), residual {:.3e}, dof {}",
+            info.iterations, info.residual, info.dof
+        ),
+        None => match sketch_object.status() {
+            ObjectStatus::Error(reason) => println!("  solve: failed ({reason})"),
+            _ => println!("  solve: not yet solved"),
+        },
+    }
     Ok(())
 }
 
@@ -850,12 +1105,15 @@ struct JournalTxn {
 
 /// A persisted "object was added" change: enough data (type +
 /// properties + expression bindings) to rebuild the object should its
-/// addition be undone and then redone.
+/// addition be undone and then redone. For sketches the full `<Sketch>`
+/// fragment is recorded too — the content is object data, not properties,
+/// so the property snapshot alone would rebuild an empty sketch.
 struct JournalAdd {
     name: String,
     type_name: String,
     props: Vec<(String, Property)>,
     exprs: Vec<(String, String)>,
+    sketch_xml: Option<String>,
 }
 
 /// A persisted property change: `before`/`after` snapshots (`None` = the
@@ -883,6 +1141,10 @@ impl JournalAdd {
                 .iter()
                 .map(|(key, text)| (key.clone(), text.clone()))
                 .collect(),
+            sketch_xml: object
+                .as_any()
+                .downcast_ref::<SketchObject>()
+                .map(|sketch| sketch.sketch.to_xml()),
         }
     }
 }
@@ -952,6 +1214,9 @@ impl Journal {
                 for (key, expr) in &add.exprs {
                     text.push_str(&format!("X {} {}\n", esc(key), esc(expr)));
                 }
+                if let Some(xml) = &add.sketch_xml {
+                    text.push_str(&format!("S {}\n", esc(xml)));
+                }
             }
             for prop in &txn.props {
                 let snapshot = |value: &Option<Property>| match value {
@@ -998,8 +1263,8 @@ impl Journal {
             let mut fields = line.split(' ');
             let kind = fields.next().unwrap_or_default();
             let rest: Vec<&str> = fields.collect();
-            // K/X continue the open add block; anything else closes it.
-            if kind != "K" && kind != "X" {
+            // K/X/S continue the open add block; anything else closes it.
+            if kind != "K" && kind != "X" && kind != "S" {
                 if let Some(add) = add.take() {
                     let Some(open) = txn.as_mut() else {
                         return Err(format!(
@@ -1046,6 +1311,7 @@ impl Journal {
                         type_name: unesc(rest[1], number)?,
                         props: Vec::new(),
                         exprs: Vec::new(),
+                        sketch_xml: None,
                     });
                 }
                 "K" => {
@@ -1077,6 +1343,17 @@ impl Journal {
                     block
                         .exprs
                         .push((unesc(rest[0], number)?, unesc(rest[1], number)?));
+                }
+                "S" => {
+                    let Some(block) = add.as_mut() else {
+                        return Err(format!("journal line {number}: 'S' outside an add block"));
+                    };
+                    if rest.len() != 1 {
+                        return Err(format!(
+                            "journal line {number}: 'S' expects one escaped sketch fragment"
+                        ));
+                    }
+                    block.sketch_xml = Some(unesc(rest[0], number)?);
                 }
                 "P" => {
                     let Some(open) = txn.as_mut() else {
@@ -1213,6 +1490,21 @@ fn rebuild_object(added: &JournalAdd) -> Result<Box<dyn DocumentObject>, String>
             let kind = BooleanKind::from_type_name(&added.type_name)
                 .ok_or_else(|| format!("journal: unknown boolean type '{}'", added.type_name))?;
             Box::new(BooleanFeature::new(&added.name, kind))
+        }
+        "Sketcher::SketchObject" => {
+            let mut object = SketchObject::new(&added.name);
+            // The sketch content is object data, journaled as the `S` line
+            // of the add record; restore it before the generic property
+            // pass (the two touch disjoint state, but content first reads
+            // better). A journal from before the `S` line existed carries
+            // no fragment — the rebuild is an empty sketch, honestly.
+            if let Some(xml) = &added.sketch_xml {
+                let sketch = fc_sketcher::xml::from_xml(xml).map_err(|err| {
+                    format!("journal: cannot rebuild sketch of '{}': {err}", added.name)
+                })?;
+                object.replace_sketch(sketch);
+            }
+            Box::new(object) as Box<dyn DocumentObject>
         }
         other => {
             return Err(format!(

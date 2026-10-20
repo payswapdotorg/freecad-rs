@@ -305,6 +305,7 @@ dependencies = [
  "fc-app",
  "fc-base",
  "fc-part",
+ "fc-sketcher",
  "quick-xml",
  "zip",
 ]
@@ -321,6 +322,7 @@ dependencies = [
 name = "fc-sketcher"
 version = "0.1.0"
 dependencies = [
+ "fc-app",
  "fc-base",
 ]
 
