@@ -10,6 +10,7 @@
 //! What is **not** implemented (and honestly so): NURBS, booleans, fillets,
 //! chamfers, STEP/BREP interoperability with OCCT.
 
+pub mod boolean;
 pub mod brep;
 pub mod features;
 pub mod shape;
