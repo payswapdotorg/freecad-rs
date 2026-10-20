@@ -31,10 +31,14 @@ text format where FreeCAD writes OCCT `.brp`).
 
 * Exit codes: `0` ok · `1` runtime error (printed as `error: …` on
   stderr) · `2` usage error.
-* Every mutating command (`new`, `add`, `set`, `recompute`) saves the
-  file back. Even when a recompute fails, the document is saved — with
+* Every mutating command (`new`, `add`, `set`, `recompute`, `undo`,
+  `redo`) saves the file back. Even when a recompute fails, the document is saved — with
   the failing object marked `Error`, FreeCAD-style — before exiting 1, so
   no work is lost.
+* `add` and `set` steps are **undoable**: each one appends a transaction
+  to the document's session journal (`FILE.undolog`, see `undo`), and
+  `undo`/`redo`/`history` operate on it. Expression bindings
+  (`set-expr`/`clear-expr`) are not journaled steps.
 * Object names are unique and never renamed. `--name` is a *base* name:
   adding a second `Box` yields `Box001`, FreeCAD-style.
 * Units are millimetres (FreeCAD's default); `stats` prints them.
@@ -137,6 +141,69 @@ freecad-rs recompute demo.fcstd
 
 Objects already `Valid` are skipped. `--json` prints the recomputed
 objects as the same `name`/`type`/`status` array as `list --json`.
+
+### `undo` — roll back committed steps
+
+```sh
+freecad-rs undo demo.fcstd        # one step
+freecad-rs undo demo.fcstd 3      # three steps
+```
+
+```
+undid "set Ball.Radius" (1 change)
+  recomputed Ball (Part::Sphere)
+  recomputed Lift (Part::Transform)
+1 undone, 1 to redo
+```
+
+Each editing step made with `add` or `set` is a transaction in the
+FreeCAD `App::Transaction` sense: a named, all-or-nothing record of what
+it changed. Undoing applies it **backwards** — properties return to
+their before-values, added objects are removed (parked, not lost) — and
+marks the affected objects plus everything downstream of them touched,
+so the document is recomputed exactly like a `set` would, then saved.
+Asking for more steps than exist simply undoes what is there; asking
+with no history prints `nothing to undo`.
+
+### `redo` — re-apply undone steps
+
+```sh
+freecad-rs redo demo.fcstd        # one step
+freecad-rs redo demo.fcstd 3      # three steps, oldest-undone first
+```
+
+Symmetric to `undo`, replaying the undone steps chronologically. A newly
+committed step (`add`/`set`) clears the redo future, FreeCAD-style.
+
+### `history` — the undo stack and redo count
+
+```sh
+freecad-rs history demo.fcstd
+# undo stack (2)
+#   1. add Ball (1 change)
+#   2. set Ball.Radius (1 change)
+# redo available: 1
+```
+
+#### The session journal (`FILE.undolog`)
+
+The CLI is stateless-by-file, so the transaction stacks live in a
+sidecar journal next to the document: `demo.fcstd` →
+`demo.fcstd.undolog`. `add` and `set` append one transaction per step
+(an added object is journaled with its full state — type, properties,
+expressions — so undoing an addition and later redoing it can rebuild
+it); `undo`/`redo` rehydrate the in-memory stacks from the journal,
+run the real `fc_app` transaction machinery on the loaded document,
+recompute, then save both the document and the rewritten journal — in
+that order, so the two never disagree (a failed recompute still saves
+both and then reports the error, exit 1).
+
+The journal holds at most 100 transactions; a new step drops the oldest,
+FreeCAD-style. Deleting the journal (or never creating one) is safe:
+the document is self-contained, only its edit history is lost —
+`undo` then reports `nothing to undo`. Editing a document with other
+tools invalidates its journal; `undo`/`redo`/`history` report the
+mismatch rather than guessing.
 
 ### `info` — document metadata
 

@@ -7,6 +7,10 @@ use crate::object::link_targets;
 pub use crate::object::{DocumentObject, ObjectId, ObjectStatus};
 use crate::property::Property;
 use crate::recompute::RecomputeError;
+use crate::transaction::{
+    Change, HistoryEntry, JournalChange, Transaction, TransactionId, TransactionInfo,
+    AUTO_TRANSACTION_LABEL, UNDO_STACK_CAP,
+};
 
 /// Flat, serializable view of one object (for CLI/JSON output).
 #[derive(Debug, Clone)]
@@ -18,7 +22,8 @@ pub struct ObjectSummary {
 }
 
 /// A FreeCAD-style document: an ordered collection of typed, named,
-/// linked objects that recompute dependencies-first.
+/// linked objects that recompute dependencies-first, with an undo/redo
+/// journal of transactions (FreeCAD `App::Document` + `App::Transaction`).
 #[derive(Default)]
 pub struct Document {
     label: String,
@@ -30,7 +35,20 @@ pub struct Document {
     order: Vec<ObjectId>,
     /// Unique name -> id.
     index: BTreeMap<String, ObjectId>,
+    /// Objects absent from the document but known to the transaction
+    /// engine (parked inside undo/redo records): the journal-restore
+    /// fallback for name -> id resolution of changes that target an
+    /// object which is currently not in the document.
+    absent_index: BTreeMap<String, ObjectId>,
     next_id: ObjectId,
+    /// Committed transactions, oldest first (undo pops the newest).
+    undo_stack: Vec<Transaction>,
+    /// Undone transactions, oldest-undone first (redo pops the top).
+    redo_stack: Vec<Transaction>,
+    /// Transaction currently collecting changes (`open_transaction`), or
+    /// the temporary one auto-opened for a single unbracketed mutation.
+    active_transaction: Option<Transaction>,
+    next_transaction_id: TransactionId,
 }
 
 impl Document {
@@ -43,7 +61,12 @@ impl Document {
             objects: BTreeMap::new(),
             order: Vec::new(),
             index: BTreeMap::new(),
+            absent_index: BTreeMap::new(),
             next_id: ObjectId(1),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            active_transaction: None,
+            next_transaction_id: TransactionId(1),
         }
     }
 
@@ -51,8 +74,14 @@ impl Document {
         &self.label
     }
 
+    /// Set the document label. Auto-records a `LabelChn` change into the
+    /// open transaction (or a temp one), so label changes undo cleanly.
+    /// `Document::new` sets the initial label without recording.
     pub fn set_label(&mut self, label: &str) {
+        let before = self.label.clone();
         self.label = label.to_string();
+        let after = self.label.clone();
+        self.record_change(Change::LabelChn { before, after });
     }
 
     pub fn creator(&self) -> &str {
@@ -76,7 +105,8 @@ impl Document {
     /// Insert an object. The document assigns the id, keeps the object's
     /// current name as a *base*, and may suffix it for uniqueness
     /// (`Box`, `Box001`, `Box002`, FreeCAD-style). The final name is
-    /// written back onto the object.
+    /// written back onto the object. Records a `New` change (into the
+    /// open transaction, or a temp one — AutoTransaction semantics).
     pub fn add(&mut self, mut object: Box<dyn DocumentObject>) -> ObjectId {
         let id = self.next_id;
         self.next_id = ObjectId(id.0 + 1);
@@ -86,6 +116,7 @@ impl Document {
         self.objects.insert(id, object);
         self.order.push(id);
         self.index.insert(name, id);
+        self.record_change(Change::New { id, object: None });
         id
     }
 
@@ -213,16 +244,24 @@ impl Document {
                 dependents.join(", ")
             ));
         }
-        self.objects.remove(&id);
-        self.index.remove(name);
-        self.order.retain(|&other| other != id);
+        if let Some((_, order, object)) = self.raw_remove(id) {
+            // Park the removed object in the transaction record so an
+            // undo can restore it with its properties intact.
+            self.record_change(Change::Del {
+                id,
+                order,
+                object: Some(object),
+            });
+        }
         Ok(())
     }
 
     /// Set one property and mark the object **and its transitive
     /// dependents** as touched. This is the trigger of the parametric
     /// cascade. A property with an expression bound is read-only until
-    /// the binding is cleared (FreeCAD behavior).
+    /// the binding is cleared (FreeCAD behavior). Records a `Chn` change
+    /// with before/after snapshots (into the open transaction, or a temp
+    /// one — AutoTransaction semantics).
     pub fn set_property(&mut self, name: &str, key: &str, value: Property) -> Result<(), String> {
         let Some(&id) = self.index.get(name) else {
             return Err(format!("object '{name}' not found"));
@@ -235,20 +274,23 @@ impl Document {
                 ));
             }
         }
+        let before = self
+            .objects
+            .get(&id)
+            .and_then(|object| object.properties().get(key).cloned());
         if let Some(object) = self.objects.get_mut(&id) {
-            object.properties_mut().insert(key.to_string(), value);
+            object
+                .properties_mut()
+                .insert(key.to_string(), value.clone());
         }
-        let dependents = self.dependents_of(name);
-        if let Some(object) = get_mut(self, id) {
-            object.set_status(ObjectStatus::Touched);
-        }
-        for dependent in dependents {
-            if let Some(&dependent_id) = self.index.get(&dependent) {
-                if let Some(object) = get_mut(self, dependent_id) {
-                    object.set_status(ObjectStatus::Touched);
-                }
-            }
-        }
+        let after = Some(value);
+        self.record_change(Change::PropertyChn {
+            id,
+            key: key.to_string(),
+            before,
+            after,
+        });
+        self.touch_cascade(id);
         Ok(())
     }
 
@@ -291,17 +333,7 @@ impl Document {
                 expressions.insert(property.to_string(), text.to_string());
             }
         }
-        let dependents = self.dependents_of(name);
-        if let Some(object) = get_mut(self, id) {
-            object.set_status(ObjectStatus::Touched);
-        }
-        for dependent in dependents {
-            if let Some(&dependent_id) = self.index.get(&dependent) {
-                if let Some(object) = get_mut(self, dependent_id) {
-                    object.set_status(ObjectStatus::Touched);
-                }
-            }
-        }
+        self.touch_cascade(id);
         Ok(())
     }
 
@@ -322,7 +354,322 @@ impl Document {
                 "property '{property}' of '{name}' has no expression bound"
             ));
         }
-        let dependents = self.dependents_of(name);
+        self.touch_cascade(id);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Transactions: open/close, undo/redo, history — FreeCAD's
+    // `App::Document` + `App::Transaction` AutoTransaction semantics.
+    // -----------------------------------------------------------------------
+
+    /// Start an explicit editing step: every subsequent mutation records
+    /// into this transaction until [`Document::close_transaction`]
+    /// (FreeCAD `openTransaction`). An already-open transaction is
+    /// committed first, like FreeCAD closing the current one.
+    pub fn open_transaction(&mut self, label: Option<&str>) {
+        if self.active_transaction.is_some() {
+            self.close_transaction();
+        }
+        let transaction = Transaction::new(self.next_transaction_id, label.map(str::to_string));
+        self.next_transaction_id = TransactionId(self.next_transaction_id.0 + 1);
+        self.active_transaction = Some(transaction);
+    }
+
+    /// Commit the open transaction (FreeCAD `commitTransaction`): push it
+    /// onto the undo stack, **clear the redo stack** — a new editing step
+    /// invalidates the undone future — and drop the oldest transaction
+    /// beyond [`UNDO_STACK_CAP`]. An empty transaction is discarded: a
+    /// step that changed nothing leaves nothing to undo.
+    pub fn close_transaction(&mut self) {
+        if let Some(transaction) = self.active_transaction.take() {
+            if !transaction.is_empty() {
+                self.commit(transaction);
+            }
+        }
+    }
+
+    /// Roll back the latest transaction: pop it off the undo stack, apply
+    /// its changes backward, park it on the redo stack. `Ok(None)` when
+    /// there is nothing to undo. Undoing marks the affected objects (and
+    /// their transitive dependents) `Touched`, so the next
+    /// [`Document::recompute_all`] re-evaluates them.
+    ///
+    /// Undoing is an error only while a transaction is open, or when the
+    /// journal is inconsistent with the document (a record that does not
+    /// match reality); in the latter case the broken transaction is
+    /// dropped — FreeCAD's history cannot half-exist.
+    pub fn undo(&mut self) -> Result<Option<TransactionInfo>, String> {
+        self.ensure_no_open_transaction("undo")?;
+        let Some(mut transaction) = self.undo_stack.pop() else {
+            return Ok(None);
+        };
+        transaction.apply_backward(self)?;
+        let info = transaction.info();
+        self.redo_stack.push(transaction);
+        Ok(Some(info))
+    }
+
+    /// Re-apply the latest undone transaction — symmetric to
+    /// [`Document::undo`] (pop off the redo stack, apply forward, park on
+    /// the undo stack, mark dependents `Touched`).
+    pub fn redo(&mut self) -> Result<Option<TransactionInfo>, String> {
+        self.ensure_no_open_transaction("redo")?;
+        let Some(mut transaction) = self.redo_stack.pop() else {
+            return Ok(None);
+        };
+        transaction.apply_forward(self)?;
+        let info = transaction.info();
+        self.undo_stack.push(transaction);
+        Ok(Some(info))
+    }
+
+    /// Number of transactions currently on the undo stack.
+    pub fn undo_count(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Number of transactions currently on the redo stack.
+    pub fn redo_count(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    /// Undo-stack entries, oldest committed first.
+    pub fn undo_history(&self) -> Vec<HistoryEntry> {
+        self.undo_stack
+            .iter()
+            .map(Transaction::history_entry)
+            .collect()
+    }
+
+    /// Redo-stack entries in redo order: the entry [`Document::redo`]
+    /// would apply first, then the ones after it.
+    pub fn redo_history(&self) -> Vec<HistoryEntry> {
+        self.redo_stack
+            .iter()
+            .rev()
+            .map(Transaction::history_entry)
+            .collect()
+    }
+
+    /// Forget all undo/redo history and release every object parked in
+    /// it. The CLI calls this right after loading a `.FCStd`, so the
+    /// loader's own object insertions do not surface as undoable steps;
+    /// history starts with the first user edit of the session.
+    pub fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.absent_index.clear();
+    }
+
+    /// Restore a previously committed — and still un-undone — transaction
+    /// onto the **undo stack** without applying it: the caller guarantees
+    /// the document already reflects its effects (the CLI, after loading a
+    /// `.FCStd` that contains them). This is how an external journal
+    /// rehydrates the in-memory history. Respects [`UNDO_STACK_CAP`].
+    pub fn restore_undo_transaction(
+        &mut self,
+        label: Option<&str>,
+        changes: Vec<JournalChange>,
+    ) -> Result<(), String> {
+        let transaction = self.rebuild_transaction(label, changes)?;
+        self.undo_stack.push(transaction);
+        if self.undo_stack.len() > UNDO_STACK_CAP {
+            self.undo_stack.remove(0);
+        }
+        Ok(())
+    }
+
+    /// Restore a previously committed **and undone** transaction onto the
+    /// **redo stack** without applying it (the document already reflects
+    /// having undone it). Restored redo transactions are re-queued: pass
+    /// them in commit order and [`Document::redo`] replays them
+    /// chronologically. Commit order also guarantees that an undone
+    /// addition registers its (absent) object before any later property
+    /// change of that same object resolves.
+    pub fn restore_redo_transaction(
+        &mut self,
+        label: Option<&str>,
+        changes: Vec<JournalChange>,
+    ) -> Result<(), String> {
+        let transaction = self.rebuild_transaction(label, changes)?;
+        self.redo_stack.insert(0, transaction);
+        Ok(())
+    }
+
+    /// Refuse while an explicit transaction is collecting changes.
+    fn ensure_no_open_transaction(&self, action: &str) -> Result<(), String> {
+        if self.active_transaction.is_some() {
+            return Err(format!(
+                "cannot {action}: a transaction is still open (close it first)"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Commit a transaction onto the undo stack: clear the redo stack,
+    /// push, drop the oldest beyond [`UNDO_STACK_CAP`].
+    fn commit(&mut self, transaction: Transaction) {
+        self.redo_stack.clear();
+        self.undo_stack.push(transaction);
+        if self.undo_stack.len() > UNDO_STACK_CAP {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// The AutoTransaction core: a mutation records into the open
+    /// transaction, or — when none is open — into a temp transaction that
+    /// commits immediately (label [`AUTO_TRANSACTION_LABEL`]), so
+    /// unbracketed mutations are still individually undoable.
+    fn record_change(&mut self, change: Change) {
+        if let Some(transaction) = self.active_transaction.as_mut() {
+            transaction.push(change);
+            return;
+        }
+        let mut transaction = Transaction::new(
+            self.next_transaction_id,
+            Some(AUTO_TRANSACTION_LABEL.to_string()),
+        );
+        self.next_transaction_id = TransactionId(self.next_transaction_id.0 + 1);
+        transaction.push(change);
+        self.commit(transaction);
+    }
+
+    /// Turn serialized journal changes into a real transaction: names
+    /// resolve against the document index first, then against the
+    /// parked-object registry ([`JournalChange::AddedAbsent`] registers
+    /// its rebuilt object so later property changes of that same,
+    /// still-absent object resolve too). Transaction ids are handed out
+    /// fresh — they are process-local, like FreeCAD's.
+    fn rebuild_transaction(
+        &mut self,
+        label: Option<&str>,
+        changes: Vec<JournalChange>,
+    ) -> Result<Transaction, String> {
+        let mut transaction = Transaction::new(self.next_transaction_id, label.map(str::to_string));
+        self.next_transaction_id = TransactionId(self.next_transaction_id.0 + 1);
+        for change in changes {
+            let change = match change {
+                JournalChange::Added { object } => Change::New {
+                    id: self.resolve_id(&object).ok_or_else(|| {
+                        format!("journal mismatch: added object '{object}' is not in the document")
+                    })?,
+                    object: None,
+                },
+                JournalChange::AddedAbsent { object } => {
+                    let name = object.name().to_string();
+                    let id = self.next_id;
+                    self.next_id = ObjectId(id.0 + 1);
+                    self.absent_index.insert(name, id);
+                    Change::New {
+                        id,
+                        object: Some(object),
+                    }
+                }
+                JournalChange::Property {
+                    object,
+                    key,
+                    before,
+                    after,
+                } => Change::PropertyChn {
+                    id: self.resolve_id(&object).ok_or_else(|| {
+                        format!(
+                            "journal mismatch: changed object '{object}' is not in the document"
+                        )
+                    })?,
+                    key,
+                    before,
+                    after,
+                },
+                JournalChange::Label { before, after } => Change::LabelChn { before, after },
+            };
+            transaction.push(change);
+        }
+        Ok(transaction)
+    }
+
+    /// Name -> id through the document index, falling back to the
+    /// parked-object registry of objects held inside undo/redo records.
+    fn resolve_id(&self, name: &str) -> Option<ObjectId> {
+        self.index
+            .get(name)
+            .copied()
+            .or_else(|| self.absent_index.get(name).copied())
+    }
+
+    /// Remove an object by id, bypassing the dependent check and the
+    /// transaction recording — the undo/redo engine's primitive (undo of
+    /// an addition, redo of a removal) and [`Document::remove`]'s tail.
+    /// Returns the name, the creation-order position and the object
+    /// itself (to be parked). Objects that linked to the removed one are
+    /// marked `Touched`, so the next recompute re-evaluates them and
+    /// honestly reports the dangling link.
+    pub(crate) fn raw_remove(
+        &mut self,
+        id: ObjectId,
+    ) -> Option<(String, usize, Box<dyn DocumentObject>)> {
+        let name = self.objects.get(&id)?.name().to_string();
+        let dependents = self.dependents_of(&name);
+        let object = self.objects.remove(&id)?;
+        let order = self
+            .order
+            .iter()
+            .position(|&other| other == id)
+            .unwrap_or(self.order.len());
+        self.order.retain(|&other| other != id);
+        self.index.remove(&name);
+        self.absent_index.insert(name.clone(), id);
+        for dependent in dependents {
+            if let Some(&dependent_id) = self.index.get(&dependent) {
+                if let Some(object) = get_mut(self, dependent_id) {
+                    object.set_status(ObjectStatus::Touched);
+                }
+            }
+        }
+        Some((name, order, object))
+    }
+
+    /// Insert an object at a known id and creation-order position — the
+    /// inverse of [`Document::raw_remove`], bypassing the transaction
+    /// recording. Renames the object FreeCAD-style when its name got
+    /// taken in the meantime.
+    pub(crate) fn raw_insert(
+        &mut self,
+        id: ObjectId,
+        mut object: Box<dyn DocumentObject>,
+        order: usize,
+    ) -> Result<(), String> {
+        if self.objects.contains_key(&id) {
+            return Err(format!(
+                "journal mismatch: object id {} already exists",
+                id.0
+            ));
+        }
+        let mut name = object.name().to_string();
+        if self.index.contains_key(&name) {
+            name = self.unique_name(&name);
+            object.set_name(&name);
+        }
+        self.index.insert(name.clone(), id);
+        self.absent_index.remove(&name);
+        self.objects.insert(id, object);
+        let order = order.min(self.order.len());
+        self.order.insert(order, id);
+        Ok(())
+    }
+
+    /// Mark the object and its transitive dependents `Touched` (by id):
+    /// they re-execute on the next [`Document::recompute_all`]. The
+    /// shared tail of every mutation and undo/redo application.
+    pub(crate) fn touch_cascade(&mut self, id: ObjectId) {
+        let Some(name) = self
+            .objects
+            .get(&id)
+            .map(|object| object.name().to_string())
+        else {
+            return;
+        };
+        let dependents = self.dependents_of(&name);
         if let Some(object) = get_mut(self, id) {
             object.set_status(ObjectStatus::Touched);
         }
@@ -333,7 +680,30 @@ impl Document {
                 }
             }
         }
-        Ok(())
+    }
+
+    /// Set one property by id, bypassing the expression check, the touch
+    /// cascade and the transaction recording — the undo/redo engine's
+    /// primitive for restoring a `before`/`after` snapshot. `None`
+    /// removes the property again (it did not exist in that snapshot);
+    /// the caller marks the object touched.
+    pub(crate) fn raw_set_property(&mut self, id: ObjectId, key: &str, value: Option<Property>) {
+        if let Some(object) = self.objects.get_mut(&id) {
+            match value {
+                Some(value) => {
+                    object.properties_mut().insert(key.to_string(), value);
+                }
+                None => {
+                    object.properties_mut().remove(key);
+                }
+            }
+        }
+    }
+
+    /// Set the document label without recording a change — used by the
+    /// transaction engine when it applies a `LabelChn` backward/forward.
+    pub(crate) fn set_label_internal(&mut self, label: &str) {
+        self.label = label.to_string();
     }
 
     /// Recompute all touched objects, dependencies first.
