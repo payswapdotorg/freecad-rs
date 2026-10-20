@@ -511,13 +511,12 @@ endsolid deg
                     "triangle {i} normal component {k}"
                 );
             }
-            for vi in 0..3 {
-                for k in 0..3 {
+            for (vi, expected_vertex) in expected_tris[i].iter().enumerate() {
+                for (k, expected) in expected_vertex.iter().enumerate() {
                     let got = le_f32(rec, 12 + 12 * vi + 4 * k) as f64;
                     assert!(
-                        (got - expected_tris[i][vi][k]).abs() < 1e-3,
-                        "triangle {i} vertex {vi} component {k}: {got} vs {}",
-                        expected_tris[i][vi][k]
+                        (got - expected).abs() < 1e-3,
+                        "triangle {i} vertex {vi} component {k}: {got} vs {expected}"
                     );
                 }
             }
