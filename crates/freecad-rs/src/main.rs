@@ -84,6 +84,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Undo the last N committed steps (default 1) — the App::Transaction
+    /// undo stack. Saves FILE and its session journal.
+    Undo {
+        file: String,
+        /// Number of steps to undo.
+        #[arg(default_value_t = 1)]
+        steps: usize,
+    },
+    /// Redo the last N undone steps (default 1) — symmetric to `undo`.
+    /// Saves FILE and its session journal.
+    Redo {
+        file: String,
+        /// Number of steps to redo.
+        #[arg(default_value_t = 1)]
+        steps: usize,
+    },
+    /// Show the undo/redo history of FILE (undo-stack labels + redo count).
+    History { file: String },
     /// Document metadata.
     Info { file: String },
     /// Per-object analytic volume / surface area.

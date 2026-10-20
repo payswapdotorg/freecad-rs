@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
-use fc_app::{Document, DocumentObject, ObjectSummary, Property, RecomputeError};
+use fc_app::{
+    Document, DocumentObject, JournalChange, ObjectSummary, Property, RecomputeError,
+    UNDO_STACK_CAP,
+};
 use fc_base::{Placement, Rotation, Vector3};
 use fc_io::mesh_export::{write_obj, write_stl_ascii, write_stl_binary};
 use fc_io::{load_document, save_document};
@@ -45,6 +48,9 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         } => get(&file, &object, &property),
         Command::List { file, json } => list(&file, json),
         Command::Recompute { file, json } => recompute(&file, json),
+        Command::Undo { file, steps } => undo(&file, steps),
+        Command::Redo { file, steps } => redo(&file, steps),
+        Command::History { file } => history(&file),
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
         Command::Export { format } => match format {
@@ -67,10 +73,17 @@ fn load(file: &str) -> Result<(Document, fc_io::LoadReport), String> {
     if !path.exists() {
         return Err(format!("file not found: '{file}'"));
     }
-    let (doc, report) = load_document(path).map_err(|e| format!("cannot load '{file}': {e}"))?;
+    let (mut doc, report) =
+        load_document(path).map_err(|e| format!("cannot load '{file}': {e}"))?;
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
+    // The loader inserts objects through the regular `Document` API,
+    // which records them as transactions; a freshly loaded document
+    // carries no undoable history — the first edit of the session is
+    // step 1 (the `undo`/`redo` commands rehydrate the real stacks from
+    // the session journal).
+    doc.clear_history();
     Ok((doc, report))
 }
 
@@ -89,6 +102,10 @@ fn new(file: &str, label: &str) -> Result<(), String> {
     let mut doc = Document::new(label);
     doc.set_creator("freecad-rs");
     save(file, &doc)?;
+    // A brand-new document starts with a clean session journal — this
+    // also clears any journal left over from a previous file of the
+    // same name.
+    Journal::empty().write(file)?;
     println!("created {file} — label \"{label}\" (0 objects)");
     Ok(())
 }
@@ -99,6 +116,7 @@ fn new(file: &str, label: &str) -> Result<(), String> {
 
 fn add(file: &str, shape: AddShape, name: Option<&str>) -> Result<(), String> {
     let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
     let object = build_feature(&doc, shape, name)?;
     let id = doc.add(object);
     let summary = doc
@@ -108,7 +126,20 @@ fn add(file: &str, shape: AddShape, name: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| "internal error: object vanished right after add".to_string())?;
     let final_name = summary.name.clone();
     let type_name = summary.type_name.clone();
-    recompute_and_save(file, &mut doc)?;
+    // Journal the added object's full state (type + properties +
+    // expressions), so its addition can be undone AND redone across
+    // processes: after an undo the object lives only in the journal.
+    let added = JournalAdd::from_object(
+        doc.get(id)
+            .ok_or_else(|| "internal error: object vanished right after add".to_string())?,
+    );
+    let txn = JournalTxn {
+        label: Some(format!("add {final_name}")),
+        adds: vec![added],
+        props: Vec::new(),
+        labels: Vec::new(),
+    };
+    recompute_save_journal(file, &mut doc, &mut journal, txn)?;
     println!("added {final_name} ({type_name}) -> {file}");
     Ok(())
 }
@@ -246,6 +277,7 @@ fn boolean_feature(
 
 fn set(file: &str, object: &str, property: &str, value: &str) -> Result<(), String> {
     let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
     let existing = {
         let obj = doc.get_by_name(object).ok_or_else(|| {
             format!(
@@ -270,7 +302,7 @@ fn set(file: &str, object: &str, property: &str, value: &str) -> Result<(), Stri
             expected_form(existing.type_name())
         )
     })?;
-    doc.set_property(object, property, parsed)?;
+    doc.set_property(object, property, parsed.clone())?;
 
     // Report the parametric cascade: the object itself plus everything
     // downstream of it, in creation order.
@@ -283,7 +315,18 @@ fn set(file: &str, object: &str, property: &str, value: &str) -> Result<(), Stri
         println!("  touched {name}");
     }
 
-    recompute_and_save(file, &mut doc)?;
+    let txn = JournalTxn {
+        label: Some(format!("set {object}.{property}")),
+        adds: Vec::new(),
+        props: vec![JournalProp {
+            object: object.to_string(),
+            key: property.to_string(),
+            before: Some(existing),
+            after: Some(parsed),
+        }],
+        labels: Vec::new(),
+    };
+    recompute_save_journal(file, &mut doc, &mut journal, txn)?;
     println!("set {object}.{property} = {value}");
     Ok(())
 }
@@ -425,6 +468,35 @@ fn save_after_failure(file: &str, doc: &Document, err: &RecomputeError) -> Strin
         Err(save_err) => {
             format!("recompute failed: {err}; saving the document also failed: {save_err}")
         }
+    }
+}
+
+/// Recompute, report, save, journal — the shared tail of `add` and `set`.
+/// The document is saved before the journal entry is written, so the
+/// journal never claims a step that was not persisted; a failed
+/// recompute still saves the document (FreeCAD-style, failing object
+/// marked `Error`), journals the committed step, and only then reports
+/// the error — the journal always matches the file on disk.
+fn recompute_save_journal(
+    file: &str,
+    doc: &mut Document,
+    journal: &mut Journal,
+    txn: JournalTxn,
+) -> Result<(), String> {
+    let report = doc.recompute_all();
+    let summaries = doc.summary();
+    if let Ok(ids) = &report {
+        for id in ids {
+            if let Some(s) = summaries.iter().find(|s| s.id == *id) {
+                println!("  recomputed {} ({})", s.name, s.type_name);
+            }
+        }
+    }
+    save(file, doc)?;
+    journal.commit(file, txn)?;
+    match report {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -641,6 +713,602 @@ fn graph(file: &str, output: &str) -> Result<(), String> {
         doc.object_count()
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// undo / redo / history — the session journal
+// ---------------------------------------------------------------------------
+
+/// Undo the last N committed steps (default 1) through the real
+/// `fc_app` transaction machinery, then save the document and the
+/// session journal.
+fn undo(file: &str, steps: usize) -> Result<(), String> {
+    apply_steps(file, steps, false)
+}
+
+/// Redo the last N undone steps (default 1) — symmetric to `undo`.
+fn redo(file: &str, steps: usize) -> Result<(), String> {
+    apply_steps(file, steps, true)
+}
+
+/// Shared body of `undo`/`redo`: restore the session stacks from the
+/// journal, run the requested number of steps through the real
+/// `fc_app` machinery, recompute, save the document, then persist the
+/// rewritten journal — in that order, so the journal always matches the
+/// saved document even when a recompute fails (the document is still
+/// saved, FreeCAD-style, with the failing object marked `Error`; the
+/// error is reported after everything is safely on disk).
+fn apply_steps(file: &str, steps: usize, redoing: bool) -> Result<(), String> {
+    if steps == 0 {
+        println!("nothing to do: 0 steps requested");
+        return Ok(());
+    }
+    let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
+    restore_stacks(&mut doc, &journal)?;
+    let mut done = 0usize;
+    for _ in 0..steps {
+        let step = if redoing { doc.redo()? } else { doc.undo()? };
+        let Some(info) = step else {
+            break;
+        };
+        let label = info.label.as_deref().unwrap_or("-");
+        let verb = if redoing { "redid" } else { "undid" };
+        println!(
+            "{verb} \"{label}\" ({} change{})",
+            info.changes,
+            plural(info.changes)
+        );
+        done += 1;
+    }
+    if done == 0 {
+        println!("nothing to {}", if redoing { "redo" } else { "undo" });
+        return Ok(());
+    }
+    if redoing {
+        journal.redo_depth = journal.redo_depth.saturating_sub(done);
+    } else {
+        journal.redo_depth += done;
+    }
+    let report = doc.recompute_all();
+    let summaries = doc.summary();
+    if let Ok(ids) = &report {
+        for id in ids {
+            if let Some(s) = summaries.iter().find(|s| s.id == *id) {
+                println!("  recomputed {} ({})", s.name, s.type_name);
+            }
+        }
+    }
+    save(file, &doc)?;
+    journal.write(file)?;
+    if redoing {
+        println!("{done} redone, {} to undo", doc.undo_count());
+    } else {
+        println!("{done} undone, {} to redo", doc.redo_count());
+    }
+    match report {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// The undo-stack labels and the redo count — `fc_app`'s history,
+/// rehydrated from the session journal and read through the real
+/// machinery, which validates the journal against the document.
+fn history(file: &str) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    let journal = Journal::read(file)?;
+    restore_stacks(&mut doc, &journal)?;
+    let entries = doc.undo_history();
+    let redo_count = doc.redo_count();
+    if entries.is_empty() && redo_count == 0 {
+        println!("no history for {file}");
+        return Ok(());
+    }
+    println!("undo stack ({})", entries.len());
+    for (position, entry) in entries.iter().enumerate() {
+        let label = entry.label.as_deref().unwrap_or("-");
+        println!(
+            "  {}. {} ({} change{})",
+            position + 1,
+            label,
+            entry.changes,
+            plural(entry.changes)
+        );
+    }
+    println!("redo available: {redo_count}");
+    Ok(())
+}
+
+/// Sidecar session journal of a document (`demo.fcstd` ->
+/// `demo.fcstd.undolog`): the persisted record of committed
+/// transactions that the `undo`/`redo`/`history` commands replay through
+/// the real `fc_app` transaction machinery.
+fn journal_path(file: &str) -> String {
+    format!("{file}.undolog")
+}
+
+/// One persisted transaction of the session journal.
+struct JournalTxn {
+    label: Option<String>,
+    adds: Vec<JournalAdd>,
+    props: Vec<JournalProp>,
+    /// Document-label changes — no current command produces one, but
+    /// the format (and the restore path) understands them.
+    labels: Vec<(String, String)>,
+}
+
+/// A persisted "object was added" change: enough data (type +
+/// properties + expression bindings) to rebuild the object should its
+/// addition be undone and then redone.
+struct JournalAdd {
+    name: String,
+    type_name: String,
+    props: Vec<(String, Property)>,
+    exprs: Vec<(String, String)>,
+}
+
+/// A persisted property change: `before`/`after` snapshots (`None` = the
+/// property did not exist).
+struct JournalProp {
+    object: String,
+    key: String,
+    before: Option<Property>,
+    after: Option<Property>,
+}
+
+impl JournalAdd {
+    /// Full state of an object that was just added.
+    fn from_object(object: &dyn DocumentObject) -> Self {
+        Self {
+            name: object.name().to_string(),
+            type_name: object.type_name().to_string(),
+            props: object
+                .properties()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            exprs: object
+                .expressions()
+                .iter()
+                .map(|(key, text)| (key.clone(), text.clone()))
+                .collect(),
+        }
+    }
+}
+
+/// The session journal: committed transactions in commit order, of
+/// which the last `redo_depth` have been undone.
+struct Journal {
+    redo_depth: usize,
+    txns: Vec<JournalTxn>,
+}
+
+impl Journal {
+    /// An empty journal — nothing undoable, nothing to redo.
+    fn empty() -> Self {
+        Self {
+            redo_depth: 0,
+            txns: Vec::new(),
+        }
+    }
+
+    /// Read the journal of `file`; a missing journal is an empty one,
+    /// anything unparsable is an error.
+    fn read(file: &str) -> Result<Self, String> {
+        let path = journal_path(file);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::parse(&text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
+            Err(err) => Err(format!("cannot read journal '{path}': {err}")),
+        }
+    }
+
+    /// Record a freshly committed transaction and persist the journal.
+    /// Mirrors `fc_app`: a new step clears the redo region, and the
+    /// journal keeps at most `UNDO_STACK_CAP` transactions (oldest
+    /// dropped first).
+    fn commit(&mut self, file: &str, txn: JournalTxn) -> Result<(), String> {
+        self.redo_depth = 0;
+        self.txns.push(txn);
+        if self.txns.len() > UNDO_STACK_CAP {
+            self.txns.remove(0);
+        }
+        self.write(file)
+    }
+
+    /// Serialize: `V1` header, `D <redo-depth>`, then one transaction
+    /// block per committed step. All free-text fields are escaped
+    /// ([`esc`]) so every field is a single blank-free token.
+    fn write(&self, file: &str) -> Result<(), String> {
+        let path = journal_path(file);
+        let mut text = String::from("V1\n");
+        text.push_str(&format!("D {}\n", self.redo_depth));
+        for txn in &self.txns {
+            match &txn.label {
+                Some(label) => text.push_str(&format!("T {}\n", esc(label))),
+                None => text.push_str("T -\n"),
+            }
+            for add in &txn.adds {
+                text.push_str(&format!("A {} {}\n", esc(&add.name), esc(&add.type_name)));
+                for (key, value) in &add.props {
+                    text.push_str(&format!(
+                        "K {} {} {}\n",
+                        esc(key),
+                        esc(value.type_name()),
+                        esc(&value.to_text())
+                    ));
+                }
+                for (key, expr) in &add.exprs {
+                    text.push_str(&format!("X {} {}\n", esc(key), esc(expr)));
+                }
+            }
+            for prop in &txn.props {
+                let snapshot = |value: &Option<Property>| match value {
+                    Some(value) => format!("{} {}", esc(value.type_name()), esc(&value.to_text())),
+                    None => "-".to_string(),
+                };
+                text.push_str(&format!(
+                    "P {} {} {} {}\n",
+                    esc(&prop.object),
+                    esc(&prop.key),
+                    snapshot(&prop.before),
+                    snapshot(&prop.after),
+                ));
+            }
+            for (before, after) in &txn.labels {
+                text.push_str(&format!("L {} {}\n", esc(before), esc(after)));
+            }
+        }
+        std::fs::write(&path, text).map_err(|err| format!("cannot write journal '{path}': {err}"))
+    }
+
+    /// Parse the `V1` journal format (the inverse of [`Journal::write`]).
+    fn parse(text: &str) -> Result<Self, String> {
+        let mut redo_depth = 0usize;
+        let mut txns: Vec<JournalTxn> = Vec::new();
+        let mut txn: Option<JournalTxn> = None;
+        let mut add: Option<JournalAdd> = None;
+        let mut lines = text.lines().enumerate();
+        match lines.next() {
+            Some((_, "V1")) => {}
+            Some((index, other)) => {
+                return Err(format!(
+                    "journal line {}: expected header 'V1', found '{other}'",
+                    index + 1
+                ))
+            }
+            None => return Err("journal: empty file".to_string()),
+        }
+        for (index, line) in lines {
+            let number = index + 1;
+            if line.is_empty() {
+                return Err(format!("journal line {number}: blank line"));
+            }
+            let mut fields = line.split(' ');
+            let kind = fields.next().unwrap_or_default();
+            let rest: Vec<&str> = fields.collect();
+            // K/X continue the open add block; anything else closes it.
+            if kind != "K" && kind != "X" {
+                if let Some(add) = add.take() {
+                    let Some(open) = txn.as_mut() else {
+                        return Err(format!(
+                            "journal line {number}: add change outside a transaction"
+                        ));
+                    };
+                    open.adds.push(add);
+                }
+            }
+            match kind {
+                "D" => {
+                    let Some(&depth) = rest.first() else {
+                        return Err(format!("journal line {number}: 'D' expects a redo depth"));
+                    };
+                    redo_depth = depth
+                        .parse()
+                        .map_err(|_| format!("journal line {number}: bad redo depth '{depth}'"))?;
+                }
+                "T" => {
+                    if let Some(open) = txn.take() {
+                        txns.push(open);
+                    }
+                    let Some(&label) = rest.first() else {
+                        return Err(format!("journal line {number}: 'T' expects a label"));
+                    };
+                    txn = Some(JournalTxn {
+                        label: journal_label(label, number)?,
+                        adds: Vec::new(),
+                        props: Vec::new(),
+                        labels: Vec::new(),
+                    });
+                }
+                "A" => {
+                    if add.is_some() {
+                        return Err(format!("journal line {number}: 'A' inside an add block"));
+                    }
+                    if rest.len() != 2 {
+                        return Err(format!(
+                            "journal line {number}: 'A' expects a name and a type"
+                        ));
+                    }
+                    add = Some(JournalAdd {
+                        name: unesc(rest[0], number)?,
+                        type_name: unesc(rest[1], number)?,
+                        props: Vec::new(),
+                        exprs: Vec::new(),
+                    });
+                }
+                "K" => {
+                    let Some(block) = add.as_mut() else {
+                        return Err(format!("journal line {number}: 'K' outside an add block"));
+                    };
+                    if rest.len() != 3 {
+                        return Err(format!(
+                            "journal line {number}: 'K' expects a key, a type and a value"
+                        ));
+                    }
+                    let key = unesc(rest[0], number)?;
+                    let type_name = unesc(rest[1], number)?;
+                    let value_text = unesc(rest[2], number)?;
+                    let value = Property::parse(&type_name, &value_text).ok_or_else(|| {
+                        format!("journal line {number}: cannot parse '{value_text}' as {type_name}")
+                    })?;
+                    block.props.push((key, value));
+                }
+                "X" => {
+                    let Some(block) = add.as_mut() else {
+                        return Err(format!("journal line {number}: 'X' outside an add block"));
+                    };
+                    if rest.len() != 2 {
+                        return Err(format!(
+                            "journal line {number}: 'X' expects a key and an expression"
+                        ));
+                    }
+                    block
+                        .exprs
+                        .push((unesc(rest[0], number)?, unesc(rest[1], number)?));
+                }
+                "P" => {
+                    let Some(open) = txn.as_mut() else {
+                        return Err(format!(
+                            "journal line {number}: property change outside a transaction"
+                        ));
+                    };
+                    if rest.len() < 4 {
+                        return Err(format!(
+                            "journal line {number}: 'P' expects an object, a key, before and after"
+                        ));
+                    }
+                    let object = unesc(rest[0], number)?;
+                    let key = unesc(rest[1], number)?;
+                    let mut index = 2;
+                    let before = parse_snapshot(&rest, &mut index, number)?;
+                    let after = parse_snapshot(&rest, &mut index, number)?;
+                    if index != rest.len() {
+                        return Err(format!("journal line {number}: trailing tokens on 'P'"));
+                    }
+                    open.props.push(JournalProp {
+                        object,
+                        key,
+                        before,
+                        after,
+                    });
+                }
+                "L" => {
+                    let Some(open) = txn.as_mut() else {
+                        return Err(format!(
+                            "journal line {number}: label change outside a transaction"
+                        ));
+                    };
+                    if rest.len() != 2 {
+                        return Err(format!(
+                            "journal line {number}: 'L' expects before and after"
+                        ));
+                    }
+                    open.labels
+                        .push((unesc(rest[0], number)?, unesc(rest[1], number)?));
+                }
+                other => {
+                    return Err(format!(
+                        "journal line {number}: unknown line kind '{other}'"
+                    ))
+                }
+            }
+        }
+        if let Some(add) = add.take() {
+            let Some(open) = txn.as_mut() else {
+                return Err("journal: add change outside a transaction".to_string());
+            };
+            open.adds.push(add);
+        }
+        if let Some(open) = txn.take() {
+            txns.push(open);
+        }
+        let journal = Self { redo_depth, txns };
+        if journal.redo_depth > journal.txns.len() {
+            return Err(format!(
+                "journal: redo depth {} exceeds {} transaction(s)",
+                journal.redo_depth,
+                journal.txns.len()
+            ));
+        }
+        Ok(journal)
+    }
+}
+
+/// Rebuild the in-memory transaction stacks from the journal, exactly as
+/// they were at the end of the last session: the committed-not-undone
+/// transactions oldest first, then the undone ones in commit order —
+/// `restore_redo_transaction` re-queues them so `redo` replays
+/// chronologically, and so an undone addition registers its (absent)
+/// object before any later property change of that object resolves. The
+/// document has just been loaded, so it already reflects every committed
+/// — and undone — transaction; nothing is applied here.
+fn restore_stacks(doc: &mut Document, journal: &Journal) -> Result<(), String> {
+    let split = journal.txns.len().saturating_sub(journal.redo_depth);
+    for txn in &journal.txns[..split] {
+        doc.restore_undo_transaction(txn.label.as_deref(), journal_changes(txn, false)?)?;
+    }
+    for txn in &journal.txns[split..] {
+        doc.restore_redo_transaction(txn.label.as_deref(), journal_changes(txn, true)?)?;
+    }
+    Ok(())
+}
+
+/// A journaled transaction's changes as `fc_app` records. When the
+/// transaction sits on the **redo** stack its added objects were undone
+/// — they are rebuilt from their journaled state so a redo can re-add
+/// them; on the undo stack they are still in the document.
+fn journal_changes(txn: &JournalTxn, redoing: bool) -> Result<Vec<JournalChange>, String> {
+    let mut changes = Vec::new();
+    for added in &txn.adds {
+        changes.push(if redoing {
+            JournalChange::AddedAbsent {
+                object: rebuild_object(added)?,
+            }
+        } else {
+            JournalChange::Added {
+                object: added.name.clone(),
+            }
+        });
+    }
+    for prop in &txn.props {
+        changes.push(JournalChange::Property {
+            object: prop.object.clone(),
+            key: prop.key.clone(),
+            before: prop.before.clone(),
+            after: prop.after.clone(),
+        });
+    }
+    for (before, after) in &txn.labels {
+        changes.push(JournalChange::Label {
+            before: before.clone(),
+            after: after.clone(),
+        });
+    }
+    Ok(changes)
+}
+
+/// Rebuild a journaled object from its recorded state: the same feature
+/// constructors as `add`, then its properties and expression bindings.
+fn rebuild_object(added: &JournalAdd) -> Result<Box<dyn DocumentObject>, String> {
+    let mut object = match added.type_name.as_str() {
+        "Part::Box" => Box::new(BoxFeature::new(&added.name)) as Box<dyn DocumentObject>,
+        "Part::Sphere" => Box::new(SphereFeature::new(&added.name)),
+        "Part::Cylinder" => Box::new(CylinderFeature::new(&added.name)),
+        "Part::Cone" => Box::new(ConeFeature::new(&added.name)),
+        "Part::Torus" => Box::new(TorusFeature::new(&added.name)),
+        "Part::Transform" => Box::new(TransformFeature::new(&added.name)),
+        "Part::Cut" | "Part::Fuse" | "Part::Common" => {
+            let kind = BooleanKind::from_type_name(&added.type_name)
+                .ok_or_else(|| format!("journal: unknown boolean type '{}'", added.type_name))?;
+            Box::new(BooleanFeature::new(&added.name, kind))
+        }
+        other => {
+            return Err(format!(
+                "journal: cannot rebuild object '{name}' of type '{other}'",
+                name = added.name
+            ))
+        }
+    };
+    for (key, value) in &added.props {
+        object.properties_mut().insert(key.clone(), value.clone());
+    }
+    if let Some(expressions) = object.expressions_mut() {
+        for (key, text) in &added.exprs {
+            expressions.insert(key.clone(), text.clone());
+        }
+    }
+    Ok(object)
+}
+
+/// `'-'` = no label; anything else is an escaped label string.
+fn journal_label(field: &str, number: usize) -> Result<Option<String>, String> {
+    if field == "-" {
+        Ok(None)
+    } else {
+        unesc(field, number).map(Some)
+    }
+}
+
+/// One `P`-line snapshot field: `-` (absent) or an escaped
+/// type + value pair, parsed back into a [`Property`].
+fn parse_snapshot(
+    rest: &[&str],
+    index: &mut usize,
+    number: usize,
+) -> Result<Option<Property>, String> {
+    let token = rest
+        .get(*index)
+        .copied()
+        .ok_or_else(|| format!("journal line {number}: truncated property snapshot on 'P'"))?;
+    *index += 1;
+    if token == "-" {
+        return Ok(None);
+    }
+    let type_name = unesc(token, number)?;
+    let value_token = rest
+        .get(*index)
+        .copied()
+        .ok_or_else(|| format!("journal line {number}: truncated property value on 'P'"))?;
+    *index += 1;
+    let value_text = unesc(value_token, number)?;
+    Property::parse(&type_name, &value_text)
+        .map(Some)
+        .ok_or_else(|| format!("journal line {number}: cannot parse '{value_text}' as {type_name}"))
+}
+
+/// Escape a journal field: backslash, blank, tab, newline, carriage
+/// return and a bare `-` (reserved for "no value") never appear
+/// verbatim, so escaped fields are single blank-free tokens.
+fn esc(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    for c in field.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\s"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '-' => out.push_str("\\-"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Inverse of [`esc`].
+fn unesc(field: &str, number: usize) -> Result<String, String> {
+    let mut out = String::with_capacity(field.len());
+    let mut chars = field.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('s') => out.push(' '),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('-') => out.push('-'),
+            Some(other) => {
+                return Err(format!("journal line {number}: invalid escape '\\{other}'"))
+            }
+            None => return Err(format!("journal line {number}: trailing escape '\\'")),
+        }
+    }
+    Ok(out)
+}
+
+/// `""` for 1, `"s"` otherwise — the plural of "change"/"step".
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 // ---------------------------------------------------------------------------

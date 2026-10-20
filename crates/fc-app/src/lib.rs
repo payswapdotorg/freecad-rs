@@ -8,6 +8,7 @@
 //! - [`Property`] / [`PropertyContainer`] — FreeCAD's typed property system
 //! - [`DocumentObject`] — the node trait (FreeCAD `App::DocumentObject`)
 //! - [`Document`] — the object graph (FreeCAD `App::Document`)
+//! - [`transaction`] — undo/redo journal (FreeCAD `App::Transaction`)
 //! - [`recompute`] — dependency-ordered execution with cycle detection
 //!
 //! Geometry lives one layer up in `fc-part`, just as `Mod/Part` sits on
@@ -18,8 +19,13 @@ pub mod expression;
 pub mod object;
 pub mod property;
 pub mod recompute;
+pub mod transaction;
 
 pub use document::{Document, ObjectId, ObjectSummary};
 pub use object::{DocumentObject, ObjectStatus, PropertyContainer};
 pub use property::Property;
 pub use recompute::RecomputeError;
+pub use transaction::{
+    HistoryEntry, JournalChange, TransactionId, TransactionInfo, AUTO_TRANSACTION_LABEL,
+    UNDO_STACK_CAP,
+};
