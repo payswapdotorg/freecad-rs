@@ -14,6 +14,7 @@
 //! top of `App` in FreeCAD.
 
 pub mod document;
+pub mod expression;
 pub mod object;
 pub mod property;
 pub mod recompute;
