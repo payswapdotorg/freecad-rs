@@ -463,8 +463,14 @@ fn tessellate_cone(radius1: f64, radius2: f64, height: f64, deflection: f64) -> 
     }
     let base_center = vertices.len() as u32;
     vertices.push(Vector3::new(0.0, 0.0, -half));
-    let top_center = vertices.len() as u32;
-    vertices.push(Vector3::new(0.0, 0.0, half));
+    // Only the truncated cone needs a top disc center; the plain cone
+    // closes at the shared apex, so an extra `top_center` would be an
+    // orphan no triangle references.
+    let top_center = has_top.then(|| {
+        let idx = vertices.len() as u32;
+        vertices.push(Vector3::new(0.0, 0.0, half));
+        idx
+    });
 
     let bot = |i: usize| -> u32 { (i % n) as u32 };
     let top = |i: usize| -> u32 { (top_ring_base + i % n) as u32 };
@@ -480,7 +486,7 @@ fn tessellate_cone(radius1: f64, radius2: f64, height: f64, deflection: f64) -> 
             triangles.push([bot(i), bot(i1), top(i)]); // (A, B, D)
             triangles.push([bot(i1), top(i1), top(i)]); // (B, C, D)
                                                         // Top fan (outward +Z).
-            triangles.push([top_center, top(i), top(i1)]);
+            triangles.push([top_center.expect("top disc"), top(i), top(i1)]);
         } else {
             // Side collapses to triangles sharing the single apex vertex.
             triangles.push([bot(i), bot(i1), apex]);

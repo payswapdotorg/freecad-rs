@@ -7,11 +7,13 @@ use std::path::Path;
 
 use fc_app::{Document, DocumentObject, ObjectSummary, Property, RecomputeError};
 use fc_base::{Placement, Rotation, Vector3};
+use fc_io::mesh_export::{write_obj, write_stl_ascii, write_stl_binary};
 use fc_io::{load_document, save_document};
 use fc_part::features::{
-    BoxFeature, ConeFeature, CylinderFeature, SphereFeature, TorusFeature, TransformFeature,
+    BooleanFeature, BoxFeature, ConeFeature, CylinderFeature, SphereFeature, TorusFeature,
+    TransformFeature,
 };
-use fc_part::{mesh_of, shape_of, Mesh, TopoShape};
+use fc_part::{mesh_of, shape_of, BooleanKind, Mesh, TopoShape};
 
 use crate::{AddShape, Command, ExportFormat};
 
@@ -25,6 +27,17 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
             property,
             value,
         } => set(&file, &object, &property, &value),
+        Command::SetExpr {
+            file,
+            object,
+            property,
+            expression,
+        } => set_expr(&file, &object, &property, &expression),
+        Command::ClearExpr {
+            file,
+            object,
+            property,
+        } => clear_expr(&file, &object, &property),
         Command::Get {
             file,
             object,
@@ -36,6 +49,12 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Stats { file } => stats(&file),
         Command::Export { format } => match format {
             ExportFormat::Svg { file, output, view } => export(&file, &output, &view),
+            ExportFormat::Obj { file, output } => export_obj(&file, &output),
+            ExportFormat::Stl {
+                file,
+                output,
+                binary,
+            } => export_stl(&file, &output, binary),
         },
         Command::Graph { file, output } => graph(&file, &output),
     }
@@ -184,7 +203,41 @@ fn build_feature(
             f.container.set("Scale", Property::Float(scale));
             Box::new(f)
         }
+        AddShape::Cut { base, tool } => boolean_feature(doc, name, BooleanKind::Cut, &base, &tool)?,
+        AddShape::Fuse { base, tool } => {
+            boolean_feature(doc, name, BooleanKind::Fuse, &base, &tool)?
+        }
+        AddShape::Common { base, tool } => {
+            boolean_feature(doc, name, BooleanKind::Common, &base, &tool)?
+        }
     })
+}
+
+/// Build a `Part::Cut`/`Part::Fuse`/`Part::Common` feature after checking
+/// both operands exist.
+#[allow(clippy::too_many_arguments)]
+fn boolean_feature(
+    doc: &Document,
+    name: Option<&str>,
+    kind: BooleanKind,
+    base: &str,
+    tool: &str,
+) -> Result<Box<dyn DocumentObject>, String> {
+    for (label, operand) in [("base", base), ("tool", tool)] {
+        if doc.get_by_name(operand).is_none() {
+            return Err(format!(
+                "--{label} object '{operand}' not found in the document; available: {}",
+                names_list(doc)
+            ));
+        }
+    }
+    let mut f = BooleanFeature::new(
+        name.unwrap_or(kind.type_name().trim_start_matches("Part::")),
+        kind,
+    );
+    f.container.set("Base", Property::Link(base.to_string()));
+    f.container.set("Tool", Property::Link(tool.to_string()));
+    Ok(Box::new(f))
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +303,41 @@ fn get(file: &str, object: &str, property: &str) -> Result<(), String> {
         )
     })?;
     println!("{}", prop.to_text());
+    if let Some(expression) = obj.expressions().get(property) {
+        println!("  (bound to expression: {expression})");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// expressions
+// ---------------------------------------------------------------------------
+
+fn set_expr(file: &str, object: &str, property: &str, expression: &str) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    if doc.get_by_name(object).is_none() {
+        return Err(format!(
+            "object '{object}' not found in '{file}'; available: {}",
+            names_list(&doc)
+        ));
+    }
+    doc.bind_expression(object, property, expression)?;
+    recompute_and_save(file, &mut doc)?;
+    let value = doc
+        .get_by_name(object)
+        .and_then(|obj| obj.properties().get(property))
+        .map(|prop| prop.to_text())
+        .unwrap_or_default();
+    println!("bound {object}.{property} = {expression}");
+    println!("  now {object}.{property} = {value}");
+    Ok(())
+}
+
+fn clear_expr(file: &str, object: &str, property: &str) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    doc.clear_expression(object, property)?;
+    recompute_and_save(file, &mut doc)?;
+    println!("cleared expression on {object}.{property}");
     Ok(())
 }
 
@@ -444,6 +532,101 @@ fn export(file: &str, output: &str, view: &str) -> Result<(), String> {
         "wrote {output} (view={}, {} objects, {triangles} triangles)",
         view.label(),
         meshes.len()
+    );
+    Ok(())
+}
+
+/// Collect the document's placed meshes (shared by the OBJ/STL exports).
+fn placed_meshes(file: &str, deflection: f64) -> Result<Vec<(String, Mesh)>, String> {
+    let (mut doc, _) = load(file)?;
+    // The model must be current and consistent before we export it; no
+    // output file is written when it is not.
+    doc.recompute_all()
+        .map_err(|e| format!("recompute failed: {e}"))?;
+    let mut meshes = Vec::new();
+    for s in doc.summary() {
+        let Some(obj) = doc.get(s.id) else { continue };
+        let Some(mut mesh) = mesh_of(obj, deflection) else {
+            continue;
+        };
+        // Primitives keep their shape at the origin: their `Placement`
+        // property is applied here, at export time. Part::Transform and
+        // the booleans already bake geometry into the computed mesh —
+        // re-applying would double the transform.
+        if !matches!(
+            obj.type_name(),
+            "Part::Transform" | "Part::Cut" | "Part::Fuse" | "Part::Common"
+        ) {
+            if let Some(Property::Placement(p)) = obj.properties().get("Placement") {
+                mesh.transform(&p.to_matrix());
+            }
+        }
+        meshes.push((s.name.clone(), mesh));
+    }
+    Ok(meshes)
+}
+
+fn export_obj(file: &str, output: &str) -> Result<(), String> {
+    let meshes = placed_meshes(file, 0.2)?;
+    let triangles: usize = meshes.iter().map(|(_, m)| m.triangle_count()).sum();
+    let out_file =
+        std::fs::File::create(output).map_err(|e| format!("cannot write '{output}': {e}"))?;
+    let mut out = std::io::BufWriter::new(out_file);
+    // One named object group per document object, all vertices shared
+    // within a group.
+    for (name, mesh) in &meshes {
+        writeln!(out, "o {}", name.replace(char::is_whitespace, "_"))
+            .map_err(|e| format!("cannot write '{output}': {e}"))?;
+        write_obj(&mesh.vertices, &mesh.triangles, &mut out)
+            .map_err(|e| format!("cannot write '{output}': {e}"))?;
+    }
+    out.flush()
+        .map_err(|e| format!("cannot write '{output}': {e}"))?;
+    println!(
+        "wrote {output} (OBJ, {} objects, {triangles} triangles)",
+        meshes.len()
+    );
+    Ok(())
+}
+
+fn export_stl(file: &str, output: &str, binary: bool) -> Result<(), String> {
+    let meshes = placed_meshes(file, 0.2)?;
+    if meshes.len() > 1 {
+        // STL carries no object names; a multi-solid file still exports
+        // (FreeCAD concatenates too), but the user should know.
+        eprintln!(
+            "note: {n} objects in '{file}' — STL has no names; all geometry is merged into one solid",
+            n = meshes.len()
+        );
+    }
+    // One solid: STL (binary especially) allows exactly one header +
+    // triangle table, so the meshes are merged (index-offset).
+    let mut vertices: Vec<Vector3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    for (_, mesh) in &meshes {
+        let offset = vertices.len() as u32;
+        vertices.extend(mesh.vertices.iter().cloned());
+        triangles.extend(
+            mesh.triangles
+                .iter()
+                .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]),
+        );
+    }
+    let out_file =
+        std::fs::File::create(output).map_err(|e| format!("cannot write '{output}': {e}"))?;
+    let mut out = std::io::BufWriter::new(out_file);
+    let result = if binary {
+        write_stl_binary("freecad-rs", &vertices, &triangles, &mut out)
+    } else {
+        write_stl_ascii("freecad-rs", &vertices, &triangles, &mut out)
+    };
+    result.map_err(|e| format!("cannot write '{output}': {e}"))?;
+    out.flush()
+        .map_err(|e| format!("cannot write '{output}': {e}"))?;
+    let flavor = if binary { "binary" } else { "ASCII" };
+    println!(
+        "wrote {output} ({flavor} STL, {triangles} triangles)",
+        triangles = triangles.len()
     );
     Ok(())
 }

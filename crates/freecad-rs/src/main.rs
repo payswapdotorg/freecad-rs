@@ -49,6 +49,23 @@ pub enum Command {
         /// Value in the property's text form (see `docs/cli.md`).
         value: String,
     },
+    /// Bind a Float property to an expression (FreeCAD `setExpression`),
+    /// then recompute + save. Example: `2 * Base.Length + sin(30)`.
+    SetExpr {
+        file: String,
+        /// Object name.
+        object: String,
+        /// Property name (must be a Float).
+        property: String,
+        /// Expression text (see `fc_app::expression` grammar).
+        expression: String,
+    },
+    /// Remove an expression binding; the property keeps its last value.
+    ClearExpr {
+        file: String,
+        object: String,
+        property: String,
+    },
     /// Print a property's value.
     Get {
         file: String,
@@ -140,6 +157,33 @@ pub enum AddShape {
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
     },
+    /// Part::Cut — subtract the Tool mesh from the Base mesh.
+    Cut {
+        /// Base object name.
+        #[arg(long)]
+        base: String,
+        /// Tool object name.
+        #[arg(long)]
+        tool: String,
+    },
+    /// Part::Fuse — union of the Base and Tool meshes.
+    Fuse {
+        /// Base object name.
+        #[arg(long)]
+        base: String,
+        /// Tool object name.
+        #[arg(long)]
+        tool: String,
+    },
+    /// Part::Common — intersection of the Base and Tool meshes.
+    Common {
+        /// Base object name.
+        #[arg(long)]
+        base: String,
+        /// Tool object name.
+        #[arg(long)]
+        tool: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +195,16 @@ pub enum ExportFormat {
         /// Projection: iso | top | front | right.
         #[arg(long, default_value = "iso")]
         view: String,
+    },
+    /// Export the document's meshes to a Wavefront OBJ file.
+    Obj { file: String, output: String },
+    /// Export the document's meshes to STL (ASCII by default).
+    Stl {
+        file: String,
+        output: String,
+        /// Binary STL instead of ASCII.
+        #[arg(long)]
+        binary: bool,
     },
 }
 

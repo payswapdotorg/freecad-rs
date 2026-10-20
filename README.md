@@ -25,9 +25,10 @@ and the `.FCStd` file format:
 | ------------------------ | -------------- | ------------------------------------------------------- |
 | `src/Base`               | `fc-base`      | `Vector3`, `Matrix4`, quaternion `Rotation`, `Placement`, `BoundBox3` |
 | `src/App`                | `fc-app`       | `Document`, `DocumentObject`, typed `Property` system, dependency-ordered recompute with cycle detection |
-| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features |
-| `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema |
-| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, render SVG, export dependency graphs |
+| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans |
+| `src/App/Expression.cpp` | `fc-app`       | expression engine: parser, degree-mode trig, `<<Label>>.Property` references, document bindings with dependency-graph edges + cycle detection |
+| `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings), OBJ/STL mesh export |
+| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, boolean features, expressions, OBJ/STL/SVG export, dependency graphs |
 
 **Not implemented (yet, if ever):** OCCT NURBS/BRep booleans, sketcher,
 GUI, Python scripting, STEP import/export. Real FreeCAD files load with
@@ -75,6 +76,26 @@ freecad-rs set demo.fcstd Ball Radius 6
 #   touched Lift
 #   recomputed Ball (Part::Sphere)
 #   recomputed Lift (Part::Transform)
+```
+
+Expressions drive properties parametrically, FreeCAD-style — the
+binding rides the dependency graph, so changing the source re-runs
+everything downstream:
+
+```sh
+freecad-rs set-expr demo.fcstd Stem Height "2 * Base.Length / 3"
+#   Stem.Height = 20
+freecad-rs set demo.fcstd Base Length 45
+#   touched Base, Stem — Stem.Height is now 30
+```
+
+Boolean features compose meshes (`Part::Cut/Fuse/Common`) and export
+to OBJ/STL for the wider ecosystem:
+
+```sh
+freecad-rs add demo.fcstd --name Notch cut --base Base --tool Stem
+freecad-rs export stl demo.fcstd demo.stl --binary
+freecad-rs export obj demo.fcstd demo.obj
 ```
 
 Full walkthrough: [`docs/cli.md`](docs/cli.md) · rendered example:

@@ -76,6 +76,10 @@ pub const PLANE_EPS: f64 = 1e-5;
 /// the point to count as that endpoint rather than a T-vertex.
 const STITCH_END_EPS: f64 = 1e-9;
 
+/// Vertex-side bits for [`Plane::classify`].
+const FRONT_BIT: u8 = 1;
+const BACK_BIT: u8 = 2;
+
 /// Input triangles with area below this are pruned before the trees are
 /// built (they carry no usable plane).
 const DEGENERATE_AREA: f64 = PLANE_EPS * PLANE_EPS;
@@ -564,6 +568,22 @@ impl Plane {
         lo + (hi - lo) * t
     }
 
+    /// Classify `polygon` against this plane without splitting: a
+    /// bitmask of the vertex sides (`FRONT_BIT`/`BACK_BIT`), used by the
+    /// splitter scorer.
+    fn classify(&self, polygon: &Polygon) -> u8 {
+        let mut mask = 0;
+        for vertex in &polygon.vertices {
+            let t = self.normal.dot(vertex) - self.w;
+            if t > PLANE_EPS {
+                mask |= FRONT_BIT;
+            } else if t < -PLANE_EPS {
+                mask |= BACK_BIT;
+            }
+        }
+        mask
+    }
+
     /// Split `polygon` by this plane.
     fn split_polygon(&self, polygon: Polygon) -> Split {
         const COPLANAR: u8 = 0;
@@ -707,6 +727,82 @@ struct Node {
     back: Option<Box<Node>>,
 }
 
+/// Pick the splitting plane for a node: the best-scoring of (up to 8)
+/// evenly-spaced polygon planes; when a **large** set is one-sided under
+/// every polygon plane (every surface triangle's plane is tangent-ish —
+/// exactly the tessellated-sphere case, whose back chain would otherwise
+/// become a linked list thousands of levels deep and overflow a standard
+/// 2 MiB thread), the axis-aligned midplanes of the bounding box join
+/// the scoring and halve the set instead.
+fn choose_splitter(polygons: &[Polygon]) -> Option<Plane> {
+    // Splits cost double (they duplicate geometry and fan out the tree);
+    // imbalance keeps the sides even.
+    let score_of = |plane: &Plane| -> f64 {
+        let (mut front, mut back, mut splits) = (0usize, 0usize, 0usize);
+        for polygon in polygons {
+            match plane.classify(polygon) {
+                FRONT_BIT => front += 1,
+                BACK_BIT => back += 1,
+                0 => {} // coplanar with the candidate
+                _ => splits += 1,
+            }
+        }
+        2.0 * splits as f64 + front.abs_diff(back) as f64
+    };
+
+    let step = (polygons.len() / 8).max(1);
+    let mut best: Option<(f64, Plane)> = None;
+    for candidate in polygons.iter().step_by(step) {
+        let Some(plane) = candidate.plane() else {
+            continue;
+        };
+        let score = score_of(&plane);
+        if best.map_or(true, |(best_score, _)| score < best_score) {
+            best = Some((score, plane));
+        }
+        // A perfect splitter is not going to be beaten.
+        if score == 0.0 {
+            return best.map(|(_, plane)| plane);
+        }
+    }
+
+    // Large + one-sided: no polygon plane divides the set; halve it with
+    // a bounding-box midplane instead of degenerating into a chain.
+    if polygons.len() > 512 {
+        if let Some((score, _)) = best {
+            if score >= 0.75 * polygons.len() as f64 {
+                let (mut lo, mut hi) = (
+                    Vector3::new(f64::MAX, f64::MAX, f64::MAX),
+                    Vector3::new(f64::MIN, f64::MIN, f64::MIN),
+                );
+                for polygon in polygons {
+                    for vertex in &polygon.vertices {
+                        lo = min_point(lo, *vertex);
+                        hi = max_point(hi, *vertex);
+                    }
+                }
+                for (normal, min, max) in [
+                    (Vector3::new(1.0, 0.0, 0.0), lo.x, hi.x),
+                    (Vector3::new(0.0, 1.0, 0.0), lo.y, hi.y),
+                    (Vector3::new(0.0, 0.0, 1.0), lo.z, hi.z),
+                ] {
+                    if max.is_finite() && min.is_finite() && max - min > PLANE_EPS {
+                        let plane = Plane {
+                            normal,
+                            w: (min + max) / 2.0,
+                        };
+                        let mid_score = score_of(&plane);
+                        if mid_score < score {
+                            best = Some((mid_score, plane));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, plane)| plane)
+}
+
 impl Node {
     /// Insert polygons into the (sub)tree, splitting them as needed.
     fn build(&mut self, polygons: Vec<Polygon>) {
@@ -715,7 +811,7 @@ impl Node {
         }
         let plane = match self.plane {
             Some(plane) => plane,
-            None => match polygons.iter().find_map(Polygon::plane) {
+            None => match choose_splitter(&polygons) {
                 Some(plane) => {
                     self.plane = Some(plane);
                     plane

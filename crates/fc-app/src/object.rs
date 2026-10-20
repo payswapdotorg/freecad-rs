@@ -43,6 +43,10 @@ pub struct PropertyContainer {
     /// Named, ordered properties (FreeCAD property order is defined by
     /// registration; `BTreeMap` gives deterministic persistence).
     pub properties: BTreeMap<String, Property>,
+    /// Expression bindings (FreeCAD's `App::PropertyExpressionEngine`,
+    /// distilled): property name → expression text. Evaluated at
+    /// recompute time, dependencies first.
+    pub expressions: BTreeMap<String, String>,
     status: ObjectStatus,
 }
 
@@ -51,6 +55,7 @@ impl PropertyContainer {
         Self {
             name: name.into(),
             properties: BTreeMap::new(),
+            expressions: BTreeMap::new(),
             status: ObjectStatus::Touched,
         }
     }
@@ -146,6 +151,17 @@ pub trait DocumentObject: Send {
 
     fn properties_mut(&mut self) -> &mut BTreeMap<String, Property>;
 
+    /// Expression bindings (property name → expression text).
+    fn expressions(&self) -> &BTreeMap<String, String> {
+        // Objects without container-backed storage have no bindings.
+        static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(BTreeMap::new)
+    }
+
+    fn expressions_mut(&mut self) -> Option<&mut BTreeMap<String, String>> {
+        None
+    }
+
     /// Recompute outputs from inputs. On `Err` the document marks the
     /// object `Error` and aborts the recompute (FreeCAD-style).
     fn execute(&mut self, doc: &Document) -> Result<(), String>;
@@ -183,6 +199,14 @@ macro_rules! impl_document_object {
             ) -> &mut std::collections::BTreeMap<String, $crate::Property> {
                 &mut self.container.properties
             }
+            fn expressions(&self) -> &std::collections::BTreeMap<String, String> {
+                &self.container.expressions
+            }
+            fn expressions_mut(
+                &mut self,
+            ) -> Option<&mut std::collections::BTreeMap<String, String>> {
+                Some(&mut self.container.expressions)
+            }
             fn execute(&mut self, doc: &$crate::Document) -> Result<(), String> {
                 self.execute_impl(doc)
             }
@@ -202,9 +226,11 @@ macro_rules! impl_document_object {
     };
 }
 
-/// All link targets (`Link` + `LinkList` properties) of an object, in
-/// property-key order. Shared by the document graph walks (link listing,
-/// dependent traversal, topological recompute, DOT export).
+/// All link targets of an object, in property-key order: `Link` +
+/// `LinkList` properties **plus** the objects referenced by bound
+/// expressions (their dependency edges are just as real). Shared by the
+/// document graph walks (link listing, dependent traversal, topological
+/// recompute, DOT export).
 pub(crate) fn link_targets(object: &dyn DocumentObject) -> Vec<String> {
     let mut targets = Vec::new();
     for property in object.properties().values() {
@@ -213,6 +239,17 @@ pub(crate) fn link_targets(object: &dyn DocumentObject) -> Vec<String> {
             Property::LinkList(list) => targets.extend(list.iter().cloned()),
             _ => {}
         }
+    }
+    for text in object.expressions().values() {
+        if let Ok(expression) = crate::expression::parse(text) {
+            for (object_name, _) in expression.variables() {
+                if let Some(name) = object_name {
+                    targets.push(name);
+                }
+            }
+        }
+        // A binding that no longer parses keeps its property edge only;
+        // recompute reports the broken expression itself.
     }
     targets
 }

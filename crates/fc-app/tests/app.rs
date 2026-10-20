@@ -311,16 +311,13 @@ fn property_parse_rejects_malformed_text() {
 /// The documented round-trip contract (`to_text(parse(t)) == t` for every
 /// text this method emits) does not hold for degenerate link names.
 ///
-/// - `LinkList(["a", ""])` emits `"a,"`, which `parse` rejects (`None`)
-///   because of the empty entry.
-/// - `LinkList([""])` emits `""`, which parses to the *empty* list.
-/// - `Link("Base ")` emits `"Base "`, which parses to `"Base"`.
-///
-/// Real FreeCAD object names are sanitized to `[A-Za-z0-9_]`, so this is
-/// unreachable through `Document::add`, but the property API itself
-/// allows it.
+/// The round-trip contract held for every representable name; degenerate
+/// names were the gap. Fixed: `parse` keeps a single trailing empty list
+/// entry, so `to_text` of `LinkList(["a", ""])` re-parses exactly.
+/// (`LinkList([""])` still maps to the empty list — the one documented
+/// ambiguity. `Link` names are verbatim, so padded names round-trip too.
+/// unreachable through `Document::add`.)
 #[test]
-#[ignore = "BUG(fc-app.property): to_text emits LinkList/Link forms with empty or padded names that parse() does not invert"]
 fn property_text_round_trip_degenerate_link_names() {
     let bad = Property::LinkList(vec!["a".into(), String::new()]);
     let text = bad.to_text();

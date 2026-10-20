@@ -8,7 +8,8 @@ use fc_app::{Document, DocumentObject, ObjectStatus, Property};
 use fc_base::{Placement, Rotation, Vector3};
 use fc_part::brep::{self, BrpFormat};
 use fc_part::features::{
-    BoxFeature, ConeFeature, CylinderFeature, SphereFeature, TorusFeature, TransformFeature,
+    BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature, SphereFeature,
+    TorusFeature, TransformFeature,
 };
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
 use quick_xml::events::{BytesStart, Event};
@@ -173,6 +174,15 @@ fn build_document_xml(
             side_files.push((file, bytes));
         }
         xml.push_str("   </Properties>\n");
+        // Expression bindings (FreeCAD persists them as children of the
+        // <Object> element, after the properties).
+        for (path, expression) in obj.expressions() {
+            xml.push_str(&format!(
+                "   <Expression path=\"{}\" expression=\"{}\"/>\n",
+                escape_attr(path),
+                escape_attr(expression)
+            ));
+        }
         xml.push_str("  </Object>\n");
     }
     xml.push_str(" </ObjectData>\n");
@@ -261,6 +271,8 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
     } else if let Some(f) = any.downcast_ref::<TorusFeature>() {
         f.shape.clone()
     } else if let Some(f) = any.downcast_ref::<TransformFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<BooleanFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else {
         None
@@ -689,6 +701,18 @@ fn parse_object_properties(
                     .warnings
                     .push(format!("{owner}: property '{name}' has no value — skipped"));
             }
+            Event::Empty(e) if e.name().as_ref() == b"Expression" => {
+                let map = attrs_of(&e);
+                let path = map.get("path").cloned().unwrap_or_default();
+                let expression = map.get("expression").cloned().unwrap_or_default();
+                if path.is_empty() || expression.is_empty() {
+                    report.warnings.push(format!(
+                        "{owner}: <Expression> without path or text — skipped"
+                    ));
+                } else if let Some(expressions) = object.expressions_mut() {
+                    expressions.insert(path, expression);
+                }
+            }
             Event::End(e) if e.name().as_ref() == b"Object" => return Ok(()),
             Event::Eof => {
                 return Err(FcstdError::Xml("unterminated <Object> element".to_string()));
@@ -1004,6 +1028,12 @@ fn attach_shape(
             TopoShape::Mesh(mesh) => Some(mesh),
             other => Some(other.tessellate(DEFAULT_DEFLECTION)),
         };
+    } else if let Some(f) = any.downcast_mut::<BooleanFeature>() {
+        // Boolean features persist their computed mesh.
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
     } else {
         report.warnings.push(format!(
             "{owner}: object type carries no shape field — geometry skipped"
@@ -1030,6 +1060,8 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "Part::Cone" => Some(Box::new(ConeFeature::new(name))),
         "Part::Torus" => Some(Box::new(TorusFeature::new(name))),
         "Part::Transform" => Some(Box::new(TransformFeature::new(name))),
+        "Part::Cut" | "Part::Fuse" | "Part::Common" => BooleanKind::from_type_name(type_id)
+            .map(|kind| Box::new(BooleanFeature::new(name, kind)) as _),
         _ => None,
     }
 }

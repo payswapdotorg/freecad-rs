@@ -284,6 +284,142 @@ impl TransformFeature {
 
 impl_document_object!(TransformFeature, "Part::Transform");
 
+/// The boolean operation a [`BooleanFeature`] applies — FreeCAD's
+/// `Part::Cut`, `Part::Fuse` and `Part::Common`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BooleanKind {
+    Cut,
+    Fuse,
+    Common,
+}
+
+impl BooleanKind {
+    /// The FreeCAD feature type id.
+    pub fn type_name(self) -> &'static str {
+        match self {
+            BooleanKind::Cut => "Part::Cut",
+            BooleanKind::Fuse => "Part::Fuse",
+            BooleanKind::Common => "Part::Common",
+        }
+    }
+
+    /// Inverse of [`BooleanKind::type_name`].
+    pub fn from_type_name(type_name: &str) -> Option<Self> {
+        match type_name {
+            "Part::Cut" => Some(BooleanKind::Cut),
+            "Part::Fuse" => Some(BooleanKind::Fuse),
+            "Part::Common" => Some(BooleanKind::Common),
+            _ => None,
+        }
+    }
+
+    fn apply(self, base: &Mesh, tool: &Mesh) -> Mesh {
+        match self {
+            BooleanKind::Cut => crate::boolean::cut(base, tool),
+            BooleanKind::Fuse => crate::boolean::fuse(base, tool),
+            BooleanKind::Common => crate::boolean::common(base, tool),
+        }
+    }
+}
+
+/// FreeCAD `Part::Cut` / `Part::Fuse` / `Part::Common`: links to a
+/// `Base` and a `Tool` object and applies the mesh boolean of
+/// [`BooleanKind`] to their tessellated geometry at `execute` time.
+///
+/// FreeCAD hands these to OCCT's `BRepAlgoAPI` on exact BRep geometry;
+/// this kernel runs the BSP mesh boolean ([`crate::boolean`]) on the
+/// tessellations — watertight for watertight operands, exact volumes
+/// only up to tessellation resolution.
+pub struct BooleanFeature {
+    pub container: PropertyContainer,
+    pub kind: BooleanKind,
+    /// Boolean result mesh, set by `execute_impl`.
+    pub result: Option<Mesh>,
+}
+
+impl BooleanFeature {
+    /// Properties: `Base` (Link, required), `Tool` (Link, required).
+    pub fn new(name: &str, kind: BooleanKind) -> Self {
+        let mut container = PropertyContainer::new(name);
+        container.set("Base", Property::Link(String::new()));
+        container.set("Tool", Property::Link(String::new()));
+        Self {
+            container,
+            kind,
+            result: None,
+        }
+    }
+
+    fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
+        let type_name = self.kind.type_name();
+        let name = self.container.name().to_string();
+        let operand =
+            |container: &PropertyContainer, doc: &Document, key: &str| -> Result<Mesh, String> {
+                let target = match container.get(key) {
+                    Some(Property::Link(target)) if !target.is_empty() => target.clone(),
+                    _ => {
+                        return Err(format!(
+                            "{type_name} '{name}': {key} must link to a document object"
+                        ))
+                    }
+                };
+                let object = doc
+                    .get_by_name(&target)
+                    .ok_or_else(|| format!("{type_name} '{name}': {key} '{target}' not found"))?;
+                mesh_of(object, DEFAULT_DEFLECTION).ok_or_else(|| {
+                    format!(
+                        "{type_name} '{name}': {key} '{target}' has no computed geometry \
+                     (not a part feature, or not yet recomputed)"
+                    )
+                })
+            };
+        let base = operand(&self.container, doc, "Base")?;
+        let tool = operand(&self.container, doc, "Tool")?;
+        self.result = Some(self.kind.apply(&base, &tool));
+        Ok(())
+    }
+}
+
+// Manual impl: the type name is per-instance (Cut/Fuse/Common).
+impl DocumentObject for BooleanFeature {
+    fn type_name(&self) -> &'static str {
+        self.kind.type_name()
+    }
+    fn name(&self) -> &str {
+        self.container.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.container.set_name(name)
+    }
+    fn properties(&self) -> &std::collections::BTreeMap<String, fc_app::Property> {
+        &self.container.properties
+    }
+    fn properties_mut(&mut self) -> &mut std::collections::BTreeMap<String, fc_app::Property> {
+        &mut self.container.properties
+    }
+    fn expressions(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.container.expressions
+    }
+    fn expressions_mut(&mut self) -> Option<&mut std::collections::BTreeMap<String, String>> {
+        Some(&mut self.container.expressions)
+    }
+    fn execute(&mut self, doc: &Document) -> Result<(), String> {
+        self.execute_impl(doc)
+    }
+    fn status(&self) -> &fc_app::ObjectStatus {
+        self.container.status()
+    }
+    fn set_status(&mut self, status: fc_app::ObjectStatus) {
+        self.container.set_status(status)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 /// Tessellated geometry of any part feature (any concrete type), via
 /// downcast. `None` for non-part objects or features that have not
 /// computed a shape yet.
@@ -305,6 +441,9 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
         return f.shape.as_ref().map(|s| s.tessellate(deflection));
     }
     if let Some(f) = any.downcast_ref::<TransformFeature>() {
+        return f.result.clone();
+    }
+    if let Some(f) = any.downcast_ref::<BooleanFeature>() {
         return f.result.clone();
     }
     None
@@ -329,6 +468,9 @@ pub fn shape_of(obj: &dyn DocumentObject) -> Option<TopoShape> {
         return f.shape.clone();
     }
     if let Some(f) = any.downcast_ref::<TransformFeature>() {
+        return f.result.clone().map(TopoShape::Mesh);
+    }
+    if let Some(f) = any.downcast_ref::<BooleanFeature>() {
         return f.result.clone().map(TopoShape::Mesh);
     }
     None

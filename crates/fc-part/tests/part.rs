@@ -546,12 +546,10 @@ fn curved_primitive_meshes_are_watertight_and_outward() {
     );
 }
 
-/// A plain cone (`radius2 == 0`) tessellates with an unreferenced
-/// `top_center` vertex: the surface itself is watertight and correctly
-/// wound, but the vertex buffer carries one orphan that no triangle
-/// references. A cleaned-up tessellation would not emit that vertex.
+/// A plain cone (`radius2 == 0`) once tessellated with an unreferenced
+/// `top_center` vertex; fixed by only emitting the top disc center when
+/// there is a top disc.
 #[test]
-#[ignore = "BUG(fc-part.shape): cone tessellation (radius2 == 0) emits an unreferenced top_center vertex — mesh carries one orphan vertex"]
 fn cone_tessellation_has_no_orphan_vertices() {
     let cone = TopoShape::Cone {
         radius1: 3.0,

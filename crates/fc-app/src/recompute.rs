@@ -127,6 +127,11 @@ pub(crate) fn run(doc: &mut Document) -> Result<Vec<ObjectId>, RecomputeError> {
             Some(o) => o,
             None => continue,
         };
+        // Expression bindings run first (FreeCAD evaluates
+        // PropertyExpressionEngine before execute): dependencies have
+        // already recomputed, so their properties are current; the
+        // object's own execute then sees the driven values.
+        evaluate_bindings(object.as_mut(), doc)?;
         match object.execute(doc) {
             Ok(()) => {
                 object.set_status(crate::object::ObjectStatus::Valid);
@@ -145,6 +150,67 @@ pub(crate) fn run(doc: &mut Document) -> Result<Vec<ObjectId>, RecomputeError> {
         }
     }
     Ok(recomputed)
+}
+
+/// Evaluate one object's expression bindings against the current
+/// document state and write the results into the bound `Float`
+/// properties.
+fn evaluate_bindings(
+    object: &mut dyn crate::DocumentObject,
+    doc: &Document,
+) -> Result<(), RecomputeError> {
+    let bindings: Vec<(String, String)> = object
+        .expressions()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let name = object.name().to_string();
+    // Self-references read the object's current (pre-execute) values.
+    let self_values: std::collections::BTreeMap<String, f64> = object
+        .properties()
+        .iter()
+        .filter_map(|(key, value)| match value {
+            crate::Property::Float(v) => Some((key.clone(), *v)),
+            _ => None,
+        })
+        .collect();
+    for (property, text) in bindings {
+        let expression =
+            crate::expression::parse(&text).map_err(|err| RecomputeError::ExecuteFailed {
+                object: name.clone(),
+                reason: format!("expression for '{property}' does not parse: {err}"),
+            })?;
+        let value = expression
+            .eval(&|object: Option<&str>, prop: &str| match object {
+                Some(object_name) => doc
+                    .get_by_name(object_name)
+                    .and_then(|target| match target.properties().get(prop) {
+                        Some(crate::Property::Float(v)) => Some(*v),
+                        _ => None,
+                    })
+                    .ok_or_else(|| crate::expression::ExprError::UnresolvableReference {
+                        object: Some(object_name.to_string()),
+                        property: prop.to_string(),
+                    }),
+                None => self_values.get(prop).copied().ok_or_else(|| {
+                    crate::expression::ExprError::UnresolvableReference {
+                        object: None,
+                        property: prop.to_string(),
+                    }
+                }),
+            })
+            .map_err(|err| RecomputeError::ExecuteFailed {
+                object: name.clone(),
+                reason: format!("expression for '{property}' failed: {err}"),
+            })?;
+        object
+            .properties_mut()
+            .insert(property.clone(), crate::Property::Float(value));
+    }
+    Ok(())
 }
 
 pub(crate) fn is_touched(doc: &Document, id: ObjectId) -> bool {

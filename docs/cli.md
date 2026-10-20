@@ -240,3 +240,59 @@ inputs are typed properties, and whose outputs are computed from them,
 The full walkthrough lives in `scripts/demo.sh`; its artifacts
 (`examples/demo.fcstd`, `examples/demo.svg`, `examples/graph.dot`) are
 committed to the repo.
+
+## Booleans: `add cut|fuse|common`
+
+`Part::Cut`, `Part::Fuse` and `Part::Common` link to a `Base` and a
+`Tool` object and combine their tessellated geometry at recompute time
+(a BSP-tree mesh boolean; watertight for watertight box/cylinder
+operands — curved-seam sphere booleans are on the roadmap):
+
+```sh
+freecad-rs add demo.fcstd --name Notch cut --base Base --tool Stem
+#   recomputed Notch (Part::Cut)
+freecad-rs add demo.fcstd --name Blob fuse --base Ball --tool Stem
+freecad-rs add demo.fcstd --name Core common --base Base --tool Ball
+```
+
+Changing either operand's parameters (e.g. `set demo.fcstd Stem Radius
+3`) touches the boolean like any other dependent.
+
+## Expressions: `set-expr` / `clear-expr`
+
+A Float property can be **bound** to an expression (FreeCAD
+`setExpression`). The binding becomes a dependency-graph edge: changing
+a referenced property re-evaluates the binding (dependencies first),
+and the bound property is read-only until cleared.
+
+```sh
+freecad-rs set-expr demo.fcstd Stem Height "2 * Base.Length / 3"
+freecad-rs get demo.fcstd Stem Height
+#   20
+#     (bound to expression: 2 * Base.Length / 3)
+freecad-rs clear-expr demo.fcstd Stem Height
+```
+
+Grammar (module docs in `fc_app::expression`): arithmetic `+ - * / % ^`
+(`^` right-associative), parentheses, references `Object.Property` and
+`<<Object Label>>.Property` (a bare `.Property` reads the object
+itself), functions `sin cos tan asin acos atan atan2 sqrt abs exp ln
+log10 pow floor ceil round min max hypot` — **trig in degrees**
+(`sin(30) = 0.5`), constants `pi`/`e`, and unit suffixes folded at parse
+time (`5mm`, `5cm`, `5m`, `5in`/`5"`, `30deg`, `30rad`). Expression
+cycles (`A.x = B.y`, `B.y = A.x`) are rejected by the recompute's cycle
+check.
+
+## Mesh export: `export obj|stl`
+
+```sh
+freecad-rs export obj demo.fcstd demo.obj      # named groups per object
+freecad-rs export stl demo.fcstd demo.stl        # ASCII STL
+freecad-rs export stl demo.fcstd demo.stl --binary
+```
+
+All exports recompute first (no stale geometry is ever written). OBJ
+emits one `o` group per document object with shared vertices; STL
+merges everything into one solid (the format carries no names) with
+exact `84 + 50·n` binary sizing and outward normals from the CCW
+winding.

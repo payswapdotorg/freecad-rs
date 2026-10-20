@@ -42,8 +42,8 @@ impl Property {
     /// | `String`    | raw, unchanged                             |
     /// | `Vector`    | `x,y,z`                                    |
     /// | `Placement` | `pos=(x,y,z);axis=(x,y,z);angle=deg`      |
-    /// | `Link`      | the target name                            |
-    /// | `LinkList`  | target names, comma-joined                 |
+    /// | `Link`      | the target name, verbatim                  |
+    /// | `LinkList`  | target names, comma-joined verbatim       |
     ///
     /// Placement angles are degrees rounded to at most 4 decimals; axis
     /// components to at most 12 (see `format_axis` below for why), so that
@@ -86,7 +86,8 @@ impl Property {
 
     /// Parse a CLI value (from `freecad-rs set`) for the property with the
     /// given FreeCAD type name. Returns `None` on unknown type or malformed
-    /// text. Whitespace around scalars and list entries is tolerated.
+    /// text. Whitespace around scalars is tolerated; link names are taken
+    /// verbatim so `to_text` output always re-parses identically.
     pub fn parse(type_name: &str, text: &str) -> Option<Property> {
         match type_name {
             "App::PropertyBool" => match text.trim().to_ascii_lowercase().as_str() {
@@ -99,16 +100,24 @@ impl Property {
             "App::PropertyString" => Some(Property::String(text.to_string())),
             "App::PropertyVector" => parse_vector(text).map(Property::Vector),
             "App::PropertyPlacement" => parse_placement(text).map(Property::Placement),
-            "App::PropertyLink" => Some(Property::Link(text.trim().to_string())),
+            "App::PropertyLink" => Some(Property::Link(text.to_string())),
             "App::PropertyLinkList" => {
+                // Tolerant on the way in, invertible on the way out:
+                // entries are trimmed; an empty entry inside the list is
+                // malformed, but a single trailing empty entry is kept so
+                // that `to_text` of a list ending in an empty name (e.g.
+                // `"a,"`) re-parses to the same value. The empty string
+                // itself denotes the empty list.
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     return Some(Property::LinkList(Vec::new()));
                 }
-                let mut names = Vec::new();
-                for part in trimmed.split(',') {
+                let parts: Vec<&str> = trimmed.split(',').collect();
+                let last = parts.len() - 1;
+                let mut names = Vec::with_capacity(parts.len());
+                for (i, part) in parts.iter().enumerate() {
                     let name = part.trim();
-                    if name.is_empty() {
+                    if name.is_empty() && i != last {
                         return None;
                     }
                     names.push(name.to_string());

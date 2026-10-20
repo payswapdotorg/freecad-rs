@@ -221,13 +221,106 @@ impl Document {
 
     /// Set one property and mark the object **and its transitive
     /// dependents** as touched. This is the trigger of the parametric
-    /// cascade.
+    /// cascade. A property with an expression bound is read-only until
+    /// the binding is cleared (FreeCAD behavior).
     pub fn set_property(&mut self, name: &str, key: &str, value: Property) -> Result<(), String> {
         let Some(&id) = self.index.get(name) else {
             return Err(format!("object '{name}' not found"));
         };
+        if let Some(object) = self.objects.get(&id) {
+            if object.expressions().contains_key(key) {
+                return Err(format!(
+                    "property '{key}' of '{name}' is bound to an expression \
+                     (clear it first)"
+                ));
+            }
+        }
         if let Some(object) = self.objects.get_mut(&id) {
             object.properties_mut().insert(key.to_string(), value);
+        }
+        let dependents = self.dependents_of(name);
+        if let Some(object) = get_mut(self, id) {
+            object.set_status(ObjectStatus::Touched);
+        }
+        for dependent in dependents {
+            if let Some(&dependent_id) = self.index.get(&dependent) {
+                if let Some(object) = get_mut(self, dependent_id) {
+                    object.set_status(ObjectStatus::Touched);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind a property to an expression (FreeCAD's
+    /// `setExpression`): the property is recomputed from `text` at
+    /// every recompute, before the object executes, dependencies first.
+    /// The expression must parse, and the property must exist and be a
+    /// `Float` (the binding drives it). Touches the object and its
+    /// dependents, like `set_property`.
+    pub fn bind_expression(
+        &mut self,
+        name: &str,
+        property: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        let Some(&id) = self.index.get(name) else {
+            return Err(format!("object '{name}' not found"));
+        };
+        // Validate before mutating anything.
+        crate::expression::parse(text).map_err(|err| err.to_string())?;
+        if let Some(object) = self.objects.get(&id) {
+            match object.properties().get(property) {
+                Some(Property::Float(_)) => {}
+                Some(other) => {
+                    return Err(format!(
+                        "property '{property}' of '{name}' is {} — only Float \
+                         properties can carry expressions",
+                        other.type_name()
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "object '{name}' has no property '{property}' to bind"
+                    ))
+                }
+            }
+        }
+        if let Some(object) = self.objects.get_mut(&id) {
+            if let Some(expressions) = object.expressions_mut() {
+                expressions.insert(property.to_string(), text.to_string());
+            }
+        }
+        let dependents = self.dependents_of(name);
+        if let Some(object) = get_mut(self, id) {
+            object.set_status(ObjectStatus::Touched);
+        }
+        for dependent in dependents {
+            if let Some(&dependent_id) = self.index.get(&dependent) {
+                if let Some(object) = get_mut(self, dependent_id) {
+                    object.set_status(ObjectStatus::Touched);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove an expression binding; the property becomes settable again
+    /// and keeps its last evaluated value. Touches the object and its
+    /// dependents.
+    pub fn clear_expression(&mut self, name: &str, property: &str) -> Result<(), String> {
+        let Some(&id) = self.index.get(name) else {
+            return Err(format!("object '{name}' not found"));
+        };
+        let removed = self
+            .objects
+            .get_mut(&id)
+            .and_then(|object| object.expressions_mut())
+            .and_then(|expressions| expressions.remove(property));
+        if removed.is_none() {
+            return Err(format!(
+                "property '{property}' of '{name}' has no expression bound"
+            ));
         }
         let dependents = self.dependents_of(name);
         if let Some(object) = get_mut(self, id) {
