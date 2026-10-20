@@ -9,6 +9,7 @@ pub mod bbox;
 pub mod console;
 pub mod matrix;
 pub mod placement;
+pub mod quantity;
 pub mod rotation;
 pub mod vector;
 
