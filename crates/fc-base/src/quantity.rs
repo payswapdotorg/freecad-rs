@@ -247,6 +247,43 @@ impl Unit {
                 .map(|p| clamp_power(i64::from(p) * i64::from(exp))),
         }
     }
+
+    /// Like [`Unit::powi`], but returns `None` instead of silently
+    /// saturating when any scaled power would leave the ±127 range —
+    /// for callers that want unit-power overflow to be an honest error.
+    pub fn checked_powi(&self, exp: i32) -> Option<Unit> {
+        let exp = i64::from(exp);
+        let mut powers = [0i8; 8];
+        for (index, &power) in self.powers.iter().enumerate() {
+            let scaled = i64::from(power) * exp;
+            if !(-MAX_POWER..=MAX_POWER).contains(&scaled) {
+                return None;
+            }
+            // Bounded to ±127 by the check above.
+            powers[index] = scaled as i8;
+        }
+        Some(Unit { powers })
+    }
+
+    /// True when this signature is exactly the plane-angle dimension
+    /// (canonical unit `deg`), power one.
+    pub fn is_angle(&self) -> bool {
+        *self == Unit::degree()
+    }
+
+    /// Halve every power — the unit of a square root — provided all
+    /// powers are even. `None` means some power is odd, i.e. the square
+    /// root would need a fractional unit signature this crate does not
+    /// represent (`mm` has no unit-exact sqrt; `mm^2` does).
+    pub fn try_sqrt(&self) -> Option<Unit> {
+        if self.powers.iter().all(|power| power % 2 == 0) {
+            Some(Unit {
+                powers: self.powers.map(|power| power / 2),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 /// Clamp a computed power into the representable range (see `MAX_POWER`).
@@ -444,6 +481,29 @@ impl Quantity {
             value: self.value.powi(exp),
             unit: self.unit.powi(exp),
         }
+    }
+
+    /// Like [`Quantity::powi`], but returns `None` instead of silently
+    /// saturating the unit when any scaled power would leave the ±127
+    /// range (see [`Unit::checked_powi`]).
+    pub fn try_powi(self, exp: i32) -> Option<Quantity> {
+        self.unit
+            .checked_powi(exp)
+            .map(|unit| Quantity::new(self.value.powi(exp), unit))
+    }
+
+    /// Square root: the value is rooted, the unit powers halved.
+    /// Returns `None` when the unit has an odd power anywhere (see
+    /// [`Unit::try_sqrt`]); a dimensionless quantity always sqrt fine.
+    pub fn try_sqrt(self) -> Option<Quantity> {
+        self.unit
+            .try_sqrt()
+            .map(|unit| Quantity::new(self.value.sqrt(), unit))
+    }
+
+    /// Absolute value; the unit is unchanged.
+    pub fn abs(self) -> Quantity {
+        Quantity::new(self.value.abs(), self.unit)
     }
 
     /// Check that `target` has the same dimension as this quantity and

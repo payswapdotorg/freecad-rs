@@ -3,35 +3,71 @@
 //! `Expression.y` grammar).
 //!
 //! FreeCAD binds any float property to a formula over other properties,
-//! e.g. `Height = 2 * Base.Length`. This module distills that engine to
-//! plain numbers: [`parse`] turns expression text into an [`Expression`]
-//! AST, and [`Expression::eval`] evaluates it against an [`ExprEnv`]
-//! that resolves property references.
+//! e.g. `Height = 2 * Base.Length`. This module distills that engine:
+//! [`parse`] turns expression text into an [`Expression`] AST, and
+//! [`Expression::eval`] evaluates it to an [`fc_base::Quantity`] — a
+//! value paired with its dimensional unit — against an [`ExprEnv`] that
+//! resolves property references.
 //!
 //! Semantics (matching FreeCAD unless noted):
 //!
-//! - **Degree trig**: `sin`, `cos`, `tan` take *degrees* — `sin(30)` is
-//!   `0.5`. `asin`, `acos`, `atan`, `atan2` *return* degrees.
-//! - **Unit folding** (design choice — units fold into the number at
-//!   parse time, using FreeCAD's internal bases: millimetre and degree):
+//! - **Quantity-typed evaluation**: literals, arithmetic and function
+//!   results carry their unit; dimensional errors are honest runtime
+//!   errors, not silent nonsense. `5mm * 5mm` is `25 mm^2`, and
+//!   `5mm + 2kg` fails with an error naming both units.
+//! - **Unit suffixes** — same accepted set as always, no new units, and
+//!   the suffix must still touch the number (`5mm` parses; `5 mm` is a
+//!   parse error). The suffix keeps converting the number into the
+//!   canonical internal units, but the literal now *carries* the
+//!   resulting dimension instead of folding into a bare number:
 //!
-//!   | written          | folded value           |
-//!   |------------------|------------------------|
-//!   | `5`              | 5                      |
-//!   | `5mm`            | 5                      |
-//!   | `5cm`            | 50                     |
-//!   | `5m`             | 5000                   |
-//!   | `5in` / `5"`     | 127                    |
-//!   | `30deg`          | 30                     |
-//!   | `30rad`          | 30 × 180/π ≈ 1718.8734 |
+//!   | written          | evaluates to               |
+//!   |------------------|----------------------------|
+//!   | `5`              | dimensionless 5            |
+//!   | `5mm`            | 5 mm (length)              |
+//!   | `5cm`            | 50 mm                      |
+//!   | `5m`             | 5000 mm                    |
+//!   | `5in` / `5"`     | 127 mm                     |
+//!   | `30deg`          | 30 deg (angle)             |
+//!   | `30rad`          | 30 × 180/π ≈ 1718.8734 deg |
 //!
-//!   A radian suffix folds to its degree measure and trig re-converts to
-//!   radians, so the conversions cancel: `sin(30rad)` is the sine of 30
-//!   radians. The suffix must touch the number (`5mm` parses; `5 mm`
-//!   is a parse error).
+//! - **Canonical angle unit**: the internal angle unit is the *degree*,
+//!   matching `fc_base`'s canonical storage. `deg` is the identity
+//!   conversion, `rad` multiplies by 180/π at parse time, trig
+//!   arguments that carry the angle dimension are read in internal
+//!   degrees, and inverse trig return angle quantities in internal
+//!   degrees.
+//! - **Degree trig** (deliberate compat choice): `sin`, `cos`, `tan`
+//!   interpret a *dimensionless* argument as degrees — `sin(30)` is
+//!   `0.5` — exactly as FreeCAD does for plain numbers. An argument
+//!   carrying the angle dimension is used as-is (already internal
+//!   degrees, so `sin(30rad)` is the sine of 30 radians); any other
+//!   unit is rejected with the FreeCAD-shaped message "unit must be
+//!   empty or an angle". `asin`, `acos`, `atan`, `atan2` *return* an
+//!   angle quantity in internal degrees; `atan2` requires
+//!   same-dimension arguments.
+//! - **Arithmetic**: `+`/`-` require matching dimensions (mismatch is
+//!   [`ExprError::UnitMismatch`], naming both units). `*` and `/`
+//!   combine units (`1/x` inverts the unit). `%` keeps numeric-only
+//!   semantics: both operands must be dimensionless. `^` raises the
+//!   unit to an exact integer power when the exponent is a
+//!   dimensionless integer; for any other exponent the *base* must be
+//!   dimensionless (an honest v1 restriction — FreeCAD allows
+//!   fractional powers on dimensioned units only in special cases).
+//! - **Functions**: `sqrt`, `exp`, `ln`, `log`, `log10`, `pow`, `abs`,
+//!   `floor`, `ceil`, `round`, `hypot`, `min`, `max` (the same set as
+//!   before). All require dimensionless operands except: `sqrt`, which
+//!   additionally accepts a unit whose powers are all even and halves
+//!   them (`sqrt(2mm * 8mm)` is `4 mm`; fractional unit signatures are
+//!   not representable, so odd powers are rejected); `abs`, which
+//!   keeps the unit; `hypot`, which requires same-dimension operands
+//!   and returns that unit; and `min`/`max`, which require
+//!   same-dimension operands and return the winner's unit.
 //! - **References**: `Object.Property`, `<<Object Label>>.Property`
 //!   (labels may contain spaces), and bare `Property` / `.Property`
-//!   (self-reference — `object: None`).
+//!   (self-reference — `object: None`). The environment resolves them;
+//!   [`MapEnv`] and the document layer resolve float properties as
+//!   *dimensionless* quantities.
 //! - **Constants**: `pi` and `e` fold into [`Expression::Number`] at
 //!   parse time. A bare identifier that matches a constant
 //!   case-insensitively but not exactly (`PI`, `E`) is rejected with
@@ -43,17 +79,18 @@
 //!   convention instead). Unary minus binds tighter than `^`, like
 //!   FreeCAD: `-2 ^ 2` = 4.
 //!
-//! Deliberate simplifications: no quantity/dimensional analysis (units
-//! fold away — `5mm * 5mm` is 25, not 25 mm²), no string, conditional or
-//! comparison expressions, no multi-component paths (`a.b.c`), no
-//! spreadsheet cells or aggregates, ASCII-only identifiers, `ln` and
-//! `log` are both the natural logarithm (FreeCAD spells it `log`),
-//! division/modulo by exact zero is [`ExprError::DivisionByZero`] where
-//! FreeCAD would float to ±∞, and NaN-producing calls (`sqrt(-1)`)
-//! return NaN. Parse error positions are byte offsets.
+//! Deliberate simplifications: no string, conditional or comparison
+//! expressions, no multi-component paths (`a.b.c`), no spreadsheet
+//! cells or aggregates, ASCII-only identifiers, `ln` and `log` are both
+//! the natural logarithm (FreeCAD spells it `log`), division/modulo by
+//! exact zero is [`ExprError::DivisionByZero`] where FreeCAD would
+//! float to ±∞, and NaN-producing calls (`sqrt(-1)`) return NaN. Parse
+//! error positions are byte offsets.
 
 use std::collections::HashMap;
 use std::fmt;
+
+use fc_base::quantity::{Quantity, Unit};
 
 /// Unary operators (FreeCAD `OperatorExpression::NEG` / `POS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,13 +113,75 @@ pub enum BinaryOp {
     Pow,
 }
 
-/// Expression AST. Unit suffixes and the constants `pi`/`e` are folded
-/// into [`Expression::Number`] at parse time (see the [module
-/// docs](self)); references keep their textual shape.
+/// Unit suffix accepted on a numeric literal — the same set the engine
+/// has always accepted, no new units. The suffix still "touches" the
+/// number (its factor converts the value into canonical internal
+/// units), but the literal now *carries* the resulting dimension
+/// instead of folding into a bare number (see the [module docs](self)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitSuffix {
+    /// `mm` — millimetre, the canonical length unit (factor 1).
+    Mm,
+    /// `cm` — centimetre (factor 10).
+    Cm,
+    /// `m` — metre (factor 1000).
+    M,
+    /// `in` or `"` — inch (factor 25.4).
+    In,
+    /// `deg` — degree, the canonical angle unit (factor 1).
+    Deg,
+    /// `rad` — radian (factor 180/π).
+    Rad,
+}
+
+impl UnitSuffix {
+    /// Conversion factor into the canonical internal unit (mm for
+    /// lengths, deg for angles).
+    fn factor(self) -> f64 {
+        match self {
+            UnitSuffix::Mm | UnitSuffix::Deg => 1.0,
+            UnitSuffix::Cm => 10.0,
+            UnitSuffix::M => 1000.0,
+            UnitSuffix::In => 25.4,
+            UnitSuffix::Rad => 180.0 / std::f64::consts::PI,
+        }
+    }
+
+    /// The dimensional signature this suffix produces.
+    fn unit(self) -> Unit {
+        match self {
+            UnitSuffix::Mm | UnitSuffix::Cm | UnitSuffix::M | UnitSuffix::In => Unit::meter(),
+            UnitSuffix::Deg | UnitSuffix::Rad => Unit::degree(),
+        }
+    }
+
+    /// Canonical spelling used by [`Expression::to_text`] (`"` is
+    /// normalized to `in`).
+    fn symbol(self) -> &'static str {
+        match self {
+            UnitSuffix::Mm => "mm",
+            UnitSuffix::Cm => "cm",
+            UnitSuffix::M => "m",
+            UnitSuffix::In => "in",
+            UnitSuffix::Deg => "deg",
+            UnitSuffix::Rad => "rad",
+        }
+    }
+}
+
+/// Expression AST. Unit suffixes stay on the literal as a
+/// [`UnitSuffix`]; the constants `pi`/`e` fold into
+/// [`Expression::Number`] at parse time (see the [module docs](self));
+/// references keep their textual shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
-    /// A literal number, already folded to internal units (mm/degrees).
+    /// A literal number without a unit suffix (dimensionless; constants
+    /// fold here too).
     Number(f64),
+    /// A literal number with a unit suffix, e.g. `5cm`. `value` is the
+    /// number as written; evaluation applies the suffix factor and
+    /// attaches the dimension.
+    UnitNumber { value: f64, suffix: UnitSuffix },
     /// A property reference. `object` is `None` for self-references
     /// (bare `Property` / `.Property`); `Some(label)` for
     /// `Object.Property` / `<<Object Label>>.Property`.
@@ -122,6 +221,25 @@ pub enum ExprError {
         object: Option<String>,
         property: String,
     },
+    /// Arithmetic tried to combine incompatible dimensions (e.g.
+    /// `5mm + 2kg`): `op` names the operator or function, `left` and
+    /// `right` are the two units involved, in canonical form.
+    UnitMismatch {
+        op: String,
+        left: String,
+        right: String,
+    },
+    /// A unit appeared where only a dimensionless number is allowed
+    /// (e.g. `ln(2mm)`, `5mm % 2`, a unit-carrying exponent).
+    UnitNotAllowed { unit: String, function: String },
+    /// A trig function got a unit that is neither empty nor an angle
+    /// (FreeCAD's own message shape).
+    AngleUnitRequired { function: String, unit: String },
+    /// A unit-bearing base was raised to an exponent that is not an
+    /// exact integer; fractional unit powers are not representable.
+    NonIntegerExponent { unit: String, exponent: String },
+    /// An integer power would push a unit power past the ±127 limit.
+    UnitPowerOverflow { unit: String, exponent: String },
 }
 
 impl fmt::Display for ExprError {
@@ -140,6 +258,27 @@ impl fmt::Display for ExprError {
                     "cannot resolve property '{property}' of the current object"
                 ),
             },
+            ExprError::UnitMismatch { op, left, right } => write!(
+                f,
+                "unit mismatch in '{op}': cannot combine '{left}' with '{right}'"
+            ),
+            ExprError::UnitNotAllowed { unit, function } => {
+                write!(f, "unit '{unit}' is not allowed in '{function}'")
+            }
+            ExprError::AngleUnitRequired { function, unit } => write!(
+                f,
+                "unit must be empty or an angle in '{function}', got '{unit}'"
+            ),
+            ExprError::NonIntegerExponent { unit, exponent } => write!(
+                f,
+                "exponent {exponent} on unit '{unit}': unit-bearing bases \
+                 require an exact integer exponent"
+            ),
+            ExprError::UnitPowerOverflow { unit, exponent } => write!(
+                f,
+                "unit power overflow: '{unit}' to the {exponent} exceeds \
+                 the ±127 power limit"
+            ),
         }
     }
 }
@@ -149,8 +288,10 @@ impl std::error::Error for ExprError {}
 /// Resolves property references during evaluation. `object` is `None`
 /// for self-references (bare `Property` / `.Property`).
 ///
-/// The document layer will implement this over the property graph;
-/// tests use [`MapEnv`] or the closure adapter below.
+/// Resolution yields a [`Quantity`]. Float properties resolve as
+/// *dimensionless* quantities (see [`MapEnv`] and the document layer);
+/// test environments may supply unit-carrying values to exercise the
+/// dimensional analysis.
 ///
 /// ```
 /// use fc_app::expression::{parse, MapEnv};
@@ -161,43 +302,49 @@ impl std::error::Error for ExprError {}
 ///     .expect("parses")
 ///     .eval(&env)
 ///     .expect("evaluates");
-/// assert_eq!(value, 22.0);
+/// assert_eq!(value.value(), 22.0);
+/// assert!(value.unit().is_dimensionless());
 /// ```
 pub trait ExprEnv {
     /// Value of `object.property` (or of the current object's
     /// `property` when `object` is `None`).
-    fn resolve(&self, object: Option<&str>, property: &str) -> Result<f64, ExprError>;
+    fn resolve(&self, object: Option<&str>, property: &str) -> Result<Quantity, ExprError>;
 }
 
-/// Closure adapter: any `Fn(Option<&str>, &str) -> Result<f64, ExprError>`
-/// is an [`ExprEnv`], so environments can be written inline.
+/// Closure adapter: any `Fn(Option<&str>, &str) -> Result<Quantity,
+/// ExprError>` is an [`ExprEnv`], so environments can be written inline.
 ///
 /// ```
 /// use fc_app::expression::{parse, ExprError};
+/// use fc_base::quantity::Quantity;
 ///
-/// let env = |object: Option<&str>, property: &str| -> Result<f64, ExprError> {
+/// let env = |object: Option<&str>, property: &str| -> Result<Quantity, ExprError> {
 ///     match (object, property) {
-///         (Some("Box"), "Length") => Ok(10.0),
+///         (Some("Box"), "Length") => Ok(Quantity::dimensionless(10.0)),
 ///         _ => Err(ExprError::UnresolvableReference {
 ///             object: object.map(str::to_string),
 ///             property: property.to_string(),
 ///         }),
 ///     }
 /// };
-/// assert_eq!(parse("Box.Length * 2").unwrap().eval(&env).unwrap(), 20.0);
+/// assert_eq!(
+///     parse("Box.Length * 2").unwrap().eval(&env).unwrap().value(),
+///     20.0
+/// );
 /// ```
 impl<F> ExprEnv for F
 where
-    F: Fn(Option<&str>, &str) -> Result<f64, ExprError>,
+    F: Fn(Option<&str>, &str) -> Result<Quantity, ExprError>,
 {
-    fn resolve(&self, object: Option<&str>, property: &str) -> Result<f64, ExprError> {
+    fn resolve(&self, object: Option<&str>, property: &str) -> Result<Quantity, ExprError> {
         self(object, property)
     }
 }
 
 /// A simple [`ExprEnv`] for tests and small programs: named-object
 /// references (`"Box", "Length"`) live in a `HashMap<(String, String),
-/// f64>`, self-references in a per-property map. Misses give
+/// f64>`, self-references in a per-property map. Values are floats and
+/// resolve as *dimensionless* quantities; misses give
 /// [`ExprError::UnresolvableReference`] carrying the reference.
 #[derive(Debug, Clone, Default)]
 pub struct MapEnv {
@@ -226,22 +373,26 @@ impl MapEnv {
 }
 
 impl ExprEnv for MapEnv {
-    fn resolve(&self, object: Option<&str>, property: &str) -> Result<f64, ExprError> {
+    fn resolve(&self, object: Option<&str>, property: &str) -> Result<Quantity, ExprError> {
         match object {
             Some(object) => self
                 .values
                 .get(&(object.to_string(), property.to_string()))
                 .copied()
+                .map(Quantity::dimensionless)
                 .ok_or_else(|| ExprError::UnresolvableReference {
                     object: Some(object.to_string()),
                     property: property.to_string(),
                 }),
-            None => self.self_values.get(property).copied().ok_or_else(|| {
-                ExprError::UnresolvableReference {
+            None => self
+                .self_values
+                .get(property)
+                .copied()
+                .map(Quantity::dimensionless)
+                .ok_or_else(|| ExprError::UnresolvableReference {
                     object: None,
                     property: property.to_string(),
-                }
-            }),
+                }),
         }
     }
 }
@@ -285,8 +436,12 @@ fn function_arity(name: &str) -> Option<(usize, usize)> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum TokenKind {
-    /// Number with any unit suffix already folded to internal units.
-    Number(f64),
+    /// Number with any unit suffix attached (still unfolded; the suffix
+    /// converts at evaluation time).
+    Number {
+        value: f64,
+        suffix: Option<UnitSuffix>,
+    },
     Ident(String),
     /// `<<Label>>` — content between the angle pairs.
     Label(String),
@@ -310,34 +465,40 @@ struct Token {
     pos: usize,
 }
 
-/// Fold a unit suffix onto `value`; returns the folded value and how
-/// many bytes of `rest` the suffix consumed (0 if none). Multi-character
-/// units are matched before single-character ones, so `5mm` is not read
-/// as `5m` + `m`.
-fn apply_unit_suffix(value: f64, rest: &str) -> (f64, usize) {
-    const SUFFIXES: [(&str, f64); 7] = [
-        ("deg", 1.0),
-        ("rad", 180.0 / std::f64::consts::PI),
-        ("mm", 1.0),
-        ("cm", 10.0),
-        ("in", 25.4),
-        ("m", 1000.0),
-        ("\"", 25.4),
-    ];
-    for (suffix, factor) in SUFFIXES {
-        if rest.starts_with(suffix) {
-            return (value * factor, suffix.len());
+/// Suffix spellings tried in order; multi-character units come before
+/// single-character ones so `5mm` is not read as `5m` + `m`. `"` is a
+/// spelling of `in`. The set is exactly the historical one — no new
+/// units.
+const SUFFIX_SPELLINGS: [(UnitSuffix, &str); 7] = [
+    (UnitSuffix::Deg, "deg"),
+    (UnitSuffix::Rad, "rad"),
+    (UnitSuffix::Mm, "mm"),
+    (UnitSuffix::Cm, "cm"),
+    (UnitSuffix::In, "in"),
+    (UnitSuffix::M, "m"),
+    (UnitSuffix::In, "\""),
+];
+
+/// Recognize a unit suffix at the start of `rest`; returns the suffix
+/// and how many bytes it consumed. The suffix no longer folds the
+/// value — it travels with the number into the AST (see
+/// [`UnitSuffix`]).
+fn scan_unit_suffix(rest: &str) -> Option<(UnitSuffix, usize)> {
+    for (suffix, text) in SUFFIX_SPELLINGS {
+        if rest.starts_with(text) {
+            return Some((suffix, text.len()));
         }
     }
-    (value, 0)
+    None
 }
 
 /// Scan a number starting at `start`: digits, optional `.digits`, then
 /// optional `[eE][+-]?digits` (the exponent is only consumed when digits
 /// actually follow, so `2e` leaves `e` to lex as an identifier).
-/// Returns the value — with any adjacent unit suffix folded in — and the
-/// byte offset just past the consumed text.
-fn scan_number(input: &str, start: usize) -> Result<(f64, usize), ExprError> {
+/// Returns the value as written, any adjacent unit suffix (still
+/// unfolded — see [`UnitSuffix`]), and the byte offset just past the
+/// consumed text.
+fn scan_number(input: &str, start: usize) -> Result<(f64, Option<UnitSuffix>, usize), ExprError> {
     let bytes = input.as_bytes();
     let mut end = start;
     while end < bytes.len() && bytes[end].is_ascii_digit() {
@@ -371,8 +532,11 @@ fn scan_number(input: &str, start: usize) -> Result<(f64, usize), ExprError> {
         message: format!("malformed number '{text}'"),
         position: start,
     })?;
-    let (value, suffix_len) = apply_unit_suffix(value, &input[end..]);
-    Ok((value, end + suffix_len))
+    let (suffix, suffix_len) = match scan_unit_suffix(&input[end..]) {
+        Some((suffix, len)) => (Some(suffix), len),
+        None => (None, 0),
+    };
+    Ok((value, suffix, end + suffix_len))
 }
 
 /// Scan `<<Label>>` starting at `start`. The label runs to the first
@@ -410,8 +574,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 continue;
             }
             b'0'..=b'9' => {
-                let (value, next) = scan_number(input, i)?;
-                (TokenKind::Number(value), next)
+                let (value, suffix, next) = scan_number(input, i)?;
+                (TokenKind::Number { value, suffix }, next)
             }
             b'<' if bytes.get(i + 1) == Some(&b'<') => {
                 let (label, next) = scan_label(input, i)?;
@@ -454,7 +618,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
 
 fn describe(kind: &TokenKind) -> String {
     match kind {
-        TokenKind::Number(value) => format!("number {value}"),
+        TokenKind::Number { value, .. } => format!("number {value}"),
         TokenKind::Ident(name) => format!("'{name}'"),
         TokenKind::Label(_) => "object label".to_string(),
         TokenKind::Plus => "'+'".to_string(),
@@ -578,9 +742,12 @@ impl<'t> Parser<'t> {
             .unwrap_or_default();
         let kind = self.peek_kind().cloned().unwrap_or(TokenKind::Eof);
         match kind {
-            TokenKind::Number(value) => {
+            TokenKind::Number { value, suffix } => {
                 self.advance();
-                Ok(Expression::Number(value))
+                match suffix {
+                    None => Ok(Expression::Number(value)),
+                    Some(suffix) => Ok(Expression::UnitNumber { value, suffix }),
+                }
             }
             TokenKind::Ident(name) => {
                 self.advance();
@@ -714,8 +881,10 @@ impl<'t> Parser<'t> {
 /// ```
 /// use fc_app::expression::parse;
 ///
-/// // Units fold to internal bases at parse time (mm, degrees).
-/// assert_eq!(parse("5cm").unwrap(), parse("50").unwrap());
+/// // Unit literals keep their suffix (no fold); constants and bare
+/// // numbers still fold into `Number`.
+/// assert_eq!(parse("5cm").unwrap().to_text(), "5cm");
+/// assert!(matches!(parse("pi"), Ok(_)));
 ///
 /// // References keep their shape; `<<...>>` labels may contain spaces.
 /// let expr = parse("2 * Base.Length + <<My Label>>.Width").unwrap();
@@ -748,15 +917,20 @@ pub fn parse(input: &str) -> Result<Expression, ExprError> {
 // ---------------------------------------------------------------------------
 
 impl Expression {
-    /// Evaluate to a number, resolving references through `env`.
+    /// Evaluate to a [`Quantity`], resolving references through `env`.
     ///
-    /// Trig follows FreeCAD's degree mode: `sin(30)` is `0.5`, while
-    /// `asin(0.5)` is `30`. Division or modulo by an exact zero is
-    /// [`ExprError::DivisionByZero`]; domain misses (`sqrt(-1)`)
-    /// evaluate to NaN, like FreeCAD.
-    pub fn eval(&self, env: &dyn ExprEnv) -> Result<f64, ExprError> {
+    /// Literals and results carry their unit (see the [module
+    /// docs](self)): arithmetic is dimension-checked, `*`/`/` combine
+    /// units, and trig follows FreeCAD's degree mode — `sin(30)` is
+    /// `0.5`, `asin(0.5)` is `30 deg`. Division or modulo by an exact
+    /// zero is [`ExprError::DivisionByZero`]; domain misses
+    /// (`sqrt(-1)`) evaluate to NaN, like FreeCAD.
+    pub fn eval(&self, env: &dyn ExprEnv) -> Result<Quantity, ExprError> {
         match self {
-            Expression::Number(value) => Ok(*value),
+            Expression::Number(value) => Ok(Quantity::dimensionless(*value)),
+            Expression::UnitNumber { value, suffix } => {
+                Ok(Quantity::new(value * suffix.factor(), suffix.unit()))
+            }
             Expression::Ref { object, property } => env.resolve(object.as_deref(), property),
             Expression::Unary { op, expr } => {
                 let value = expr.eval(env)?;
@@ -768,24 +942,7 @@ impl Expression {
             Expression::Binary { op, lhs, rhs } => {
                 let l = lhs.eval(env)?;
                 let r = rhs.eval(env)?;
-                Ok(match op {
-                    BinaryOp::Add => l + r,
-                    BinaryOp::Sub => l - r,
-                    BinaryOp::Mul => l * r,
-                    BinaryOp::Div => {
-                        if r == 0.0 {
-                            return Err(ExprError::DivisionByZero);
-                        }
-                        l / r
-                    }
-                    BinaryOp::Mod => {
-                        if r == 0.0 {
-                            return Err(ExprError::DivisionByZero);
-                        }
-                        l % r
-                    }
-                    BinaryOp::Pow => l.powf(r),
-                })
+                eval_binary(*op, l, r)
             }
             Expression::Call { name, args } => {
                 let mut values = Vec::with_capacity(args.len());
@@ -798,37 +955,204 @@ impl Expression {
     }
 }
 
+/// Largest magnitude an integer exponent may take on a unit-bearing
+/// base (matches `fc_base`'s ±127 unit-power limit; also keeps the
+/// `as i32` cast in [`unit_power`] lossless).
+const MAX_UNIT_EXPONENT: f64 = 127.0;
+
+/// Evaluate one binary operator over quantities.
+fn eval_binary(op: BinaryOp, l: Quantity, r: Quantity) -> Result<Quantity, ExprError> {
+    let symbol = op_symbol(op);
+    match op {
+        BinaryOp::Add => l.try_add(r).map_err(|_| unit_mismatch(symbol, l, r)),
+        BinaryOp::Sub => l.try_sub(r).map_err(|_| unit_mismatch(symbol, l, r)),
+        BinaryOp::Mul => Ok(l * r),
+        BinaryOp::Div => {
+            if r.value() == 0.0 {
+                return Err(ExprError::DivisionByZero);
+            }
+            Ok(l / r)
+        }
+        BinaryOp::Mod => {
+            // Numeric-only semantics, as before: both operands must be
+            // dimensionless.
+            if r.value() == 0.0 {
+                return Err(ExprError::DivisionByZero);
+            }
+            let left = dimensionless_arg(l, symbol)?;
+            let right = dimensionless_arg(r, symbol)?;
+            Ok(Quantity::dimensionless(left % right))
+        }
+        BinaryOp::Pow => unit_power(l, r, symbol),
+    }
+}
+
+/// Raise `base` to `exponent`. An exponent that is a dimensionless
+/// exact integer raises the unit itself (`(2mm)^3` is `8 mm^3`); any
+/// other exponent is only allowed on a dimensionless base (documented
+/// v1 restriction — FreeCAD supports fractional unit powers only in
+/// special cases).
+fn unit_power(base: Quantity, exponent: Quantity, function: &str) -> Result<Quantity, ExprError> {
+    if !exponent.unit().is_dimensionless() {
+        return Err(ExprError::UnitNotAllowed {
+            unit: exponent.unit().to_string(),
+            function: function.to_string(),
+        });
+    }
+    let e = exponent.value();
+    // Exact small integers raise the unit; the ±127 bound also keeps
+    // the `as i32` cast lossless.
+    if e.is_finite() && e.fract() == 0.0 && e.abs() <= MAX_UNIT_EXPONENT {
+        let n = e as i32;
+        return base
+            .try_powi(n)
+            .ok_or_else(|| ExprError::UnitPowerOverflow {
+                unit: base.unit().to_string(),
+                exponent: n.to_string(),
+            });
+    }
+    if base.unit().is_dimensionless() {
+        Ok(Quantity::dimensionless(base.value().powf(e)))
+    } else if e.is_finite() && e.fract() == 0.0 {
+        // An exact integer, but beyond the representable unit-power
+        // range.
+        Err(ExprError::UnitPowerOverflow {
+            unit: base.unit().to_string(),
+            exponent: format!("{e}"),
+        })
+    } else {
+        Err(ExprError::NonIntegerExponent {
+            unit: base.unit().to_string(),
+            exponent: format!("{e}"),
+        })
+    }
+}
+
+/// Build a [`ExprError::UnitMismatch`] from two quantities' units.
+fn unit_mismatch(op: &str, left: Quantity, right: Quantity) -> ExprError {
+    ExprError::UnitMismatch {
+        op: op.to_string(),
+        left: left.unit().to_string(),
+        right: right.unit().to_string(),
+    }
+}
+
+/// Require a dimensionless quantity and return its bare value.
+fn dimensionless_arg(value: Quantity, function: &str) -> Result<f64, ExprError> {
+    if value.unit().is_dimensionless() {
+        Ok(value.value())
+    } else {
+        Err(ExprError::UnitNotAllowed {
+            unit: value.unit().to_string(),
+            function: function.to_string(),
+        })
+    }
+}
+
+/// Require a dimensionless-or-angle quantity and return its measure in
+/// internal degrees. Dimensionless inputs are read as degrees — the
+/// deliberate degree-mode compat choice (see the [module docs](self)).
+fn angle_arg(value: Quantity, function: &str) -> Result<f64, ExprError> {
+    if value.unit().is_dimensionless() || value.unit().is_angle() {
+        Ok(value.value())
+    } else {
+        Err(ExprError::AngleUnitRequired {
+            function: function.to_string(),
+            unit: value.unit().to_string(),
+        })
+    }
+}
+
 /// Apply a supported function to evaluated arguments. Slice patterns
 /// keep arity handling panic-free; a known name with the wrong arity
 /// (only constructible by hand — the parser validates arity) reports
 /// [`ExprError::UnknownFunction`].
-fn eval_call(name: &str, values: &[f64]) -> Result<f64, ExprError> {
+fn eval_call(name: &str, values: &[Quantity]) -> Result<Quantity, ExprError> {
     match (name, values) {
-        ("sin", [x]) => Ok(x.to_radians().sin()),
-        ("cos", [x]) => Ok(x.to_radians().cos()),
-        ("tan", [x]) => Ok(x.to_radians().tan()),
-        ("asin", [x]) => Ok(x.asin().to_degrees()),
-        ("acos", [x]) => Ok(x.acos().to_degrees()),
-        ("atan", [x]) => Ok(x.atan().to_degrees()),
-        ("atan2", [y, x]) => Ok(y.atan2(*x).to_degrees()),
-        ("sqrt", [x]) => Ok(x.sqrt()),
-        ("abs", [x]) => Ok(x.abs()),
-        ("exp", [x]) => Ok(x.exp()),
-        ("ln", [x]) | ("log", [x]) => Ok(x.ln()),
-        ("log10", [x]) => Ok(x.log10()),
-        ("pow", [a, b]) => Ok(a.powf(*b)),
-        ("floor", [x]) => Ok(x.floor()),
-        ("ceil", [x]) => Ok(x.ceil()),
-        ("round", [x]) => Ok(x.round()),
-        ("hypot", [a, b]) => Ok(a.hypot(*b)),
-        ("min", _) if values.len() >= 2 => Ok(values.iter().copied().fold(f64::INFINITY, f64::min)),
-        ("max", _) if values.len() >= 2 => {
-            Ok(values.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+        // Degree-mode trig: dimensionless arguments are degrees (compat
+        // choice), angle arguments are already internal degrees.
+        ("sin", [x]) => {
+            angle_arg(*x, name).map(|deg| Quantity::dimensionless(deg.to_radians().sin()))
         }
+        ("cos", [x]) => {
+            angle_arg(*x, name).map(|deg| Quantity::dimensionless(deg.to_radians().cos()))
+        }
+        ("tan", [x]) => {
+            angle_arg(*x, name).map(|deg| Quantity::dimensionless(deg.to_radians().tan()))
+        }
+        // Inverse trig return angles, in internal degrees.
+        ("asin", [x]) => inverse_trig(name, *x, f64::asin),
+        ("acos", [x]) => inverse_trig(name, *x, f64::acos),
+        ("atan", [x]) => inverse_trig(name, *x, f64::atan),
+        ("atan2", [y, x]) => {
+            if y.unit() != x.unit() {
+                return Err(unit_mismatch(name, *y, *x));
+            }
+            Ok(Quantity::new(
+                y.value().atan2(x.value()).to_degrees(),
+                Unit::degree(),
+            ))
+        }
+        // sqrt: dimensionless, or a unit whose powers are all even
+        // (halved); fractional unit signatures are not representable.
+        ("sqrt", [x]) => {
+            if x.unit().is_dimensionless() {
+                Ok(Quantity::dimensionless(x.value().sqrt()))
+            } else {
+                x.try_sqrt().ok_or_else(|| ExprError::UnitNotAllowed {
+                    unit: x.unit().to_string(),
+                    function: name.to_string(),
+                })
+            }
+        }
+        // abs keeps the unit.
+        ("abs", [x]) => Ok(x.abs()),
+        ("exp", [x]) => dimensionless_arg(*x, name).map(|v| Quantity::dimensionless(v.exp())),
+        ("ln", [x]) | ("log", [x]) => {
+            dimensionless_arg(*x, name).map(|v| Quantity::dimensionless(v.ln()))
+        }
+        ("log10", [x]) => dimensionless_arg(*x, name).map(|v| Quantity::dimensionless(v.log10())),
+        ("pow", [a, b]) => unit_power(*a, *b, name),
+        ("floor", [x]) => dimensionless_arg(*x, name).map(|v| Quantity::dimensionless(v.floor())),
+        ("ceil", [x]) => dimensionless_arg(*x, name).map(|v| Quantity::dimensionless(v.ceil())),
+        ("round", [x]) => dimensionless_arg(*x, name).map(|v| Quantity::dimensionless(v.round())),
+        // hypot: same-dimension operands, that unit out.
+        ("hypot", [a, b]) => {
+            if a.unit() != b.unit() {
+                return Err(unit_mismatch(name, *a, *b));
+            }
+            Ok(Quantity::new(a.value().hypot(b.value()), a.unit()))
+        }
+        // min/max: same-dimension operands, the winner keeps the unit.
+        ("min", _) if values.len() >= 2 => extremum(name, values, f64::INFINITY, f64::min),
+        ("max", _) if values.len() >= 2 => extremum(name, values, f64::NEG_INFINITY, f64::max),
         _ => Err(ExprError::UnknownFunction {
             name: name.to_string(),
         }),
     }
+}
+
+/// asin/acos/atan: dimensionless argument, angle (internal degrees) out.
+fn inverse_trig(name: &str, x: Quantity, f: fn(f64) -> f64) -> Result<Quantity, ExprError> {
+    dimensionless_arg(x, name).map(|v| Quantity::new(f(v).to_degrees(), Unit::degree()))
+}
+
+/// min/max over same-dimension quantities; folds exactly like the old
+/// numeric version (`init` is the ±∞ identity of `f`).
+fn extremum(
+    name: &str,
+    values: &[Quantity],
+    init: f64,
+    f: fn(f64, f64) -> f64,
+) -> Result<Quantity, ExprError> {
+    let unit = values[0].unit();
+    for value in values {
+        if value.unit() != unit {
+            return Err(unit_mismatch(name, values[0], *value));
+        }
+    }
+    let best = values.iter().map(Quantity::value).fold(init, f);
+    Ok(Quantity::new(best, unit))
 }
 
 // ---------------------------------------------------------------------------
@@ -864,7 +1188,8 @@ impl Expression {
                     arg.collect_variables(variables);
                 }
             }
-            Expression::Number(_) => {}
+            // Numbers (with or without a unit suffix) reference nothing.
+            Expression::Number(_) | Expression::UnitNumber { .. } => {}
         }
     }
 
@@ -874,11 +1199,13 @@ impl Expression {
     ///
     /// Round-trip guarantee: for every AST produced by [`parse`],
     /// `parse(expr.to_text())` is the same AST, and `to_text` is
-    /// idempotent. Spacing (and unit folds) are normalized, e.g.
-    /// `2+3` → `2 + 3` and `5cm` → `50`.
+    /// idempotent. Spacing is normalized and unit suffixes print in
+    /// their canonical spelling (`"` normalizes to `in`), e.g.
+    /// `2+3` → `2 + 3` and `5"` → `5in`.
     pub fn to_text(&self) -> String {
         match self {
             Expression::Number(value) => format!("{value}"),
+            Expression::UnitNumber { value, suffix } => format!("{value}{}", suffix.symbol()),
             Expression::Ref {
                 object: None,
                 property,
@@ -899,7 +1226,10 @@ impl Expression {
                     UnaryOp::Pos => "+",
                 };
                 match **expr {
-                    Expression::Number(_) | Expression::Ref { .. } | Expression::Call { .. } => {
+                    Expression::Number(_)
+                    | Expression::UnitNumber { .. }
+                    | Expression::Ref { .. }
+                    | Expression::Call { .. } => {
                         format!("{sign}{}", expr.to_text())
                     }
                     _ => format!("{sign}({})", expr.to_text()),
@@ -941,7 +1271,10 @@ impl Expression {
 /// constants); used by [`Expression::to_text`] to decide parentheses.
 fn precedence(expr: &Expression) -> u8 {
     match expr {
-        Expression::Number(_) | Expression::Ref { .. } | Expression::Call { .. } => BP_ATOM,
+        Expression::Number(_)
+        | Expression::UnitNumber { .. }
+        | Expression::Ref { .. }
+        | Expression::Call { .. } => BP_ATOM,
         Expression::Unary { .. } => BP_UNARY,
         Expression::Binary { op, .. } => binary_bp(*op),
     }
@@ -984,7 +1317,8 @@ mod tests {
     use super::*;
 
     /// Test environment: `Box.Length = 10`, `Box.Width = 2`,
-    /// `<<My Label>>.Radius = 7`, self `Height = 4`.
+    /// `<<My Label>>.Radius = 7`, self `Height = 4`. All values are
+    /// floats, so references resolve as dimensionless quantities.
     fn test_env() -> MapEnv {
         let mut env = MapEnv::new();
         env.set("Box", "Length", 10.0)
@@ -994,11 +1328,53 @@ mod tests {
         env
     }
 
+    /// Environment with dimension-carrying self-values: `s` resolves to
+    /// one second and `kg` to two kilograms. Unit tokens are not
+    /// suffixes in this grammar, so they arrive as references.
+    fn dimensional_env() -> impl ExprEnv {
+        |object: Option<&str>, property: &str| -> Result<Quantity, ExprError> {
+            match (object, property) {
+                (None, "s") => Ok(Quantity::new(1.0, Unit::second())),
+                (None, "kg") => Ok(Quantity::new(2.0, Unit::kilogram())),
+                (Some("Box"), "Length") => Ok(Quantity::new(3.0, Unit::meter())),
+                _ => Err(ExprError::UnresolvableReference {
+                    object: object.map(str::to_string),
+                    property: property.to_string(),
+                }),
+            }
+        }
+    }
+
     fn eval_in(text: &str, env: &dyn ExprEnv) -> f64 {
         parse(text)
             .expect("expression should parse")
             .eval(env)
             .expect("expression should evaluate")
+            .value()
+    }
+
+    /// Evaluate and compare value + unit.
+    fn assert_q(actual: Quantity, value: f64, unit: Unit) {
+        assert!(
+            (actual.value() - value).abs() < 1e-9,
+            "value: actual {} != expected {value}",
+            actual.value()
+        );
+        assert_eq!(actual.unit(), unit, "unit mismatch");
+    }
+
+    fn eval_q(text: &str, env: &dyn ExprEnv) -> Quantity {
+        parse(text)
+            .expect("expression should parse")
+            .eval(env)
+            .expect("expression should evaluate")
+    }
+
+    fn eval_err(text: &str, env: &dyn ExprEnv) -> ExprError {
+        parse(text)
+            .expect("expression should parse")
+            .eval(env)
+            .expect_err("expression should fail to evaluate")
     }
 
     fn assert_close(actual: f64, expected: f64) {
@@ -1105,31 +1481,162 @@ mod tests {
     }
 
     #[test]
-    fn unit_folding() {
+    fn literals_carry_their_dimension() {
         let env = test_env();
-        assert_eq!(eval_in("5", &env), 5.0);
-        assert_eq!(eval_in("5mm", &env), 5.0);
-        assert_eq!(eval_in("5cm", &env), 50.0);
-        assert_eq!(eval_in("5m", &env), 5000.0);
-        assert_eq!(eval_in("5in", &env), 127.0);
-        assert_eq!(eval_in("5\"", &env), 127.0);
-        assert_eq!(eval_in("30deg", &env), 30.0);
-        assert_close(eval_in("30rad", &env), 30.0_f64.to_degrees());
-        // Folded units are plain numbers: parse("5mm") == parse("5").
-        assert_eq!(parse("5mm").unwrap(), parse("5").unwrap());
-        assert_eq!(parse("5cm").unwrap(), parse("50").unwrap());
-        assert_eq!(parse("1e1cm").unwrap(), parse("100").unwrap());
+        // Bare numbers and constants are dimensionless.
+        assert_q(eval_q("5", &env), 5.0, Unit::dimensionless());
+        assert_q(eval_q("2.5", &env), 2.5, Unit::dimensionless());
+        assert_q(
+            eval_q("pi", &env),
+            std::f64::consts::PI,
+            Unit::dimensionless(),
+        );
+        // Suffixed literals convert to canonical internal units and
+        // carry the dimension (mm for length, deg for angle).
+        assert_q(eval_q("5mm", &env), 5.0, Unit::meter());
+        assert_q(eval_q("5cm", &env), 50.0, Unit::meter());
+        assert_q(eval_q("5m", &env), 5000.0, Unit::meter());
+        assert_q(eval_q("5in", &env), 127.0, Unit::meter());
+        assert_q(eval_q("5\"", &env), 127.0, Unit::meter());
+        assert_q(eval_q("3.5cm", &env), 35.0, Unit::meter());
+        assert_q(eval_q("1e1cm", &env), 100.0, Unit::meter());
+        assert_q(eval_q("30deg", &env), 30.0, Unit::degree());
+        assert_q(eval_q("30rad", &env), 30.0_f64.to_degrees(), Unit::degree());
+    }
+
+    #[test]
+    fn unit_literals_keep_the_suffix_in_the_ast() {
+        // No more folding: `5mm` and `5` are different ASTs now, and
+        // the suffix spelling is preserved (with `"` as `in`).
+        assert_ne!(parse("5mm").unwrap(), parse("5").unwrap());
+        assert_eq!(parse("5cm").unwrap(), parse("5cm").unwrap());
+        assert_eq!(parse("5\"").unwrap(), parse("5in").unwrap());
     }
 
     #[test]
     fn units_in_arithmetic() {
         let env = test_env();
-        assert_eq!(eval_in("2 * 5cm", &env), 100.0);
-        assert_eq!(eval_in("10mm + 2cm", &env), 30.0);
-        assert_eq!(eval_in("3.5cm", &env), 35.0);
-        assert_close(eval_in("1in + 25.4mm", &env), 50.8);
-        // No dimensional analysis: 5mm * 5mm is just 25.
-        assert_eq!(eval_in("5mm * 5mm", &env), 25.0);
+        // Scalar multiplication keeps the unit.
+        assert_q(eval_q("2 * 5cm", &env), 100.0, Unit::meter());
+        // Addition converts to canonical units and keeps the dimension.
+        assert_q(eval_q("10mm + 2cm", &env), 30.0, Unit::meter());
+        assert_q(eval_q("1in + 25.4mm", &env), 50.8, Unit::meter());
+        // Multiplication combines units: 5mm * 5mm is 25 mm^2 now.
+        assert_q(eval_q("5mm * 5mm", &env), 25.0, Unit::meter().powi(2));
+    }
+
+    #[test]
+    fn add_sub_require_matching_dimensions() {
+        let env = dimensional_env();
+        assert_q(eval_q("5mm + 1cm", &env), 15.0, Unit::meter());
+        assert_q(eval_q("2m + 1mm", &env), 2001.0, Unit::meter());
+        assert_q(eval_q("5mm - 1cm", &env), -5.0, Unit::meter());
+
+        // `kg` is not a suffix (the accepted suffix set is unchanged),
+        // so the mass arrives as a dimension-carrying reference: `2kg`
+        // is not even parseable, but `2 * kg` resolves through the env.
+        let err = eval_err("5mm + 2 * kg", &env);
+        match &err {
+            ExprError::UnitMismatch { op, left, right } => {
+                assert_eq!(op.as_str(), "+");
+                assert_eq!(left.as_str(), "mm");
+                assert_eq!(right.as_str(), "kg");
+            }
+            other => panic!("expected UnitMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            "unit mismatch in '+': cannot combine 'mm' with 'kg'"
+        );
+
+        // Subtracting a different dimension fails the same way.
+        assert!(matches!(
+            eval_err("1cm - 2 * s", &env),
+            ExprError::UnitMismatch { .. }
+        ));
+        // Dimensionless + dimensioned is a mismatch too.
+        assert!(matches!(
+            eval_err("5 + 2mm", &env),
+            ExprError::UnitMismatch { .. }
+        ));
+        // And `2kg` adjacency is (still) a parse error — the suffix set
+        // grew nothing.
+        assert!(matches!(parse("5mm + 2kg"), Err(ExprError::Parse { .. })));
+    }
+
+    #[test]
+    fn mul_div_combine_units() {
+        let env = dimensional_env();
+        // 10mm / 2s — time arrives as a reference (`s` is not a suffix).
+        assert_q(
+            eval_q("10mm / (2 * s)", &env),
+            5.0,
+            Unit::meter() / Unit::second(),
+        );
+        // 2 / 4mm inverts the unit.
+        assert_q(eval_q("2 / 4mm", &env), 0.5, Unit::meter().powi(-1));
+        assert_eq!(eval_q("2 / 4mm", &env).unit().to_string(), "1/mm");
+        // Plain scaling.
+        assert_q(eval_q("10mm / 2", &env), 5.0, Unit::meter());
+        assert_q(eval_q("3 * (2 * s)", &env), 6.0, Unit::second());
+        // Division by exact zero is still DivisionByZero.
+        assert_eq!(eval_err("5mm / 0", &env), ExprError::DivisionByZero);
+    }
+
+    #[test]
+    fn modulo_stays_numeric_only() {
+        let env = dimensional_env();
+        assert_q(eval_q("7 % 4", &env), 3.0, Unit::dimensionless());
+        let err = eval_err("5mm % 2", &env);
+        match &err {
+            ExprError::UnitNotAllowed { unit, function } => {
+                assert_eq!(unit.as_str(), "mm");
+                assert_eq!(function.as_str(), "%");
+            }
+            other => panic!("expected UnitNotAllowed, got {other:?}"),
+        }
+        assert!(matches!(
+            eval_err("5 % (2 * s)", &env),
+            ExprError::UnitNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn pow_rules() {
+        let env = dimensional_env();
+        // Integer exponent raises the unit.
+        assert_q(eval_q("(2mm)^3", &env), 8.0, Unit::meter().powi(3));
+        assert_q(eval_q("Box.Length ^ 2", &env), 9.0, Unit::meter().powi(2));
+        // Negative integer inverts the unit.
+        assert_q(eval_q("(2mm)^-1", &env), 0.5, Unit::meter().powi(-1));
+        // Fractional exponent on a dimensionless base is fine.
+        assert_q(
+            eval_q("2 ^ 0.5", &env),
+            2.0_f64.sqrt(),
+            Unit::dimensionless(),
+        );
+        // ... but on a unit-bearing base it is rejected (documented v1
+        // restriction).
+        let err = eval_err("(2mm)^0.5", &env);
+        match &err {
+            ExprError::NonIntegerExponent { unit, exponent } => {
+                assert_eq!(unit.as_str(), "mm");
+                assert_eq!(exponent.as_str(), "0.5");
+            }
+            other => panic!("expected NonIntegerExponent, got {other:?}"),
+        }
+        // The exponent itself must not carry a unit.
+        assert!(matches!(
+            eval_err("2^(1mm)", &env),
+            ExprError::UnitNotAllowed { .. }
+        ));
+        // Overflow past the ±127 unit power limit is honest.
+        assert!(matches!(
+            eval_err("(2mm)^128", &env),
+            ExprError::UnitPowerOverflow { .. }
+        ));
+        // Zeroth power collapses to a dimensionless 1.
+        assert_q(eval_q("(5mm)^0", &env), 1.0, Unit::dimensionless());
     }
 
     #[test]
@@ -1267,10 +1774,10 @@ mod tests {
 
     #[test]
     fn closure_env_adapter() {
-        let env = |object: Option<&str>, property: &str| -> Result<f64, ExprError> {
+        let env = |object: Option<&str>, property: &str| -> Result<Quantity, ExprError> {
             match (object, property) {
-                (Some("Box"), "Length") => Ok(10.0),
-                (None, "Height") => Ok(4.0),
+                (Some("Box"), "Length") => Ok(Quantity::dimensionless(10.0)),
+                (None, "Height") => Ok(Quantity::dimensionless(4.0)),
                 _ => Err(ExprError::UnresolvableReference {
                     object: object.map(str::to_string),
                     property: property.to_string(),
@@ -1356,8 +1863,10 @@ mod tests {
             ("+5", "+5"),
             ("10-2-3", "10 - 2 - 3"),
             ("10-(2-3)", "10 - (2 - 3)"),
-            ("5cm", "50"),
-            ("30deg", "30"),
+            ("5cm", "5cm"),
+            ("30deg", "30deg"),
+            ("5\"", "5in"),
+            ("2mm * 3", "2mm * 3"),
             (".Height", "Height"),
             ("Height", "Height"),
             ("<<My Label>>.Radius", "<<My Label>>.Radius"),
@@ -1619,8 +2128,18 @@ mod tests {
     #[test]
     fn domain_misses_evaluate_to_nan_like_freecad() {
         let env = test_env();
-        assert!(parse("sqrt(-1)").unwrap().eval(&env).unwrap().is_nan());
-        assert!(parse("asin(2)").unwrap().eval(&env).unwrap().is_nan());
+        assert!(parse("sqrt(-1)")
+            .unwrap()
+            .eval(&env)
+            .unwrap()
+            .value()
+            .is_nan());
+        assert!(parse("asin(2)")
+            .unwrap()
+            .eval(&env)
+            .unwrap()
+            .value()
+            .is_nan());
     }
 
     // -- environment -------------------------------------------------------
@@ -1632,12 +2151,276 @@ mod tests {
         env.set("Box", "Length", 3.0).set("Box", "Width", 4.0);
         assert_eq!(
             parse("Box.Length * Box.Width").unwrap().eval(&env),
-            Ok(12.0)
+            Ok(Quantity::dimensionless(12.0))
         );
         env.set_self("Height", 5.0);
-        assert_eq!(parse("Height").unwrap().eval(&env), Ok(5.0));
+        assert_eq!(
+            parse("Height").unwrap().eval(&env),
+            Ok(Quantity::dimensionless(5.0))
+        );
         // Later bindings overwrite earlier ones.
         env.set("Box", "Length", 10.0);
-        assert_eq!(parse("Box.Length").unwrap().eval(&env), Ok(10.0));
+        assert_eq!(
+            parse("Box.Length").unwrap().eval(&env),
+            Ok(Quantity::dimensionless(10.0))
+        );
+    }
+
+    // -- WOJ: quantity-typed evaluation -----------------------------------
+
+    #[test]
+    fn trig_accepts_angle_quantities() {
+        let env = test_env();
+        // Dimensionless stays degree-mode (compat choice).
+        assert_close(eval_in("sin(30)", &env), 0.5);
+        // An angle quantity is used as internal degrees: sin(30deg) is
+        // the sine of 30 degrees.
+        assert_close(eval_in("sin(30deg)", &env), 0.5);
+        assert_close(eval_in("cos(60deg)", &env), 0.5);
+        // Radians convert at parse time, so the conversions cancel:
+        // sin(2rad) is the sine of 2 radians.
+        assert_close(eval_in("sin(2rad)", &env), 2.0_f64.sin());
+        assert_close(eval_in("tan(1rad)", &env), 1.0_f64.tan());
+        // Mixed arithmetic keeps the angle: sin(30deg + 1rad) is
+        // sin(30 degrees + 1 radian).
+        assert_close(
+            eval_in("sin(30deg + 1rad)", &env),
+            (30.0_f64.to_radians() + 1.0).sin(),
+        );
+    }
+
+    #[test]
+    fn trig_rejects_non_angle_units() {
+        let env = dimensional_env();
+        for function in ["sin", "cos", "tan"] {
+            let err = eval_err(&format!("{function}(5mm)"), &env);
+            match &err {
+                ExprError::AngleUnitRequired { function, unit } => {
+                    assert_eq!(unit.as_str(), "mm");
+                    assert!(function == "sin" || function == "cos" || function == "tan");
+                }
+                other => panic!("expected AngleUnitRequired, got {other:?}"),
+            }
+            // FreeCAD's own message shape.
+            assert!(
+                err.to_string()
+                    .starts_with("unit must be empty or an angle"),
+                "message: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_trig_returns_angle_quantities() {
+        let env = test_env();
+        let asin = eval_q("asin(0.5)", &env);
+        assert_close(asin.value(), 30.0);
+        assert_eq!(asin.unit(), Unit::degree(), "asin returns an angle");
+        assert_eq!(eval_q("acos(0.5)", &env).unit(), Unit::degree());
+        assert_close(eval_in("atan(1)", &env), 45.0);
+        // The angle result is directly consumable by trig.
+        assert_close(eval_in("sin(asin(0.5))", &env), 0.5);
+        // Arguments must be dimensionless.
+        assert!(matches!(
+            eval_err("asin(2mm)", &env),
+            ExprError::UnitNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn atan2_same_dimension_rule() {
+        let env = dimensional_env();
+        // Dimensionless arguments (the typical case).
+        let angle = eval_q("atan2(1, 1)", &env);
+        assert_close(angle.value(), 45.0);
+        assert_eq!(angle.unit(), Unit::degree());
+        // Same-dimension quantities are allowed.
+        assert_close(
+            eval_in("atan2(3mm, 6mm)", &env),
+            3.0_f64.atan2(6.0).to_degrees(),
+        );
+        // Mixed dimensions are a mismatch naming both units.
+        let err = eval_err("atan2(3mm, 4 * s)", &env);
+        assert_eq!(
+            err.to_string(),
+            "unit mismatch in 'atan2': cannot combine 'mm' with 's'"
+        );
+    }
+
+    #[test]
+    fn sqrt_of_even_power_units() {
+        let env = dimensional_env();
+        // Dimensionless.
+        assert_q(eval_q("sqrt(16)", &env), 4.0, Unit::dimensionless());
+        // mm^2 → mm: the area only comes from multiplication or an
+        // integer power — `4mm^2` parses as `(4mm)^2`, i.e. 16 mm^2.
+        assert_q(eval_q("sqrt(2mm * 8mm)", &env), 4.0, Unit::meter());
+        assert_q(eval_q("sqrt(4mm^2)", &env), 4.0, Unit::meter());
+        assert_q(eval_q("sqrt((2mm)^2)", &env), 2.0, Unit::meter());
+        // Odd powers are rejected (no fractional unit signatures).
+        let err = eval_err("sqrt(2mm)", &env);
+        match &err {
+            ExprError::UnitNotAllowed { unit, function } => {
+                assert_eq!(unit.as_str(), "mm");
+                assert_eq!(function.as_str(), "sqrt");
+            }
+            other => panic!("expected UnitNotAllowed, got {other:?}"),
+        }
+        assert!(matches!(
+            eval_err("sqrt(2mm * 3mm * 4mm)", &env),
+            ExprError::UnitNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn dimensionless_only_functions_reject_units() {
+        let env = dimensional_env();
+        for call in [
+            "exp(2mm)",
+            "ln(2mm)",
+            "log(2mm)",
+            "log10(2mm)",
+            "floor(2mm)",
+            "ceil(2mm)",
+            "round(2mm)",
+        ] {
+            let err = eval_err(call, &env);
+            assert!(
+                matches!(err, ExprError::UnitNotAllowed { .. }),
+                "{call}: expected UnitNotAllowed, got {err}"
+            );
+        }
+        // The honest message names the unit and the function.
+        let err = eval_err("ln(2mm)", &env);
+        assert_eq!(err.to_string(), "unit 'mm' is not allowed in 'ln'");
+    }
+
+    #[test]
+    fn abs_keeps_the_unit() {
+        let env = dimensional_env();
+        assert_q(eval_q("abs(-3mm)", &env), 3.0, Unit::meter());
+        assert_q(eval_q("abs(3mm)", &env), 3.0, Unit::meter());
+        assert_q(eval_q("abs(-3)", &env), 3.0, Unit::dimensionless());
+        assert_q(eval_q("abs(-30deg)", &env), 30.0, Unit::degree());
+    }
+
+    #[test]
+    fn hypot_same_dimension_rule() {
+        let env = dimensional_env();
+        assert_q(eval_q("hypot(3mm, 4mm)", &env), 5.0, Unit::meter());
+        assert_q(eval_q("hypot(3, 4)", &env), 5.0, Unit::dimensionless());
+        let err = eval_err("hypot(3mm, 4 * s)", &env);
+        assert_eq!(
+            err.to_string(),
+            "unit mismatch in 'hypot': cannot combine 'mm' with 's'"
+        );
+    }
+
+    #[test]
+    fn min_max_require_matching_dimensions() {
+        let env = dimensional_env();
+        assert_q(eval_q("min(2mm, 5mm)", &env), 2.0, Unit::meter());
+        assert_q(eval_q("max(2mm, 5mm)", &env), 5.0, Unit::meter());
+        assert_q(eval_q("min(3mm, 2mm, 4mm)", &env), 2.0, Unit::meter());
+        assert_q(eval_q("min(1, 2)", &env), 1.0, Unit::dimensionless());
+        let err = eval_err("min(2mm, 5 * s)", &env);
+        assert_eq!(
+            err.to_string(),
+            "unit mismatch in 'min': cannot combine 'mm' with 's'"
+        );
+        assert!(matches!(
+            eval_err("max(2mm, 5 * s, 1mm)", &env),
+            ExprError::UnitMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn unary_operators_keep_the_unit() {
+        let env = test_env();
+        assert_q(eval_q("-5cm", &env), -50.0, Unit::meter());
+        assert_q(eval_q("+5cm", &env), 50.0, Unit::meter());
+        assert_q(eval_q("-(-5mm)", &env), 5.0, Unit::meter());
+        assert_q(eval_q("-30deg", &env), -30.0, Unit::degree());
+    }
+
+    #[test]
+    fn references_resolve_dimensionless_by_default() {
+        let env = test_env();
+        // 2 * Box.Length — plain float properties stay dimensionless.
+        let value = eval_q("2 * Box.Length", &env);
+        assert_q(value, 20.0, Unit::dimensionless());
+        assert_q(
+            eval_q("Box.Length / Box.Width", &env),
+            5.0,
+            Unit::dimensionless(),
+        );
+    }
+
+    #[test]
+    fn env_can_supply_dimensioned_values() {
+        let env = dimensional_env();
+        // The env resolves Box.Length as a 3 mm quantity; arithmetic
+        // flows the unit through.
+        assert_q(eval_q("Box.Length * 2", &env), 6.0, Unit::meter());
+        assert_q(eval_q("Box.Length + 2cm", &env), 23.0, Unit::meter());
+        // ... and a unit-carrying reference poisons dimensionless-only
+        // contexts honestly.
+        assert!(matches!(
+            eval_err("ln(Box.Length)", &env),
+            ExprError::UnitNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn new_error_display_strings() {
+        assert_eq!(
+            ExprError::UnitNotAllowed {
+                unit: "mm".to_string(),
+                function: "sqrt".to_string(),
+            }
+            .to_string(),
+            "unit 'mm' is not allowed in 'sqrt'"
+        );
+        assert_eq!(
+            ExprError::AngleUnitRequired {
+                function: "sin".to_string(),
+                unit: "mm".to_string(),
+            }
+            .to_string(),
+            "unit must be empty or an angle in 'sin', got 'mm'"
+        );
+        assert_eq!(
+            ExprError::NonIntegerExponent {
+                unit: "mm".to_string(),
+                exponent: "0.5".to_string(),
+            }
+            .to_string(),
+            "exponent 0.5 on unit 'mm': unit-bearing bases require an exact integer exponent"
+        );
+        assert_eq!(
+            ExprError::UnitPowerOverflow {
+                unit: "mm".to_string(),
+                exponent: "128".to_string(),
+            }
+            .to_string(),
+            "unit power overflow: 'mm' to the 128 exceeds the ±127 power limit"
+        );
+    }
+
+    #[test]
+    fn to_text_round_trips_unit_literals() {
+        for input in [
+            "2mm * 3",
+            "-5cm",
+            "30deg + 1rad",
+            "(2mm)^3",
+            "10mm / (2 * s)",
+        ] {
+            let first = parse(input).expect(input);
+            let text = first.to_text();
+            assert_eq!(parse(&text), Ok(first.clone()), "round trip of {input}");
+            let second = parse(&text).expect(&text);
+            assert_eq!(second.to_text(), text, "idempotence for {input}");
+        }
     }
 }
