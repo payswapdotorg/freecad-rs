@@ -1,0 +1,15 @@
+[package]
+name = "fc-script"
+description = "Embedded rhai scripting for the fc-* document model: a sandboxed engine exposing a small, honest document API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fc-base.workspace = true
+fc-app.workspace = true
+fc-part.workspace = true
+fc-io.workspace = true
+rhai.workspace = true

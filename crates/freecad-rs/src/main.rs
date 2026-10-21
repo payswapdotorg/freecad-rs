@@ -6,6 +6,7 @@
 
 mod calc;
 mod commands;
+mod script;
 mod sketch;
 mod svg;
 
@@ -206,6 +207,13 @@ pub enum Command {
     Info { file: String },
     /// Per-object analytic volume / surface area.
     Stats { file: String },
+    /// Run a rhai script against a fresh engine (the scripting console
+    /// surface: create documents, add objects, set properties, bind
+    /// expressions, recompute, read stats, save — see `docs/cli.md`).
+    Script {
+        /// Path to the `.rhai` script.
+        file: String,
+    },
     /// Export the document to another format.
     // FC-2-e fix: the task spec, README quick tour and roadmap all invoke
     // `export svg FILE OUT --view V`; the scaffolded variant had no
