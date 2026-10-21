@@ -2,6 +2,12 @@
 
 Honest, incremental, no vaporware.
 
+> **Verified baseline** — `main` @ `08270c6`, verified locally on
+> 2026-10-21: `cargo build` / `cargo test --workspace --locked` green
+> (**361 tests, 0 failed**, six crates), `clippy --workspace
+> --all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
+> clean.
+
 ## Done
 
 - [x] Workspace scaffold + CI (build, test, clippy, fmt — the test step
@@ -11,7 +17,8 @@ Honest, incremental, no vaporware.
 - [x] `fc-part`: analytic primitives, tessellation, FCBREP
 - [x] `fc-io`: `.FCStd` read/write (FreeCAD-compatible `Document.xml`)
 - [x] `freecad-rs` CLI: new/add/set/get/list/recompute/info/stats/export/graph
-- [x] Test suite: 128 tests across all five crates (unit + integration)
+- [x] Test suite: 361 tests across all six crates (unit + integration;
+      re-verified at `08270c6`)
 - [x] `Part::Cut / Fuse / Common` — BSP mesh booleans with a
       T-junction stitch pass; watertight for watertight box/cylinder
       operands; hybrid splitter (tangent-plane scoring + bounding-box
@@ -20,6 +27,7 @@ Honest, incremental, no vaporware.
       distilled: parser, degree-mode trig, unit folding, document
       bindings with dependency-graph edges, cycle detection,
       `.FCStd` persistence (`<Expression path=… expression=…/>`)
+      (superseded by the FC-6 quantity-typed engine below)
 - [x] OBJ/STL mesh export (ASCII + binary STL; FreeCAD's
       `Mesh` export architecture)
 - [x] **FC-5** Undo/redo — FreeCAD's `App::Transaction` architecture:
@@ -37,25 +45,54 @@ Honest, incremental, no vaporware.
       reporting, failure leaves geometry untouched), FreeCAD-style
       `<Sketch>` XML fragments
 - [x] **FC-5** CLI integration — `calc` (quantity arithmetic with unit
-      checking), `sketch-solve` / `sketch-show`; 253 tests total
+      checking), `sketch-solve` / `sketch-show`
+- [x] **FC-6** Sketches inside documents — `Sketcher::SketchObject` as
+      a first-class `DocumentObject` (execute = solve; a failed solve
+      marks the sketch `Error` and fails its dependents, FreeCAD
+      behavior), `.FCStd` persistence as a `<Sketch>` fragment, CLI
+      verbs `add sketch` / `sketch-import` / `sketch-export` /
+      `sketch-info` — d192564, with loaded-sketch status semantics
+      fixed in 622da7e
+- [x] **FC-6** Quantity-typed expressions — the engine evaluates to
+      `Quantity` instead of folding units into `f64` at parse time:
+      dimension-checked `+`/`-`, unit-combining `*`/`/`, integer
+      exponent unit algebra, degree-mode trig, honest binding
+      rejection (a plain-float property rejects a unit-carrying
+      expression, FreeCAD `PropertyFloat` behavior) — e04c0a5
+- [x] **FC-6** Profile kernels — closed-wire extraction from sketch
+      geometry (deterministic head-to-tail chaining at
+      `Precision::Confusion`, even-odd nesting classification with
+      CCW outer / CW hole orientation), extrusion (Pad) and revolution
+      (Revolution) into watertight-by-construction meshes:
+      ear-clipped, hole-bridged caps; seam-welded full turns —
+      8957afe, merged as 7726c1f
+- [x] **FC-6 integration** PartDesign v1 — `Pad` / `Pocket` /
+      `Revolution` document objects consuming sketches
+      (Profile/Length/Midplane/Reversed, Angle/Axis, Base/Inverted
+      semantics), CLI verbs `pad` / `pocket` / `revolution`, `.FCStd`
+      persistence with round-tripped links and dependency edges;
+      parametric propagation (sketch edit → feature re-executes) and
+      save/reload round-trip proven by tests — 08270c6
 
 ## Next (candidates, in rough order)
 
-- [ ] Wire sketches into documents: `Sketcher::SketchObject` as a
-      `DocumentObject` + `.FCStd` persistence, then PartDesign-style
-      features (`Pad`, `Pocket`, `Revolution`) that consume a sketch
-- [ ] Quantity-typed expressions: make the expression engine evaluate
-      to `Quantity` instead of folding units into `f64` at parse time
-      (FreeCAD's real semantics; needs a decision on the canonical
-      angle unit)
-- [ ] STEP reading *via* external crates, clearly marked non-core
-- [ ] A minimal 3D viewer (wgpu) — the first GUI surface
 - [ ] Boolean robustness beyond boxes/cylinders: sphere-sphere seams
       (T-junctions on curved seams) still produce open meshes
+- [ ] Application-layer milestones — interactive 3D viewer (wgpu),
+      deeper FreeCAD native-file interop, STEP, embedded scripting —
+      sequenced with acceptance gates in
+      [`PLAN-APPLICATION.md`](PLAN-APPLICATION.md); STEP is gated on
+      the [`adr/0001-geometry-kernel.md`](adr/0001-geometry-kernel.md)
+      triggers
 
 ## Non-goals (explicit)
 
-- OCCT compatibility beyond reading parameters from real files
-- Python scripting
+- OCCT compatibility beyond reading parameters from real files (the
+  kernel decision and its revisit triggers:
+  [`adr/0001-geometry-kernel.md`](adr/0001-geometry-kernel.md))
+- Python scripting as a FreeCAD-workbench equivalent — an *embedded*
+  scripting milestone (rhai first, pyo3 optional) exists in
+  [`PLAN-APPLICATION.md`](PLAN-APPLICATION.md), but full Python
+  console/workbench parity remains a non-goal
 - A FreeCAD replacement claim — this is a study of the architecture,
   and a toolkit
