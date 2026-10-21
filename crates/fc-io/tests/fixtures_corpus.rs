@@ -106,9 +106,16 @@ fn assert_expectations(doc: &Document, stem: &str, select: &[(&str, &[&str])]) {
 /// the reader takes without a warning — quantities/colors/lists/matrices
 /// were mapped to their canonical representations on the first load).
 fn assert_round_trip_list_parity(stem: &str, doc: &Document) {
+    // Unique per stem AND per thread: the expectations tests and the
+    // every-fixture round-trip run in parallel test threads within one
+    // process, so the pid alone does not disambiguate — a shared path
+    // had two threads writing/reading one file concurrently, and the
+    // reader legitimately saw a half-written zip ("incomplete deflate
+    // stream"; first seen as a CI-only flake).
     let temp = std::env::temp_dir().join(format!(
-        "fcrs-wom-roundtrip-{stem}-{}.fcstd",
-        std::process::id()
+        "fcrs-wom-roundtrip-{stem}-{}-{:?}.fcstd",
+        std::process::id(),
+        std::thread::current().id()
     ));
     save_document(doc, &temp).unwrap_or_else(|e| panic!("{stem}: re-save: {e}"));
     let (reloaded, report) =
