@@ -31,14 +31,17 @@ text format where FreeCAD writes OCCT `.brp`).
 
 * Exit codes: `0` ok · `1` runtime error (printed as `error: …` on
   stderr) · `2` usage error.
-* Every mutating command (`new`, `add`, `set`, `recompute`, `undo`,
+* Every mutating command (`new`, `add`, `set`, `pad`, `pocket`,
+  `revolution`, `sketch-import`, `recompute`, `undo`,
   `redo`) saves the file back. Even when a recompute fails, the document is saved — with
   the failing object marked `Error`, FreeCAD-style — before exiting 1, so
   no work is lost.
-* `add` and `set` steps are **undoable**: each one appends a transaction
+* `add`, `set` and the PartDesign verbs (`pad`, `pocket`,
+  `revolution`) are **undoable**: each one appends a transaction
   to the document's session journal (`FILE.undolog`, see `undo`), and
   `undo`/`redo`/`history` operate on it. Expression bindings
-  (`set-expr`/`clear-expr`) are not journaled steps.
+  (`set-expr`/`clear-expr`) and sketch content swaps (`sketch-import`)
+  are not journaled steps.
 * Object names are unique and never renamed. `--name` is a *base* name:
   adding a second `Box` yields `Box001`, FreeCAD-style.
 * Units are millimetres (FreeCAD's default); `stats` prints them.
@@ -325,6 +328,92 @@ freecad-rs add demo.fcstd --name Core common --base Base --tool Ball
 Changing either operand's parameters (e.g. `set demo.fcstd Stem Radius
 3`) touches the boolean like any other dependent.
 
+## PartDesign: `pad` / `pocket` / `revolution`
+
+Sketch-consuming features — FreeCAD `Mod/PartDesign` distilled: the
+`Profile` is a `Sketcher::SketchObject` in the document, and the
+feature's recompute turns the **solved** sketch geometry into a solid
+(the FC-6 profile kernels: wire extraction, extrusion, seam-welded
+revolution). The dependency graph guarantees the sketch recomputes
+first; a failed sketch or an open profile marks the feature `Error` and
+aborts the recompute (exit 1, document saved with the failure on
+record). Like every computed feature, a failing recompute drops the
+previous result — dependents of an errored feature fail honestly on
+their next run.
+
+### `pad` — extrude a sketch into a solid
+
+```sh
+freecad-rs new demo.fcstd
+freecad-rs add demo.fcstd sketch
+freecad-rs sketch-import demo.fcstd Sketch rect.xml   # a 20x10 rectangle
+freecad-rs pad demo.fcstd --sketch Sketch --length 10
+#   recomputed Sketch (Sketcher::SketchObject)
+#   recomputed Pad (PartDesign::Pad)
+# added Pad (PartDesign::Pad) -> demo.fcstd
+#   Pad: Valid, volume 2000.000 mm³, 12 triangles
+```
+
+Extrudes the sketch's profile along +Z (`--reversed` for −Z),
+optionally symmetric about the sketch plane (`--midplane`, spanning
+±Length/2). `--name` overrides the default object name `Pad`. The final
+status line reports the recompute outcome honestly: a failed feature
+prints its error and `no computed geometry` instead of a volume.
+
+### `pocket` — cut an extrusion out of a base feature
+
+```sh
+freecad-rs add demo.fcstd --name Body box
+freecad-rs add demo.fcstd --name Hole sketch
+freecad-rs sketch-import demo.fcstd Hole square.xml     # a 4x4 square
+freecad-rs pocket demo.fcstd --sketch Hole --base Body --length 4
+#   Pocket: Valid, volume 936.000 mm³, 83 triangles
+```
+
+Extrudes the profile into a tool solid and subtracts it from `--base`
+(any mesh-bearing object — a `Part::` primitive, another PartDesign
+feature, a boolean). The tool extrudes along +Z — into a base sitting
+on `z >= 0`, which is where this kernel's primitives live (FreeCAD's
+pocket cuts along the negative sketch normal into *attached* material;
+there is no attachment system yet, so the default is the direction
+that intersects a canonical base). `--inverted` selects −Z, `--midplane`
+spans the tool symmetrically about the sketch plane.
+
+### `revolution` — sweep a sketch around an axis
+
+```sh
+freecad-rs add demo.fcstd --name Lathe sketch
+freecad-rs sketch-import demo.fcstd Lathe half-disc.xml  # arc + axis line
+freecad-rs revolution demo.fcstd --sketch Lathe --angle 360
+#   Revolution: Valid, volume 520.163 mm³, 2400 triangles   # ~4/3*pi*5³
+```
+
+Sweeps the profile around an axis through the origin. `--angle` is
+degrees (`--angle 180` sweeps half the volume; the sign is the sweep
+direction, and `|angle| >= 360` is a seam-welded full turn). The two
+`--axis` choices, honestly framed:
+
+| axis | meaning |
+|------|---------|
+| `z` (default) | the kernel's classic **lathe frame**: sketch `x` is the radius and sketch `y` the height about the 3D Z axis. A sketch in the XY plane cannot be revolved about its own normal, so the coordinates are reinterpreted in the XZ half-plane. |
+| `y` | the sketch's **vertical axis**: the drawn profile revolves about 3D Y (distance `|x|` from the axis at height `y`). The sweep starts at the YZ half-plane — the kernel's canonical frame — so the sketch's own plane sits 90° into the sweep; invisible for a full turn, a placement question otherwise. |
+
+The profile must stay on the +x side of the sketch (`x` is the radial
+coordinate; points on the axis itself are fine and snap to shared
+vertices). A profile crossing the axis sweeps a self-intersecting
+solid — the caller's problem, exactly as in FreeCAD.
+
+### The parametric story, PartDesign edition
+
+The features are ordinary document objects, so the whole cascade
+applies: `set demo.fcstd Pad Length 25` touches the Pad and
+recomputes it; re-importing a sketch (`sketch-import ... a wider
+rectangle`) touches the sketch **and every feature profiling it**, and
+the pad's volume scales with the new sketch width. `Length` and
+`Angle` are `App::PropertyFloat` like the Part primitives' dimensions,
+so expression bindings work on them (`set-expr demo.fcstd Pad Length
+"2 * 3"` — dimensionless, like every Float binding).
+
 ## Expressions: `set-expr` / `clear-expr`
 
 A Float property can be **bound** to an expression (FreeCAD
@@ -396,6 +485,26 @@ elements with the crate's documented ordinals (`0` coincident,
 `11` angle, `12` point-on-object). `sketch-solve` runs the
 Levenberg-Marquardt solver and prints the DOF report plus the solved
 geometry (unsolved sketches are left bit-identical); `sketch-show`
-prints geometry + constraints without solving. Wiring sketches into
-`Document` objects (a `Sketcher::SketchObject`, then PartDesign-style
-features) is the next roadmap wave.
+prints geometry + constraints without solving.
+
+Inside documents, sketches are `Sketcher::SketchObject`s (`add sketch`),
+and three verbs work on their content:
+
+```sh
+freecad-rs add demo.fcstd sketch                       # empty, auto-named "Sketch"
+freecad-rs sketch-import demo.fcstd Sketch rect.xml    # swap in fragment content
+#   touched Sketch
+#   recomputed Sketch (Sketcher::SketchObject)
+#   Solved, 10 constraints, dof 2, residual 2.4e-13
+freecad-rs sketch-info demo.fcstd Sketch               # counts, DOF, solve state
+freecad-rs sketch-export demo.fcstd Sketch out.xml     # the <Sketch> fragment back
+```
+
+`sketch-import` verifies everything before writing (fragment parses,
+object exists, object is a sketch), then swaps the content through the
+load-time mutation window and touches the sketch **and its transitive
+dependents** — the PartDesign features profiling it re-execute on the
+recompute. A failed solve still saves (the sketch is marked `Error`,
+FreeCAD-style) and exits 1. `sketch-info` re-runs the recompute in
+memory (the file is not modified) and reports the fresh solve state;
+solve results are recompute products and are never persisted.

@@ -446,6 +446,15 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
     if let Some(f) = any.downcast_ref::<BooleanFeature>() {
         return f.result.clone();
     }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::PadFeature>() {
+        return f.result.clone();
+    }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::PocketFeature>() {
+        return f.result.clone();
+    }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::RevolutionFeature>() {
+        return f.result.clone();
+    }
     None
 }
 
@@ -471,6 +480,15 @@ pub fn shape_of(obj: &dyn DocumentObject) -> Option<TopoShape> {
         return f.result.clone().map(TopoShape::Mesh);
     }
     if let Some(f) = any.downcast_ref::<BooleanFeature>() {
+        return f.result.clone().map(TopoShape::Mesh);
+    }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::PadFeature>() {
+        return f.result.clone().map(TopoShape::Mesh);
+    }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::PocketFeature>() {
+        return f.result.clone().map(TopoShape::Mesh);
+    }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::RevolutionFeature>() {
         return f.result.clone().map(TopoShape::Mesh);
     }
     None

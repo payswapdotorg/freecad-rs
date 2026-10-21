@@ -11,6 +11,7 @@ use fc_part::features::{
     BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature, SphereFeature,
     TorusFeature, TransformFeature,
 };
+use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
 use fc_sketcher::SketchObject;
 use quick_xml::events::{BytesStart, Event};
@@ -297,8 +298,9 @@ fn push_indented_fragment(xml: &mut String, fragment: &str, base_indent: usize) 
 }
 
 /// Computed geometry of a part feature, if any: primitives carry their
-/// analytic `TopoShape`, transform features their result mesh. Objects
-/// without geometry (or transforms without a result) return `None`.
+/// analytic `TopoShape`, transform/boolean/PartDesign features their
+/// result mesh. Objects without geometry (or features without a
+/// result) return `None`.
 fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
     let any = obj.as_any();
     if let Some(f) = any.downcast_ref::<BoxFeature>() {
@@ -314,6 +316,12 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
     } else if let Some(f) = any.downcast_ref::<TransformFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<BooleanFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<PadFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<PocketFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<RevolutionFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else {
         None
@@ -850,13 +858,14 @@ fn raw_inner_xml(
 }
 
 /// Parse a `<Sketch>` fragment and store it into `object` when that
-/// object is a `Sketcher::SketchObject` (via `replace_sketch`, which
-/// touches the object — loaded sketch content always re-solves on the
-/// next recompute, exactly like every other loaded object re-executes).
-/// Anything else is a recoverable defect reported through the warnings
-/// channel: a malformed fragment, or a `<Sketch>` element on a non-sketch
-/// object. The loader reports + continues, mirroring how it treats
-/// unreadable shape payloads.
+/// object is a `Sketcher::SketchObject`, via `restore_sketch` — the
+/// loader's non-touching path; the file's persisted status is the truth
+/// (a solved-and-saved sketch reloads as `Valid`, like every other
+/// object kind; FreeCAD stores solved geometry and does not re-solve on
+/// open). Anything else is a recoverable defect reported through the
+/// warnings channel: a malformed fragment, or a `<Sketch>` element on a
+/// non-sketch object. The loader reports + continues, mirroring how it
+/// treats unreadable shape payloads.
 fn store_sketch_fragment(
     object: &mut Box<dyn DocumentObject>,
     fragment: &str,
@@ -1196,6 +1205,22 @@ fn attach_shape(
             TopoShape::Mesh(mesh) => Some(mesh),
             other => Some(other.tessellate(DEFAULT_DEFLECTION)),
         };
+    } else if let Some(f) = any.downcast_mut::<PadFeature>() {
+        // PartDesign features persist their computed mesh.
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
+    } else if let Some(f) = any.downcast_mut::<PocketFeature>() {
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
+    } else if let Some(f) = any.downcast_mut::<RevolutionFeature>() {
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
     } else {
         report.warnings.push(format!(
             "{owner}: object type carries no shape field — geometry skipped"
@@ -1224,6 +1249,9 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "Part::Transform" => Some(Box::new(TransformFeature::new(name))),
         "Part::Cut" | "Part::Fuse" | "Part::Common" => BooleanKind::from_type_name(type_id)
             .map(|kind| Box::new(BooleanFeature::new(name, kind)) as _),
+        "PartDesign::Pad" => Some(Box::new(PadFeature::new(name))),
+        "PartDesign::Pocket" => Some(Box::new(PocketFeature::new(name))),
+        "PartDesign::Revolution" => Some(Box::new(RevolutionFeature::new(name))),
         "Sketcher::SketchObject" => Some(Box::new(SketchObject::new(name))),
         _ => None,
     }

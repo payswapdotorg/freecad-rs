@@ -9,7 +9,7 @@ mod commands;
 mod sketch;
 mod svg;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -147,6 +147,61 @@ pub enum Command {
         /// Sketch object name.
         object: String,
     },
+    /// PartDesign::Pad — extrude a sketch's profile into a solid.
+    Pad {
+        file: String,
+        /// Profile sketch object name.
+        #[arg(long)]
+        sketch: String,
+        /// Extrusion length (mm).
+        #[arg(long, default_value_t = 10.0)]
+        length: f64,
+        /// Extrude symmetrically about the sketch plane.
+        #[arg(long)]
+        midplane: bool,
+        /// Extrude along -Z instead of +Z.
+        #[arg(long)]
+        reversed: bool,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// PartDesign::Pocket — cut a sketch's extrusion out of a base
+    /// feature.
+    Pocket {
+        file: String,
+        /// Profile sketch object name.
+        #[arg(long)]
+        sketch: String,
+        /// Base feature to cut from (any mesh-bearing object).
+        #[arg(long)]
+        base: String,
+        /// Tool extrusion length (mm).
+        #[arg(long, default_value_t = 5.0)]
+        length: f64,
+        /// Cut along -Z instead of +Z.
+        #[arg(long)]
+        inverted: bool,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// PartDesign::Revolution — sweep a sketch's profile around an axis.
+    Revolution {
+        file: String,
+        /// Profile sketch object name.
+        #[arg(long)]
+        sketch: String,
+        /// Sweep angle in degrees (|angle| >= 360 is a full turn).
+        #[arg(long, default_value_t = 360.0)]
+        angle: f64,
+        /// Revolution axis (see docs/cli.md for the coordinate frames).
+        #[arg(long, value_enum, default_value_t = AxisChoice::Z)]
+        axis: AxisChoice,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Document metadata.
     Info { file: String },
     /// Per-object analytic volume / surface area.
@@ -161,6 +216,16 @@ pub enum Command {
     },
     /// Write the dependency graph as Graphviz DOT.
     Graph { file: String, output: String },
+}
+
+/// The revolution axis choices (`revolution --axis`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AxisChoice {
+    /// 3D Z axis, the kernel's classic lathe frame: sketch x = radius,
+    /// sketch y = height.
+    Z,
+    /// The sketch's vertical axis (3D Y).
+    Y,
 }
 
 #[derive(Subcommand)]

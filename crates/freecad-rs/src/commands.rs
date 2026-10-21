@@ -16,10 +16,11 @@ use fc_part::features::{
     BooleanFeature, BoxFeature, ConeFeature, CylinderFeature, SphereFeature, TorusFeature,
     TransformFeature,
 };
+use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{mesh_of, shape_of, BooleanKind, Mesh, TopoShape};
 use fc_sketcher::{Geometry, SketchObject};
 
-use crate::{AddShape, Command, ExportFormat};
+use crate::{AddShape, AxisChoice, Command, ExportFormat};
 
 pub fn dispatch(cmd: Command) -> Result<(), String> {
     match cmd {
@@ -66,6 +67,29 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
             output,
         } => sketch_export(&file, &object, &output),
         Command::SketchInfo { file, object } => sketch_info(&file, &object),
+        Command::Pad {
+            file,
+            sketch,
+            length,
+            midplane,
+            reversed,
+            name,
+        } => pad(&file, &sketch, length, midplane, reversed, name.as_deref()),
+        Command::Pocket {
+            file,
+            sketch,
+            base,
+            length,
+            inverted,
+            name,
+        } => pocket(&file, &sketch, &base, length, inverted, name.as_deref()),
+        Command::Revolution {
+            file,
+            sketch,
+            angle,
+            axis,
+            name,
+        } => revolution(&file, &sketch, angle, axis, name.as_deref()),
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
         Command::Export { format } => match format {
@@ -656,6 +680,166 @@ fn sketch_info(file: &str, object: &str) -> Result<(), String> {
         },
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PartDesign: pad / pocket / revolution — sketch-consuming features
+// ---------------------------------------------------------------------------
+
+/// `pad FILE --sketch NAME --length L [--midplane] [--reversed]`: build a
+/// `PartDesign::Pad` on the sketch's solved profile, recompute, report
+/// the feature's status and volume honestly, save.
+fn pad(
+    file: &str,
+    sketch: &str,
+    length: f64,
+    midplane: bool,
+    reversed: bool,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
+    // The profile must exist and be a sketch before anything is written.
+    sketch_object_of(&doc, file, sketch)?;
+    let mut feature = PadFeature::new(name.unwrap_or("Pad"));
+    feature
+        .container
+        .set("Profile", Property::Link(sketch.to_string()));
+    feature.container.set("Length", Property::Float(length));
+    if midplane {
+        feature.container.set("Midplane", Property::Bool(true));
+    }
+    if reversed {
+        feature.container.set("Reversed", Property::Bool(true));
+    }
+    add_partdesign_feature(file, &mut doc, &mut journal, Box::new(feature), "pad")
+}
+
+/// `pocket FILE --sketch NAME --base BASE --length L [--inverted]`: build
+/// a `PartDesign::Pocket` that cuts the sketch's extrusion out of BASE,
+/// recompute, report, save.
+fn pocket(
+    file: &str,
+    sketch: &str,
+    base: &str,
+    length: f64,
+    inverted: bool,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
+    sketch_object_of(&doc, file, sketch)?;
+    if doc.get_by_name(base).is_none() {
+        return Err(format!(
+            "--base object '{base}' not found in the document; available: {}",
+            names_list(&doc)
+        ));
+    }
+    let mut feature = PocketFeature::new(name.unwrap_or("Pocket"));
+    feature
+        .container
+        .set("Profile", Property::Link(sketch.to_string()));
+    feature
+        .container
+        .set("Base", Property::Link(base.to_string()));
+    feature.container.set("Length", Property::Float(length));
+    if inverted {
+        feature.container.set("Inverted", Property::Bool(true));
+    }
+    add_partdesign_feature(file, &mut doc, &mut journal, Box::new(feature), "pocket")
+}
+
+/// `revolution FILE --sketch NAME --angle DEG [--axis z|y]`: build a
+/// `PartDesign::Revolution` sweeping the sketch's profile, recompute,
+/// report, save. See `docs/cli.md` for what each axis means in sketch
+/// coordinates.
+fn revolution(
+    file: &str,
+    sketch: &str,
+    angle: f64,
+    axis: AxisChoice,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
+    sketch_object_of(&doc, file, sketch)?;
+    let mut feature = RevolutionFeature::new(name.unwrap_or("Revolution"));
+    feature
+        .container
+        .set("Profile", Property::Link(sketch.to_string()));
+    feature.container.set("Angle", Property::Float(angle));
+    feature.container.set(
+        "Axis",
+        Property::Vector(match axis {
+            AxisChoice::Z => Vector3::Z,
+            AxisChoice::Y => Vector3::Y,
+        }),
+    );
+    add_partdesign_feature(
+        file,
+        &mut doc,
+        &mut journal,
+        Box::new(feature),
+        "revolution",
+    )
+}
+
+/// Shared tail of the three PartDesign verbs: add the fully-built feature
+/// (so the name uniquifier and the dependency graph see final property
+/// values), journal its full state like `add` does, recompute + save, then
+/// report the feature's status and volume honestly — a failed feature
+/// reports its error and no geometry; the exit code follows the recompute
+/// outcome either way.
+fn add_partdesign_feature(
+    file: &str,
+    doc: &mut Document,
+    journal: &mut Journal,
+    object: Box<dyn DocumentObject>,
+    verb: &str,
+) -> Result<(), String> {
+    let id = doc.add(object);
+    let summary = doc
+        .summary()
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "internal error: object vanished right after add".to_string())?;
+    let final_name = summary.name.clone();
+    let type_name = summary.type_name.clone();
+    let added = JournalAdd::from_object(
+        doc.get(id)
+            .ok_or_else(|| "internal error: object vanished right after add".to_string())?,
+    );
+    let txn = JournalTxn {
+        label: Some(format!("{verb} {final_name}")),
+        adds: vec![added],
+        props: Vec::new(),
+        labels: Vec::new(),
+    };
+    // On a failed recompute this still saves + journals (FreeCAD-style:
+    // the failing object is marked Error, no work is lost) and returns
+    // the error — the status line below is printed either way so the
+    // outcome is on record before the exit code.
+    let outcome = recompute_save_journal(file, doc, journal, txn);
+    println!("added {final_name} ({type_name}) -> {file}");
+    report_feature(doc, &final_name);
+    outcome
+}
+
+/// One honest status line for a freshly added feature: its recompute
+/// status plus its computed volume (or the reason there is none).
+fn report_feature(doc: &Document, name: &str) {
+    let Some(object) = doc.get_by_name(name) else {
+        return;
+    };
+    let status = object.status();
+    match mesh_of(object, 0.2) {
+        Some(mesh) => println!(
+            "  {name}: {status}, volume {:.3} mm³, {} triangles",
+            mesh.volume(),
+            mesh.triangle_count()
+        ),
+        None => println!("  {name}: {status}, no computed geometry"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1507,6 +1691,9 @@ fn rebuild_object(added: &JournalAdd) -> Result<Box<dyn DocumentObject>, String>
                 .ok_or_else(|| format!("journal: unknown boolean type '{}'", added.type_name))?;
             Box::new(BooleanFeature::new(&added.name, kind))
         }
+        "PartDesign::Pad" => Box::new(PadFeature::new(&added.name)),
+        "PartDesign::Pocket" => Box::new(PocketFeature::new(&added.name)),
+        "PartDesign::Revolution" => Box::new(RevolutionFeature::new(&added.name)),
         "Sketcher::SketchObject" => {
             let mut object = SketchObject::new(&added.name);
             // The sketch content is object data, journaled as the `S` line
