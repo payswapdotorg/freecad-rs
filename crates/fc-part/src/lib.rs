@@ -13,11 +13,16 @@
 pub mod boolean;
 pub mod brep;
 pub mod features;
+pub mod profile;
 pub mod shape;
 
 pub use brep::{read_shape_bytes, write_shape, BrpError, BrpFormat};
 pub use features::{
     mesh_of, shape_of, BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature,
     SphereFeature, TorusFeature, TransformFeature,
+};
+pub use profile::{
+    classify_wires, extract_wires, extrude, revolve, Point2, ProfileError, Wire,
+    DEFAULT_PROFILE_DEFLECTION, DEFAULT_TOLERANCE,
 };
 pub use shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
