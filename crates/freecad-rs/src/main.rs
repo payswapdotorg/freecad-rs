@@ -214,6 +214,43 @@ pub enum Command {
         /// Path to the `.rhai` script.
         file: String,
     },
+    /// Render the document offscreen to a PNG (the M1 viewer surface;
+    /// the same cameras as `export svg`). Error objects render visibly
+    /// flagged. `--pick x,y` reports the object at that pixel instead
+    /// of writing the image.
+    Render {
+        file: String,
+        /// Output PNG path.
+        output: String,
+        /// Projection: iso | top | front | right.
+        #[arg(long, default_value = "iso")]
+        view: String,
+        #[arg(long, default_value_t = 1280)]
+        width: u32,
+        #[arg(long, default_value_t = 800)]
+        height: u32,
+        /// Report the object at pixel `x,y` instead of writing the PNG.
+        #[arg(long, value_delimiter = ',')]
+        pick: Option<Vec<u32>>,
+        /// Also (re)write the committed golden image for this view — the
+        /// regeneration path, so goldens are never hand-edited.
+        #[arg(long)]
+        bless: bool,
+    },
+    /// Import a STEP file into the document as a `Part::Feature` mesh
+    /// (faceted import under an explicit deflection — ADR-0002).
+    ImportStep {
+        /// The .FCStd document (created when missing).
+        file: String,
+        /// Input STEP path (.step/.stp).
+        input: String,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+        /// Chord deflection in mm (curved-face tessellation fidelity).
+        #[arg(long, default_value_t = 0.1)]
+        deflection: f64,
+    },
     /// Export the document to another format.
     // FC-2-e fix: the task spec, README quick tour and roadmap all invoke
     // `export svg FILE OUT --view V`; the scaffolded variant had no
@@ -345,6 +382,8 @@ pub enum ExportFormat {
         #[arg(long)]
         binary: bool,
     },
+    /// Export the document's solids as faceted AP203 STEP (ADR-0002).
+    Step { file: String, output: String },
 }
 
 fn main() {

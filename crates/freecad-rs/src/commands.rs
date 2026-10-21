@@ -93,6 +93,21 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
         Command::Script { file } => crate::script::run(&file),
+        Command::Render {
+            file,
+            output,
+            view,
+            width,
+            height,
+            pick,
+            bless,
+        } => render(&file, &output, &view, width, height, pick, bless),
+        Command::ImportStep {
+            file,
+            input,
+            name,
+            deflection,
+        } => import_step(&file, &input, name.as_deref(), deflection),
         Command::Export { format } => match format {
             ExportFormat::Svg { file, output, view } => export(&file, &output, &view),
             ExportFormat::Obj { file, output } => export_obj(&file, &output),
@@ -101,6 +116,7 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
                 output,
                 binary,
             } => export_stl(&file, &output, binary),
+            ExportFormat::Step { file, output } => export_step(&file, &output),
         },
         Command::Graph { file, output } => graph(&file, &output),
     }
@@ -1899,4 +1915,52 @@ fn summaries_json<'a>(items: impl IntoIterator<Item = &'a ObjectSummary>) -> Str
     }
     out.push(']');
     out
+}
+
+/// `render` — the M1 viewer surface: offscreen PNG via `fc-viewer`.
+///
+/// `--pick x,y` reports the object at that pixel; `--bless` also
+/// refreshes the crate's committed golden image for the view.
+fn render(
+    file: &str,
+    output: &str,
+    view: &str,
+    width: u32,
+    height: u32,
+    pick: Option<Vec<u32>>,
+    bless: bool,
+) -> Result<(), String> {
+    if let Some(xy) = pick {
+        let (x, y) = (
+            xy.first().copied().unwrap_or(0),
+            xy.get(1).copied().unwrap_or(0),
+        );
+        return match fc_viewer::pick_object(file, view, width, height, x, y)? {
+            Some(name) => {
+                println!("{name}");
+                Ok(())
+            }
+            None => {
+                println!("(no object at {x},{y})");
+                Ok(())
+            }
+        };
+    }
+    let triangles = fc_viewer::render_png(file, output, view, width, height, bless)?;
+    println!("rendered {triangles} triangles to {output} (view: {view})");
+    Ok(())
+}
+
+/// `import-step` — faceted STEP import under an explicit deflection.
+fn import_step(file: &str, input: &str, name: Option<&str>, deflection: f64) -> Result<(), String> {
+    let object = fc_step::import_step(file, input, name, deflection)?;
+    println!("imported {input} as '{object}' (faceted, deflection {deflection} mm)");
+    Ok(())
+}
+
+/// `export step` — faceted AP203 STEP export.
+fn export_step(file: &str, output: &str) -> Result<(), String> {
+    fc_step::export_step(file, output)?;
+    println!("exported solids to {output} (faceted AP203 STEP)");
+    Ok(())
 }

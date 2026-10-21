@@ -453,6 +453,42 @@ merges everything into one solid (the format carries no names) with
 exact `84 + 50·n` binary sizing and outward normals from the CCW
 winding.
 
+## Viewer: `render`
+
+```sh
+freecad-rs render demo.fcstd demo.png                  # iso-view PNG
+freecad-rs render demo.fcstd demo.png --view top       # top/front/right too
+freecad-rs render demo.fcstd x.png --width 800 --height 600
+freecad-rs render demo.fcstd demo.png --pick 640,400   # object at that pixel
+freecad-rs render demo.fcstd demo.png --bless          # refresh the golden
+```
+
+The M1 viewer surface: a headless, offscreen render of the document —
+the same tessellation the CLI exports, flat-shaded, through the same
+four standard cameras as `export svg` (`iso`/`top`/`front`/`right`).
+Objects in the `Error` state still render, visibly flagged;
+half-computed documents never crash the viewer. `--pick x,y` runs the
+same render and reports which object (if any) is at that pixel.
+`--bless` rewrites the committed golden image used by the crate's
+render tests — goldens are regenerated, never hand-edited. Rendering
+needs a GPU (or a software adapter such as lavapipe); without one the
+command fails honestly.
+
+## STEP exchange: `import-step` / `export step`
+
+```sh
+freecad-rs import-step doc.fcstd part.step --name Body --deflection 0.1
+freecad-rs export step doc.fcstd part.step
+```
+
+STEP (AP203) exchange per ADR-0002. Import tessellates the STEP body
+under an explicit chord `--deflection` (mm) and adds it as a
+`Part::Feature` mesh object — import fidelity is deflection-derived
+and tested against it. Export writes the document's solids as
+*faceted* B-rep — legal STEP, honestly labeled as a tessellation (the
+product name carries a faceted marker, asserted by tests). Pure Rust;
+no OCCT.
+
 ## Quantity arithmetic: `calc`
 
 ```sh

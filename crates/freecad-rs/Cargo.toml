@@ -18,4 +18,6 @@ fc-part.workspace = true
 fc-io.workspace = true
 fc-sketcher.workspace = true
 fc-script.workspace = true
+fc-viewer.workspace = true
+fc-step.workspace = true
 clap.workspace = true

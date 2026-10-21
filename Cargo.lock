@@ -391,6 +391,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-step"
+version = "0.1.0"
+dependencies = [
+ "fc-app",
+ "fc-base",
+ "fc-io",
+ "fc-part",
+]
+
+[[package]]
+name = "fc-viewer"
+version = "0.1.0"
+dependencies = [
+ "fc-app",
+ "fc-base",
+ "fc-io",
+ "fc-part",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -417,6 +437,8 @@ dependencies = [
  "fc-part",
  "fc-script",
  "fc-sketcher",
+ "fc-step",
+ "fc-viewer",
 ]
 
 [[package]]
