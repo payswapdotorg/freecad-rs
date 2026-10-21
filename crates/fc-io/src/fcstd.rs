@@ -8,8 +8,8 @@ use fc_app::{Document, DocumentObject, ObjectStatus, Property, PropertyContainer
 use fc_base::{Placement, Rotation, Vector3};
 use fc_part::brep::{self, BrpFormat};
 use fc_part::features::{
-    BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature, SphereFeature,
-    TorusFeature, TransformFeature,
+    BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature, MeshFeature,
+    SphereFeature, TorusFeature, TransformFeature,
 };
 use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
@@ -346,6 +346,8 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<RevolutionFeature>() {
         f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<MeshFeature>() {
+        f.shape.clone()
     } else {
         None
     }
@@ -1466,6 +1468,8 @@ fn attach_shape(
         f.shape = Some(shape);
     } else if let Some(f) = any.downcast_mut::<ConeFeature>() {
         f.shape = Some(shape);
+    } else if let Some(f) = any.downcast_mut::<MeshFeature>() {
+        f.shape = Some(shape);
     } else if let Some(f) = any.downcast_mut::<TorusFeature>() {
         f.shape = Some(shape);
     } else if let Some(f) = any.downcast_mut::<TransformFeature>() {
@@ -1543,7 +1547,7 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "App::Origin" => Some(Box::new(LoadContainer::new("App::Origin", name))),
         "App::Plane" => Some(Box::new(LoadContainer::new("App::Plane", name))),
         "App::Line" => Some(Box::new(LoadContainer::new("App::Line", name))),
-        "Part::Feature" => Some(Box::new(LoadContainer::new("Part::Feature", name))),
+        "Part::Feature" => Some(Box::new(MeshFeature::new(name))),
         _ => None,
     }
 }

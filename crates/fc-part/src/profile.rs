@@ -1065,6 +1065,48 @@ fn ear_clip(poly: &[PolyVert]) -> Result<Vec<[u32; 3]>, ProfileError> {
     Ok(tris)
 }
 
+/// Triangulate a planar region bounded by `outer` and `holes` (any
+/// input orientation; re-oriented internally) into triangles indexing
+/// `0..outer.len() + Σ holes.len()` — outer points first, then each
+/// hole's points in order. The same ear-clip-with-hole-bridging kernel
+/// [`extrude`] uses for its caps, exposed for planar-region callers
+/// (e.g. `fc-step`'s planar-face import). Winding is CCW for the
+/// returned triangles around the region's +normal (the plane's
+/// left-hand side of a CCW outer walk).
+pub fn triangulate_planar_region(
+    outer: &[Point2],
+    holes: &[Vec<Point2>],
+) -> Result<Vec<[u32; 3]>, ProfileError> {
+    // PolyVert.idx is the index into the caller's concatenated point
+    // space (outer first, then each hole in order) — the same convention
+    // extrude's caps use via `cap_poly`.
+    let outer_poly: Vec<PolyVert> = outer
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PolyVert {
+            idx: i as u32,
+            pos: *p,
+        })
+        .collect();
+    let mut base = outer.len() as u32;
+    let hole_polys: Vec<Vec<PolyVert>> = holes
+        .iter()
+        .map(|h| {
+            let poly: Vec<PolyVert> = h
+                .iter()
+                .enumerate()
+                .map(|(i, p)| PolyVert {
+                    idx: base + i as u32,
+                    pos: *p,
+                })
+                .collect();
+            base += h.len() as u32;
+            poly
+        })
+        .collect();
+    triangulate_region(&outer_poly, &hole_polys)
+}
+
 // ---------------------------------------------------------------------------
 // Extrusion (Pad)
 // ---------------------------------------------------------------------------

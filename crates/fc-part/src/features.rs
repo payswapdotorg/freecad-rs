@@ -420,11 +420,85 @@ impl DocumentObject for BooleanFeature {
     }
 }
 
+/// `Part::Feature` — FreeCAD's generic shape carrier: imported geometry
+/// (our STEP import target) and the family root. Holds a plain
+/// [`TopoShape`] as *data*: `execute` is a validation no-op — the shape
+/// is not derived from parameters, so there is nothing to recompute.
+#[derive(Debug)]
+pub struct MeshFeature {
+    pub container: fc_app::PropertyContainer,
+    /// The carried shape (`TopoShape::Mesh` for STEP imports).
+    pub shape: Option<TopoShape>,
+}
+
+impl MeshFeature {
+    /// Properties: `Label` (String) and `Placement` (identity), the
+    /// intersection of FreeCAD's `Part::Feature` surface.
+    pub fn new(name: &str) -> Self {
+        let mut container = fc_app::PropertyContainer::new(name);
+        container.set("Label", fc_app::Property::String(name.to_string()));
+        container.set(
+            "Placement",
+            fc_app::Property::Placement(fc_base::Placement::IDENTITY),
+        );
+        Self {
+            container,
+            shape: None,
+        }
+    }
+}
+
+impl DocumentObject for MeshFeature {
+    fn type_name(&self) -> &'static str {
+        "Part::Feature"
+    }
+    fn name(&self) -> &str {
+        self.container.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.container.set_name(name)
+    }
+    fn properties(&self) -> &std::collections::BTreeMap<String, fc_app::Property> {
+        &self.container.properties
+    }
+    fn properties_mut(&mut self) -> &mut std::collections::BTreeMap<String, fc_app::Property> {
+        &mut self.container.properties
+    }
+    fn expressions(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.container.expressions
+    }
+    fn expressions_mut(&mut self) -> Option<&mut std::collections::BTreeMap<String, String>> {
+        Some(&mut self.container.expressions)
+    }
+    fn execute(&mut self, _doc: &Document) -> Result<(), String> {
+        // Imported geometry is data, not a derivation: validate only.
+        if let Some(shape) = &self.shape {
+            shape.validate()?;
+        }
+        Ok(())
+    }
+    fn status(&self) -> &fc_app::ObjectStatus {
+        self.container.status()
+    }
+    fn set_status(&mut self, status: fc_app::ObjectStatus) {
+        self.container.set_status(status)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 /// Tessellated geometry of any part feature (any concrete type), via
 /// downcast. `None` for non-part objects or features that have not
 /// computed a shape yet.
 pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
     let any = obj.as_any();
+    if let Some(f) = any.downcast_ref::<MeshFeature>() {
+        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+    }
     if let Some(f) = any.downcast_ref::<BoxFeature>() {
         return f.shape.as_ref().map(|s| s.tessellate(deflection));
     }
@@ -461,6 +535,9 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
 /// Analytic shape of any part feature, if computed.
 pub fn shape_of(obj: &dyn DocumentObject) -> Option<TopoShape> {
     let any = obj.as_any();
+    if let Some(f) = any.downcast_ref::<MeshFeature>() {
+        return f.shape.clone();
+    }
     if let Some(f) = any.downcast_ref::<BoxFeature>() {
         return f.shape.clone();
     }
