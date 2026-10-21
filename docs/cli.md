@@ -508,3 +508,80 @@ recompute. A failed solve still saves (the sketch is marked `Error`,
 FreeCAD-style) and exits 1. `sketch-info` re-runs the recompute in
 memory (the file is not modified) and reports the fresh solve state;
 solve results are recompute products and are never persisted.
+
+## Scripting: `script`
+
+```sh
+freecad-rs script examples/build-house.rhai
+# new document "House" (0 objects)
+# added Base (Part::Box)
+# added Chimney (Part::Cylinder)
+# bound Chimney.Height = 2 * Base.Length
+# ...
+# 4 recomputed, 4 total
+# Base volume: 3000.0
+# saved house.FCStd
+```
+
+`script FILE.rhai` runs a [rhai](https://rhai.rs) script against a fresh
+sandboxed engine — the console surface, distilled: a program drives the
+parametric document the way FreeCAD's Python console does, in pure Rust
+(no CPython embedding, `--locked`-friendly). The committed example
+(`crates/fc-script/examples/build-house.rhai`) is a full walkthrough.
+
+The engine prints a small honest transcript of what the script did —
+added / set / bound / recomputed / saved, plus anything the script
+`print`s. A worked session:
+
+```rhai
+let doc = new_document("House");
+let base = doc.add_box("Base", 30.0, 20.0, 5.0);   // Part::Box
+let chimney = doc.add_cylinder("Chimney", 1.5, 12.0);
+doc.bind(chimney, "Height", "2 * Base.Length");    // setExpression
+let lift = doc.add_transform("Lift", base);
+doc.set(lift, "Placement",
+        placement(vec3(0.0, 0.0, 14.0), vec3(0.0, 0.0, 1.0), 25.0));
+doc.recompute();                                   // dependencies-first
+print(doc.volume(base));                           // exact analytic stats
+doc.save("house.FCStd");                           // .FCStd via fc-io
+```
+
+The API (one document per `new_document`/`open_document`; method syntax
+on the handle):
+
+| call | mirrors |
+|------|---------|
+| `new_document(label)` / `open_document(path)` | `new` / load (`.FCStd`) |
+| `doc.add_box(name, l, w, h)` · `add_sphere(n, r)` · `add_cylinder(n, r, h)` · `add_cone(n, r1, r2, h)` · `add_torus(n, r1, r2)` | `add` (the `Part::` primitives) |
+| `doc.add_transform(name, source)` · `add_cut/add_fuse/add_common(name, base, tool)` | `add transform` / the booleans |
+| `doc.set(object, property, value)` | `set` — parsed against the property's **existing** type, exactly like the CLI (`6` into a Float, `"Ball"` into a Link, a `vec3` into a Vector, a `placement(...)` into a Placement); mismatches are honest errors |
+| `doc.bind(object, property, "expr")` / `doc.unbind(...)` | `set-expr` / `clear-expr` — the `App::PropertyExpressionEngine` surface: parse-validated, Float-only, evaluated dependencies-first at every recompute |
+| `doc.recompute()` | `recompute` — returns `true`/`false`; a failure is recorded, not raised |
+| `doc.volume(name)` · `doc.area(name)` · `doc.bbox(name)` | `stats` — exact analytic numbers (`bbox` is a map with `min`/`max`/`size`/`center` arrays) |
+| `doc.save(path)` | save (`.FCStd` via `fc-io`) |
+| `doc.export_stl(path, binary)` · `doc.export_obj(path)` | `export stl` / `export obj` |
+
+Numbers may be written `30` or `30.0` — both coerce, like a shell
+argument; anything else is an honest `expected a number` error.
+
+**Failure semantics mirror the CLI's.** Every API failure (unknown
+object, unparseable value, bad binding, failed save) surfaces as a rhai
+runtime error with the CLI's message style and stops the script with
+`error: …` on stderr and exit 1. A **failed recompute** is the CLI's
+honest state, not an exception: the script keeps running, the transcript
+records `recompute failed: …`, the failing object stays in the document
+marked `Error` — and the process exits 1 at the end with the same
+message the CLI's recompute failure prints. A rhai parse or runtime
+error is likewise a clear message and exit 1 (the transcript printed so
+far stays on stdout). Persistence is the script's choice: only explicit
+`save` calls write anything.
+
+**Sandbox.** rhai gives a script no file, network or FFI access — the
+document API above is the whole surface. An operation budget stops
+runaway loops with an honest error instead of a hang.
+
+Two honest kernel notes: a primitive's own `Placement` property is
+carried but not baked into its analytic shape (set placements on a
+`Part::Transform` to move geometry), and sketches are not reachable from
+scripts (they need `fc-sketcher` fragments; use `add sketch` +
+`sketch-import` on the CLI).

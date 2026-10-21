@@ -6,6 +6,7 @@ members = [
     "crates/fc-part",
     "crates/fc-io",
     "crates/fc-sketcher",
+    "crates/fc-script",
     "crates/freecad-rs",
 ]
 
@@ -22,6 +23,8 @@ fc-app = { path = "crates/fc-app" }
 fc-part = { path = "crates/fc-part" }
 fc-io = { path = "crates/fc-io" }
 fc-sketcher = { path = "crates/fc-sketcher" }
+fc-script = { path = "crates/fc-script" }
+rhai = "1.26"
 zip = "2.2"
 quick-xml = "0.36"
 clap = { version = "4.5", features = ["derive"] }

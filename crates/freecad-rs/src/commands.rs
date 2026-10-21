@@ -92,6 +92,7 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         } => revolution(&file, &sketch, angle, axis, name.as_deref()),
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
+        Command::Script { file } => crate::script::run(&file),
         Command::Export { format } => match format {
             ExportFormat::Svg { file, output, view } => export(&file, &output, &view),
             ExportFormat::Obj { file, output } => export_obj(&file, &output),
