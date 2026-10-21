@@ -517,21 +517,31 @@ fn empty_document_round_trip() {
 }
 
 // Reference the LoadReport type once more so its full shape (warnings,
-// objects, skipped) is part of this file's compiled contract.
+// objects, skipped, skipped_properties, quantity_properties) is part of
+// this file's compiled contract.
 #[test]
 fn load_report_has_the_documented_fields() {
     let report = LoadReport::default();
     assert_eq!(report.objects, 0);
     assert_eq!(report.skipped, 0);
     assert!(report.warnings.is_empty());
+    assert!(report.skipped_properties.is_empty());
+    assert!(report.quantity_properties.is_empty());
     let report = LoadReport {
         warnings: vec!["w".to_string()],
         objects: 3,
         skipped: 1,
+        skipped_properties: vec!["Obj.Prop".to_string()],
+        quantity_properties: vec!["Obj.Angle (unit deg)".to_string()],
     };
     assert_eq!(report.objects, 3);
     assert_eq!(report.skipped, 1);
     assert_eq!(report.warnings.len(), 1);
+    assert_eq!(report.skipped_properties, vec!["Obj.Prop".to_string()]);
+    assert_eq!(
+        report.quantity_properties,
+        vec!["Obj.Angle (unit deg)".to_string()]
+    );
 }
 
 /// FC-6.1 follow-up regression: a solved-and-saved sketch reloads with

@@ -1,0 +1,68 @@
+<Document SchemaVersion="4" ProgramVersion="0.21.2" FileVersion="1">
+ <Properties Count="1">
+  <Property name="Label" type="App::PropertyString">
+   <String value="Property zoo"/>
+  </Property>
+ </Properties>
+ <Objects Count="1" Dependencies="1">
+  <Object type="Part::Box" name="Zoo" id="1"/>
+ </Objects>
+ <ObjectData Count="1">
+  <Object name="Zoo">
+   <Properties Count="15">
+    <Property name="AColor" type="App::PropertyColor">
+     <PropertyColor value="16711680"/>
+    </Property>
+    <Property name="AConstraint" type="App::PropertyIntegerConstraint">
+     <Integer value="7"/>
+    </Property>
+    <Property name="ADistance" type="App::PropertyDistance">
+     <Float value="3.25" unit="mm"/>
+    </Property>
+    <Property name="AFloatList" type="App::PropertyFloatList">
+     <FloatList value="0.5 1.5 2.5"/>
+    </Property>
+    <Property name="ALength" type="App::PropertyLength">
+     <Float value="12.5"/>
+    </Property>
+    <Property name="AMatrix" type="App::PropertyMatrix">
+     <PropertyMatrix a11="1" a12="0" a13="0" a14="0" a21="0" a22="1" a23="0" a24="0" a31="0" a32="0" a33="1" a34="0" a41="0" a42="0" a43="0" a44="1"/>
+    </Property>
+    <Property name="AMystery" type="App::PropertyWeird">
+     <Weird value="1"/>
+    </Property>
+    <Property name="AnAngle" type="App::PropertyAngle">
+     <Float value="45" unit="deg"/>
+    </Property>
+    <Property name="AnEnum" type="App::PropertyEnumeration">
+     <String value="ThroughAll"/>
+    </Property>
+    <Property name="AnIntList" type="App::PropertyIntegerList">
+     <IntegerList>1 2 3</IntegerList>
+    </Property>
+    <Property name="AStringList" type="App::PropertyStringList">
+     <StringList>alpha beta
+gamma</StringList>
+    </Property>
+    <Property name="AStringListEntries" type="App::PropertyStringList">
+     <StringList count="3">
+      <String value="one"/>
+      <String value="two"/>
+      <String value="three"/>
+     </StringList>
+    </Property>
+    <Property name="AVector" type="App::PropertyVector">
+     <PropertyVector valueX="1" valueY="-2" valueZ="0.5"/>
+    </Property>
+    <Property name="AVectorElem" type="App::PropertyVector">
+     <PropertyVector>
+      <Vec valueX="3" valueY="4" valueZ="5"/>
+     </PropertyVector>
+    </Property>
+    <Property name="Label" type="App::PropertyString">
+     <String value="Property zoo"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>

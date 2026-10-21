@@ -1,0 +1,37 @@
+PartDesign::Body Body Valid
+  Group = Origin Sketch Pad
+  Label = Body
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+  Tip = Pad
+App::Origin Origin Valid
+  Group = XY_Plane XZ_Plane YZ_Plane X_Axis
+  Label = Origin
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+App::Plane XY_Plane Valid
+  Label = XY_Plane
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+  Role = XY_Plane
+App::Plane XZ_Plane Valid
+  Label = XZ_Plane
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+  Role = XZ_Plane
+App::Plane YZ_Plane Valid
+  Label = YZ_Plane
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+  Role = YZ_Plane
+App::Line X_Axis Valid
+  Label = X_Axis
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+  Role = X_Axis
+Sketcher::SketchObject Sketch Valid
+  Label = ProfileSketch
+  Placement = pos=(0,0,0);axis=(0,0,1);angle=0
+PartDesign::Pad Pad Touched
+  Angle = 0
+  Axis = 0,0,1
+  Label = Pad
+  Length = 12.5
+  Midplane = false
+  Profile = Sketch
+  Reversed = false
+  Type = Length
