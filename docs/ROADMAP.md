@@ -2,11 +2,11 @@
 
 Honest, incremental, no vaporware.
 
-> **Verified baseline** — `main` @ `65189af`, verified locally on
-> 2026-10-21: `cargo build` / `cargo test --workspace --locked` green
-> (**399 tests, 0 failed**, seven crates), `clippy --workspace
-> --all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
-> clean.
+> **Verified baseline** — `main` @ `941d3b2` + the FC-14 closures,
+> verified locally on 2026-10-21: `cargo build` / `cargo test
+> --workspace --locked` green (**441 tests, 0 failed**, nine crates),
+> `clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt
+> --all -- --check` clean.
 
 ## Done
 
@@ -141,20 +141,39 @@ Honest, incremental, no vaporware.
       common within the tessellation-derived tolerance of 3pi),
       bit-determinism on the razor fixture
 
-## Next (candidates, in rough order)
-
-- [ ] Mirrored near-coincident seams at fine deflections: two operand
-      sheets that nearly touch without sharing a seam curve (a cone
-      against its own z-mirror at deflection 0.04) sit inside the
-      welders' tolerance, and the honest guard rejects the collapsed
-      repair — the result stays open rather than corrupted. No
-      milestone gate pending.
-- [ ] Exact-tangency slivers: at d = r1 + r2 the exact-weld path
-      closes bit-identically but may carry zero-area triangles at the
-      tangent point (watertight, manifold, volume exact — documented
-      in the near-tangent fixture). Pruning them would violate the
-      closed-mesh contract; a dedicated sliver filter at the boolean
-      boundary is honest follow-up work.
+- [x] **FC-14** Mirrored near-coincident seams at fine deflections —
+      a cone against its own z-mirror (the hourglass pair) at
+      deflection 0.04 left an **apex slit**: four boundary spokes
+      from the two tips down to two adjacent waist samples. Welding
+      through the slit's shared-vertex pairs satisfied the old
+      segment-distance gates while merging the two apexes 3.99 apart
+      (a pair of adjacent slit spokes puts each far endpoint on the
+      other's *span* at a full spoke's length), annihilating one
+      bicone flank; the honest volume guard then reverted the whole
+      repair and the result stayed open. Fin welding now requires the
+      merged endpoints themselves to be sub-scale — endpoint to
+      endpoint, not endpoint to span — so the slit closes through its
+      razor-width waist weld instead. Fixture: the mirrored pair swept
+      at deflections {0.06, 0.05, 0.04, 0.03}, all three ops
+      watertight, degenerate-free, partitioning within the operands'
+      tessellation tolerance, bit-deterministic
+- [x] **FC-14** Exact-tangency slivers — at d = r1 + r2 the
+      exact-weld path closes bit-identically but carried zero-area
+      triangles at the tangent point (distinct, collinear vertices —
+      the grazing clip's slices through one operand facet). Pruning
+      them would violate the closed-mesh contract, so the dedicated
+      filter **collapses** instead: each same-sheet fold's shortest
+      edge merges onto the lower index, dropping the sliver plus the
+      sub-scale needle strip that shared the edge, re-pairing the
+      surrounding link edge for edge. Cross-sheet degenerates (the
+      coplanar seam's exact-weld interlock) and folds whose collapse
+      dents real structure (caught by a 0.1% volume bar — the slivers
+      live at a zero-measure contact, so an honest collapse moves
+      noise, never volume) stay untouched, wholesale-or-not-at-all.
+      Fixtures: exactly tangent sphere pairs at deflections
+      {0.1, 0.2, 0.3, 0.4} — fuse/cut watertight, degenerate-free,
+      volume-exact, `common` honestly empty, bit-deterministic; the
+      planar box fixtures stay bit-identical byte for byte
 
 ## Non-goals (explicit)
 

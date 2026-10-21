@@ -311,6 +311,7 @@ fn boolean_prepared(a: &Mesh, polygons_a: Vec<Polygon>, polygons_b: Vec<Polygon>
     let polygons = stitch_t_junctions(op_result(polygons_a, polygons_b, op));
     let (mut mesh, mut sides) = mesh_from_sided(polygons);
     close_curved_seams(&mut mesh, &mut sides);
+    collapse_tangency_slivers(&mut mesh, &mut sides);
     mesh
 }
 
@@ -1800,6 +1801,25 @@ fn weld_fin_edges(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
             } else {
                 (a1, a2, b2, b1)
             };
+            // A fin is two views of ONE edge, so its endpoints must
+            // merge onto each other — the paired distances themselves
+            // must be sub-scale, not merely each endpoint's distance
+            // to the other edge's *span*. The span form lets a pair of
+            // adjacent edges (a boundary path bending through a shared
+            // vertex — an apex slit's spokes) pass: each far endpoint
+            // sits on the other edge's span at a full spoke's length
+            // while the shared vertex is at zero, and the "crossed"
+            // correspondence then merges the two structurally distinct
+            // far endpoints. The paired distances see that at once:
+            // merging them would drag each endpoint a large fraction
+            // of (or more than) the sampling scale, which no honest
+            // counterpart pair ever needs.
+            if (mesh.vertices[m_a1 as usize] - mesh.vertices[m_b1 as usize]).length() > reach {
+                continue;
+            }
+            if (mesh.vertices[m_a2 as usize] - mesh.vertices[m_b2 as usize]).length() > reach {
+                continue;
+            }
             pairs.push((m_a1, m_b1));
             pairs.push((m_a2, m_b2));
             // Orientation: after the weld, edge i's owner must use the
@@ -1997,6 +2017,233 @@ fn volume_within_guard(repaired: &Mesh, original: &Mesh, seam: &[((u32, u32), Si
         .sum();
     let authority = 2.0 * seam_length * scale * scale;
     (after - before).abs() <= SEAM_REPAIR_VOLUME_GUARD * before.abs() + authority + PLANE_EPS
+}
+
+/// How many collapse rounds the tangency sliver filter takes before
+/// giving up: each round collapses every disjoint degenerate it can,
+/// and a collapse can expose a fresh collinearity in the re-stitched
+/// fan — two or three rounds converge; the rest is a runaway guard.
+const SLIVER_COLLAPSE_ROUNDS: usize = 4;
+
+/// How much volume the tangency sliver filter may move, relative to
+/// the result: the slivers it removes live at a zero-measure contact
+/// (two surfaces touching at a point), so an honest collapse moves
+/// welding noise, never measurable volume — and the exact-weld path's
+/// own coplanar seam slivers, whose collapse *would* dent a real face,
+/// are rejected by the same bar.
+const SLIVER_VOLUME_GUARD: f64 = 0.001;
+
+/// Collapse the zero-area slivers an exactly-tangential boolean
+/// leaves at its zero-measure contact (FC-14): where two operand
+/// surfaces touch at a single point, the clip's grazing cuts emit
+/// degenerate triangles — distinct, nearly-collinear vertices with
+/// area below the clipper's own bar — on an otherwise closed,
+/// manifold, exact-volume result. Pruning them would violate the
+/// closed-mesh contract (their edges each carry one real neighbor),
+/// so the filter **collapses** instead: each degenerate triangle's
+/// shortest edge — its two nearly-coincident vertices, closer than
+/// the mesh's own sampling — merges onto the lower index, dropping
+/// the sliver plus the sub-scale-width needle strip that shared the
+/// collapsed edge, while the surrounding link re-pairs edge for edge
+/// and the mesh stays closed by construction.
+///
+/// # Contract
+///
+/// * Only a mesh that is **already closed** takes the filter — the
+///   exact-weld path (and a successful seam repair) is where these
+///   slivers survive to the output; an open result keeps its damage
+///   untouched.
+/// * A mesh with no sub-bar triangles is returned **bit-identically**
+///   — the planar and curved paths that never graze tangentially pay
+///   nothing.
+/// * Only a **same-sheet fold** is collapsed: a tangency sliver is
+///   one operand's own surface folding back at the contact, so the
+///   degenerate and every one of its edge-neighbors belong to the
+///   same sheet. A cross-sheet degenerate is the coplanar seam's
+///   exact-weld interlock — the bit-exact path's own planar output,
+///   which no later pass may touch.
+/// * Wholesale-or-not-at-all: a collapse sequence that leaves the
+///   mesh open, fails to converge (a collapse that decimates real
+///   structure squashes its neighbors into fresh degenerates), or
+///   moves volume beyond a fraction of a percent (the slivers live at
+///   a zero-measure contact, so an honest collapse moves welding
+///   noise, never measurable volume — the planar folds whose collapse
+///   dents a real face are rejected by the same bar) is reverted
+///   whole; the slivers stay, honestly, exactly as the weld left
+///   them.
+/// * Deterministic: degenerates are visited in triangle order, ties
+///   break on the canonical edge, and merges union-find onto the
+///   smaller index.
+fn collapse_tangency_slivers(mesh: &mut Mesh, sides: &mut Vec<Side>) {
+    debug_assert_eq!(mesh.triangles.len(), sides.len());
+    if mesh.triangles.is_empty() || !mesh_is_closed(mesh) {
+        return; // An open result keeps its damage; an empty one has none.
+    }
+    if !mesh
+        .triangles
+        .iter()
+        .any(|t| triangle_area_x2(mesh, t) < 2.0 * DEGENERATE_AREA)
+    {
+        return; // Nothing to filter: bit-identical, untouched.
+    }
+    let original = mesh.clone();
+    let original_sides = sides.clone();
+    let volume_before = original.volume();
+    // The mesh's own sampling (no boundary exists here): the merge
+    // distance a weld below the tessellation's resolution cannot see.
+    let scale = seam_scale(mesh, &[]);
+    let mut changed = false;
+    for _round in 0..SLIVER_COLLAPSE_ROUNDS {
+        // Edge -> using triangles, for the manifold pair check and
+        // the degenerate's neighborhood (its sides and normals).
+        let mut users: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+        for (i, triangle) in mesh.triangles.iter().enumerate() {
+            for (u, v) in [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                let e = if u < v { (u, v) } else { (v, u) };
+                users.entry(e).or_default().push(i);
+            }
+        }
+        // The merges: each degenerate's shortest edge, when its two
+        // endpoints sit within one sampling width of each other and
+        // the edge carries exactly the degenerate and one real
+        // neighbor (the needle strip the collapse also removes).
+        // Only a **same-sheet fold** is a tangency sliver — one
+        // operand's own surface folding back at the contact; a
+        // cross-sheet degenerate is the coplanar seam's exact-weld
+        // interlock, the bit-exact path's own planar output, which no
+        // later pass may touch.
+        let mut parent: BTreeMap<u32, u32> = BTreeMap::new();
+        for (i, triangle) in mesh.triangles.iter().enumerate() {
+            if triangle_area_x2(mesh, triangle) >= 2.0 * DEGENERATE_AREA {
+                continue;
+            }
+            let sides_first = sides[i];
+            let edges = [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ];
+            let dist = |(u, v): &(u32, u32)| {
+                (mesh.vertices[*v as usize] - mesh.vertices[*u as usize]).length()
+            };
+            let Some(&(u, v)) = edges.iter().min_by(|a, b| {
+                dist(a)
+                    .partial_cmp(&dist(b))
+                    .expect("finite lengths")
+                    .then_with(|| a.cmp(b))
+            }) else {
+                continue;
+            };
+            let (lo, hi) = if u < v { (u, v) } else { (v, u) };
+            let neighbors: Vec<usize> = edges
+                .iter()
+                .flat_map(|(x, y)| {
+                    let key = if x < y { (*x, *y) } else { (*y, *x) };
+                    users.get(&key).into_iter().flatten().copied()
+                })
+                .filter(|j| *j != i)
+                .collect();
+            if users.get(&(lo, hi)).map_or(true, |u| u.len() != 2) {
+                continue; // Not the manifold pair a collapse consumes.
+            }
+            // Gate 1 — the same-sheet fold: a tangency sliver is one
+            // operand's own surface folding back at the contact, so
+            // the degenerate and every one of its edge-neighbors
+            // belong to the same sheet. A cross-sheet degenerate is
+            // the coplanar seam's exact-weld interlock — the
+            // bit-exact path's own planar output, which no later
+            // pass may touch.
+            if neighbors.iter().any(|&j| sides[j] != sides_first) {
+                continue;
+            }
+            let d = dist(&(lo, hi));
+            if d > SEAM_BRIDGE_SCALES * scale {
+                continue; // A weld the tessellation's resolution can see.
+            }
+            let (root_lo, root_hi) = (
+                parent.get(&lo).copied().unwrap_or(lo),
+                parent.get(&hi).copied().unwrap_or(hi),
+            );
+            if root_lo == root_hi {
+                continue;
+            }
+            let (keep, drop) = if root_lo < root_hi {
+                (root_lo, root_hi)
+            } else {
+                (root_hi, root_lo)
+            };
+            parent.insert(drop, keep);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+        // Resolve to final targets (a target may itself be remapped).
+        let resolve = |mut v: u32| -> u32 {
+            while let Some(&next) = parent.get(&v) {
+                v = next;
+            }
+            v
+        };
+        let mut touched = false;
+        for triangle in &mut mesh.triangles {
+            for index in triangle {
+                let resolved = resolve(*index);
+                if resolved != *index {
+                    *index = resolved;
+                    touched = true;
+                }
+            }
+        }
+        if !touched {
+            break;
+        }
+        // The collapsed degenerates and their needle partners become
+        // repeated-index triangles and drop; re-stitched fans could
+        // mirror an existing triangle, which the duplicate collapse
+        // resolves the way every other weld here does.
+        drop_repeated_index_triangles(mesh, sides);
+        collapse_duplicate_triangles(&mut mesh.triangles, sides);
+        if mesh.triangles.is_empty() {
+            break;
+        }
+    }
+    // The gates, in the order that matters:
+    // * **Convergence** — the collapse sequence must finish the job it
+    //   started: no sub-bar triangle may remain. A collapse that
+    //   decimates real structure squashes its neighbors into fresh
+    //   degenerates, and the cascade either runs out of rounds (revert)
+    //   or eats a visible bite of the mesh — which the volume gate
+    //   below catches. An honest tangency collapse re-stitches cleanly
+    //   and converges.
+    // * **Closed** — the manifold contract, exactly as everywhere else.
+    // * **Volume** — the slivers live at a zero-measure contact, so an
+    //   honest collapse moves noise, not volume: the needles hug a
+    //   region that encloses nothing. A change beyond a small fraction
+    //   of a percent means the collapse consumed real structure (the
+    //   exact-weld path's own coplanar seam slivers are exactly that
+    //   case), and the whole filter reverts, leaving the slivers
+    //   exactly as the weld left them.
+    let gate_converged = !mesh
+        .triangles
+        .iter()
+        .any(|t| triangle_area_x2(mesh, t) < 2.0 * DEGENERATE_AREA);
+    let gate_closed = mesh_is_closed(mesh) && !mesh.triangles.is_empty();
+    let gate_volume = (mesh.volume() - volume_before).abs()
+        <= SLIVER_VOLUME_GUARD * volume_before.abs() + PLANE_EPS;
+    if changed && gate_converged && gate_closed && gate_volume {
+        compact_vertices(mesh);
+    } else {
+        // Wholesale-or-not-at-all: the drops and duplicate collapses
+        // ran against `sides` too, so both come back from the
+        // pristine pair.
+        *mesh = original;
+        *sides = original_sides;
+    }
 }
 
 /// Drop vertices no triangle references (the ones the cut band left
@@ -3465,28 +3712,41 @@ mod tests {
         }
     }
 
-    /// Exactly tangent spheres (d = r1 + r2): the intersection has
-    /// zero measure, so `common` must honestly come back empty, and
-    /// the union/difference must each be the operands to within the
-    /// tangency seam's repair noise. The exact-weld path closes these
-    /// bit-identically but may carry zero-area slivers at the tangent
-    /// point — the mesh is still a valid watertight solid, its volume
-    /// exact — so this is the one fixture family where degenerates
-    /// are tolerated (and documented) rather than rejected.
+    /// Exactly tangent spheres (d = r1 + r2), swept across deflections:
+    /// the intersection has zero measure, so `common` must honestly
+    /// come back empty, and the union/difference must each be the
+    /// operands to within the tangency seam's repair noise. The
+    /// exact-weld path closes these bit-identically, but the grazing
+    /// clip emits zero-area slivers at the tangent point — the
+    /// dedicated tangency sliver filter (FC-14) collapses them, so the
+    /// results are asserted degenerate-free at every sampling density
+    /// (the sliver population and the filter's volume margin both
+    /// scale with the deflection).
     #[test]
     fn boolean_exactly_tangent_sphere_pair() {
-        let a = sphere_at(DEFAULT_DEFLECTION, 0.0, 0.0, 0.0);
-        let b = sphere_at(DEFAULT_DEFLECTION, 2.0, 0.0, 0.0);
-        let fuse = fuse(&a, &b);
-        let cut = cut(&a, &b);
-        assert!(mesh_is_closed(&fuse), "tangent fuse must be watertight");
-        assert!(mesh_is_closed(&cut), "tangent cut must be watertight");
-        let (va, vb) = (a.volume(), b.volume());
-        assert_volume(&fuse, va + vb, 0.02, "tangent fuse volume");
-        assert_volume(&cut, va, 0.02, "tangent cut volume");
-        match try_common(&a, &b) {
-            Err(BooleanError::EmptyResult) => {}
-            other => panic!("tangent common must be empty, got {other:?}"),
+        for deflection in [0.1_f64, 0.2, 0.3, 0.4] {
+            let what = format!("tangent spheres defl={deflection}");
+            let a = sphere_at(deflection, 0.0, 0.0, 0.0);
+            let b = sphere_at(deflection, 2.0, 0.0, 0.0);
+            let (fused, cut_a) = (fuse(&a, &b), cut(&a, &b));
+            assert!(mesh_is_closed(&fused), "{what}: fuse must be watertight");
+            assert!(mesh_is_closed(&cut_a), "{what}: cut must be watertight");
+            assert_no_degenerate(&fused, &what);
+            assert_no_degenerate(&cut_a, &what);
+            let (va, vb) = (a.volume(), b.volume());
+            assert_volume(&fused, va + vb, 0.02, &format!("{what} fuse volume"));
+            assert_volume(&cut_a, va, 0.02, &format!("{what} cut volume"));
+            match try_common(&a, &b) {
+                Err(BooleanError::EmptyResult) => {}
+                other => panic!("{what}: common must be empty, got {other:?}"),
+            }
+            // The sliver filter is deterministic: a rerun is
+            // bit-identical in vertices and triangles.
+            let (again_fuse, again_cut) = (fuse(&a, &b), cut(&a, &b));
+            assert_eq!(fused.vertices, again_fuse.vertices, "{what}");
+            assert_eq!(fused.triangles, again_fuse.triangles, "{what}");
+            assert_eq!(cut_a.vertices, again_cut.vertices, "{what}");
+            assert_eq!(cut_a.triangles, again_cut.triangles, "{what}");
         }
     }
 
@@ -3572,6 +3832,64 @@ mod tests {
             tolerance,
             "opposed cones fuse",
         );
+    }
+
+    /// Mirrored near-coincident seams at fine deflections (FC-14): a
+    /// cone against its own z-mirror — the hourglass pair whose common
+    /// is the bicone lens — swept at deflections finer than the FC-13
+    /// fixture. At deflection 0.04 the braid's repair once left an
+    /// **apex slit** (four boundary spokes running from the two tips to
+    /// two adjacent waist samples), and welding through the slit's
+    /// shared-vertex pairs merged the two apexes across the whole lens,
+    /// annihilating one flank; the honest volume guard then reverted
+    /// the entire repair and the result stayed open. Fin welding now
+    /// requires the merged endpoints themselves to be sub-scale — not
+    /// merely near the other edge's span — so the slit closes through
+    /// its razor-width waist weld instead. Partition identities and
+    /// bit-determinism are asserted at every deflection.
+    #[test]
+    fn boolean_mirrored_cone_fine_deflections_close() {
+        let pi = std::f64::consts::PI;
+        for deflection in [0.06_f64, 0.05, 0.04, 0.03] {
+            let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+            // Mirror about z = 0 and repair the winding a reflection
+            // reverses; the operand must stay outward-facing.
+            let mut b = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+            for v in &mut b.vertices {
+                v.z = -v.z;
+            }
+            for t in b.triangles.iter_mut() {
+                t.swap(1, 2);
+            }
+            let what = format!("mirrored cones defl={deflection}");
+            let (fuse_m, cut_m, common_m) = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+            for m in [&fuse_m, &cut_m, &common_m] {
+                assert!(mesh_is_closed(m), "{what}: must be watertight");
+                assert_no_degenerate(m, &what);
+            }
+            let (va, vb) = (a.volume(), b.volume());
+            let hourglass = 3.0 * pi;
+            let cone = pi * 3.0 * 3.0 * 4.0 / 3.0;
+            let tolerance = derived_tolerance(&[&a, &b], &[cone, cone]);
+            assert_closed_positive_near(&common_m, hourglass, tolerance, &format!("{what} common"));
+            assert_closed_positive_near(&cut_m, va - hourglass, tolerance, &format!("{what} cut"));
+            assert_closed_positive_near(
+                &fuse_m,
+                va + vb - hourglass,
+                tolerance,
+                &format!("{what} fuse"),
+            );
+            // The repair is deterministic: a rerun is bit-identical.
+            let again = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+            for (x, y) in [
+                (&fuse_m, &again.0),
+                (&cut_m, &again.1),
+                (&common_m, &again.2),
+            ] {
+                assert_eq!(x.vertices, y.vertices, "{what}: vertices");
+                assert_eq!(x.triangles, y.triangles, "{what}: triangles");
+            }
+        }
     }
 
     /// The near-tangent repairs are deterministic: a rerun of the

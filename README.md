@@ -14,15 +14,16 @@ a GUI, not a full CAD kernel, and honest about both:
 > reimplements its *architecture and file format* from scratch; no
 > FreeCAD code is used or included. License: MIT.
 
-**Verified baseline** — `main` @ `adf3bf8` + the FC-12 mixed-curved
-near-tangent & cone-cone seam robustness (2026-10-21): nine crates, **440 tests, 0 failed** (`cargo
+**Verified baseline** — `main` @ the FC-14 mirrored-seam &
+tangency-sliver closures (2026-10-21): nine crates, **441 tests, 0 failed** (`cargo
 build` / `cargo test --workspace --locked`), `clippy --workspace
 --all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
 clean. PartDesign v1, curved-seam boolean robustness (now on mixed
 curved operands: crossed/parallel/skew cylinders, tilted cone and
-cylinder vs sphere), native-file interop breadth, rhai embedded
-scripting, the M1 offscreen viewer, and STEP exchange are implemented
-(details below).
+cylinder vs sphere, mirrored near-coincident seams at fine
+deflections, exact-tangency sliver filtering), native-file interop
+breadth, rhai embedded scripting, the M1 offscreen viewer, and STEP
+exchange are implemented (details below).
 
 ## What is implemented
 
