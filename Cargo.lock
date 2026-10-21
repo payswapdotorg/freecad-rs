@@ -316,6 +316,7 @@ version = "0.1.0"
 dependencies = [
  "fc-app",
  "fc-base",
+ "fc-sketcher",
 ]
 
 [[package]]
