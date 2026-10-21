@@ -32,18 +32,25 @@
 //! re-splits every such edge at the exact `Vector3` the neighbor owns,
 //! which closes planar and cylindrical seams bit-exactly.
 //!
-//! **Curved seams** (sphere against sphere — where *both* surfaces
-//! are tessellated) need more than bit-exactness: the two sides trace
-//! the same mathematical seam curve with different floating-point
-//! vertices, up to about one deflection apart, so the exact weld can
-//! never pair them. After the stitch, `close_curved_seams` mends what
-//! is left — snapping the two traces onto a consensus grid derived
-//! from the seam's own sampling scale, interleaving staggered vertices
-//! (the tolerance-based generalization of the T-junction stitch),
-//! welding fin pairs, thinning over-covered sheets, and capping
-//! punctures — under a volume guard that reverts the whole repair
-//! unless the result is closed *and* honest. A mesh the exact weld
-//! already closed passes through bit-identically.
+//! **Curved seams** (where *both* surfaces are tessellated — sphere
+//! against sphere, crossed cylinders, a tilted cylinder through a
+//! sphere) need more than bit-exactness: the two sides trace the same
+//! mathematical seam curve with different floating-point vertices, up
+//! to about one deflection apart, so the exact weld can never pair
+//! them. After the stitch, `close_curved_seams` mends what is left —
+//! snapping the two traces onto a consensus grid derived from the
+//! seam's own sampling scale (the median boundary-edge step, the one
+//! quantity a seam cannot misreport about itself), interleaving
+//! staggered vertices (the tolerance-based generalization of the
+//! T-junction stitch), welding fin pairs, thinning over-covered
+//! sheets, and capping punctures — under a volume guard that reverts
+//! the whole repair unless the result is closed *and* honest. Seams
+//! with several branches that meet (the two closed curves of crossed
+//! cylinders, which cross at two points) are mended by the same
+//! machinery: what the interleave welds are the traces' own staggered
+//! samples, and the sampling-scale tolerances keep distinct branches
+//! distinct. A mesh the exact weld already closed passes through
+//! bit-identically.
 //!
 //! # Determinism
 //!
@@ -942,75 +949,61 @@ fn thin_overlaps(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     *sides = new_sides;
 }
 
-/// The seam's sampling scale: the median longest edge of the triangles
-/// adjacent to the seam, per operand side, taking the finer of the two
-/// — for a tessellated operand, its chord length, i.e. the deflection
-/// made visible (this kernel's arc convention sizes a chord at twice
-/// the deflection parameter). Per-side adjacency keeps a coarse
-/// feature on one operand (a big planar box face, say) from inflating
-/// the scale the fine operand's seam needs to weld under; the median
-/// tolerates the weld-noise slivers that hug every curved seam.
-fn seam_scale(mesh: &Mesh, sides: &[Side], boundary: &[((u32, u32), Side)]) -> f64 {
-    let boundary_set: BTreeSet<(u32, u32)> = boundary.iter().map(|(e, _)| *e).collect();
-    let longest_edge = |t: &[u32; 3]| -> f64 {
-        let (a, b, c) = (
-            mesh.vertices[t[0] as usize],
-            mesh.vertices[t[1] as usize],
-            mesh.vertices[t[2] as usize],
-        );
-        (b - a).length().max((c - b).length()).max((a - c).length())
-    };
-    let mut per_side: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
-    for (triangle, side) in mesh.triangles.iter().zip(sides) {
-        let touches_boundary = [
-            (triangle[0], triangle[1]),
-            (triangle[1], triangle[2]),
-            (triangle[2], triangle[0]),
-        ]
+/// The seam's sampling scale: the median length of the seam's own
+/// boundary edges — the braid *is* the discretization of the seam
+/// curve, so its step is the scale at which the two traces sample the
+/// same mathematical curve and the only scale at which welding them is
+/// meaningful. The traces' crossing points are computed on each
+/// operand's facet edges against the other's facet planes, so the
+/// steps reflect the operands' own sampling (made finer wherever the
+/// BSP splitter subdivided) — pooled over both sheets and one median,
+/// which tolerates the weld-noise slivers that hug every curved seam
+/// and the occasional long straight run (a rim edge crossing a whole
+/// facet) that a mean would be dragged up by.
+///
+/// Why not the triangles adjacent to the seam: on a coarse operand
+/// (an 8-segment cylinder wall, say) the seam braid runs *across* the
+/// facets, and a braid step is a fraction of the facet it cuts — the
+/// adjacent triangles' edges overestimate the sampling by the facet's
+/// full width, and every downstream tolerance (the consensus grid,
+/// the interleave reach) inherits an overestimate that welds across
+/// real structure. The braid's own median cannot lie about its own
+/// step.
+fn seam_scale(mesh: &Mesh, boundary: &[((u32, u32), Side)]) -> f64 {
+    let mut steps: Vec<f64> = boundary
         .iter()
-        .any(|&(u, v)| {
-            let edge = if u < v { (u, v) } else { (v, u) };
-            boundary_set.contains(&edge)
-        });
-        if touches_boundary {
-            let length = longest_edge(triangle);
-            if length >= PLANE_EPS {
-                per_side[index_of(*side)].push(length);
-            }
-        }
+        .map(|((u, v), _)| (mesh.vertices[*v as usize] - mesh.vertices[*u as usize]).length())
+        .filter(|l| *l >= PLANE_EPS)
+        .collect();
+    if let Some(scale) = median(&mut steps) {
+        return scale;
     }
-    fn median(values: &mut [f64]) -> Option<f64> {
-        if values.is_empty() {
-            return None;
-        }
-        values.sort_by(|x, y| x.partial_cmp(y).expect("finite lengths"));
-        Some(values[values.len() / 2])
+    // No boundary at all (or nothing usable): the whole-mesh median.
+    let mut all: Vec<f64> = mesh
+        .triangles
+        .iter()
+        .map(|t| {
+            let (a, b, c) = (
+                mesh.vertices[t[0] as usize],
+                mesh.vertices[t[1] as usize],
+                mesh.vertices[t[2] as usize],
+            );
+            (b - a).length().max((c - b).length()).max((a - c).length())
+        })
+        .filter(|l| *l >= PLANE_EPS)
+        .collect();
+    median(&mut all).unwrap_or(SEAM_TOLERANCE_FLOOR)
+}
+
+/// The middle value (lower of the two middles on even counts):
+/// deterministic, and robust to the slivers and long straight runs
+/// that share a boundary with the honest samples.
+fn median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
     }
-    let mut scales: Vec<f64> = Vec::with_capacity(2);
-    for values in &mut per_side {
-        if let Some(scale) = median(values) {
-            scales.push(scale);
-        }
-    }
-    if scales.is_empty() {
-        // No boundary at all (or nothing usable): the whole-mesh
-        // median.
-        let mut all: Vec<f64> = mesh
-            .triangles
-            .iter()
-            .map(|t| {
-                let (a, b, c) = (
-                    mesh.vertices[t[0] as usize],
-                    mesh.vertices[t[1] as usize],
-                    mesh.vertices[t[2] as usize],
-                );
-                (b - a).length().max((c - b).length()).max((a - c).length())
-            })
-            .filter(|l| *l >= PLANE_EPS)
-            .collect();
-        return median(&mut all).unwrap_or(SEAM_TOLERANCE_FLOOR);
-    }
-    scales[0].min(*scales.last().expect("nonempty"))
+    values.sort_by(|x, y| x.partial_cmp(y).expect("finite lengths"));
+    Some(values[values.len() / 2])
 }
 
 /// A floor for scale computations on degenerate boundaries: a few
@@ -1160,7 +1153,7 @@ fn cap_small_rims(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     if boundary.is_empty() {
         return;
     }
-    let scale = seam_scale(mesh, sides, &boundary);
+    let scale = seam_scale(mesh, &boundary);
     let rims = walk_boundary_rims(mesh, sides, &boundary);
     // The direction each boundary edge's single surviving owner uses
     // (keyed canonically, value: the lower-indexed endpoint comes
@@ -1305,7 +1298,7 @@ fn cap_small_rims(mesh: &mut Mesh, sides: &mut Vec<Side>) {
 /// sampling width, so the surface moves well inside the tessellation's
 /// own accuracy. Returns whether anything moved.
 fn snap_to_consensus(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
-    let grid = SNAP_GRID_FRACTION * seam_scale(mesh, sides, &boundary_edges(mesh, sides));
+    let grid = SNAP_GRID_FRACTION * seam_scale(mesh, &boundary_edges(mesh, sides));
     if !(grid > 0.0 && grid.is_finite()) {
         return false;
     }
@@ -1358,7 +1351,7 @@ fn snap_to_consensus(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
 /// inserted.
 fn interleave_traces(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
     let boundary = boundary_edges(mesh, sides);
-    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, sides, &boundary);
+    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, &boundary);
     let mut edges_of: [Vec<(u32, u32)>; 2] = [Vec::new(), Vec::new()];
     for ((u, v), side) in &boundary {
         edges_of[index_of(*side)].push((*u, *v));
@@ -1478,7 +1471,7 @@ fn weld_fin_edges(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
     if boundary.is_empty() {
         return false;
     }
-    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, sides, &boundary);
+    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, &boundary);
     let mut edges: Vec<(u32, u32)> = boundary.iter().map(|((u, v), _)| (*u, *v)).collect();
     edges.sort_unstable();
     let segment_distance = |p: Vector3, a: Vector3, b: Vector3| -> f64 {
@@ -1709,7 +1702,7 @@ fn collapse_pinholes(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     if boundary.is_empty() {
         return;
     }
-    let grid = SNAP_GRID_FRACTION * seam_scale(mesh, sides, &boundary);
+    let grid = SNAP_GRID_FRACTION * seam_scale(mesh, &boundary);
     let rims = walk_boundary_rims(mesh, sides, &boundary);
     let mut parent: BTreeMap<u32, u32> = BTreeMap::new();
     let mut changed = false;
@@ -2815,5 +2808,284 @@ mod tests {
         // accordingly (still deflection-derived, not hand-picked).
         let tolerance = 10.0 * derived_tolerance(&[&a, &b], &[4.0 * pi / 3.0, 4.0 * pi / 3.0]);
         assert_closed_positive_near(&fine, lens, tolerance, "near-tangent common (fine)");
+    }
+
+    /// Two perpendicular equal cylinders, A along Z and B along Y (A
+    /// rotated a quarter turn about X). A tilted mesh, like the probe
+    /// below builds, has no exact form — this construction keeps the
+    /// classic ones.
+    fn crossed_cylinders(deflection: f64) -> (Mesh, Mesh) {
+        let a = TopoShape::Cylinder {
+            radius: 1.0,
+            height: 4.0,
+        }
+        .tessellate(deflection);
+        let mut b = TopoShape::Cylinder {
+            radius: 1.0,
+            height: 4.0,
+        }
+        .tessellate(deflection);
+        let (s, c) = (
+            f64::sin(std::f64::consts::FRAC_PI_2),
+            f64::cos(std::f64::consts::FRAC_PI_2),
+        );
+        for v in &mut b.vertices {
+            let y = v.y * c - v.z * s;
+            let z = v.y * s + v.z * c;
+            v.y = y;
+            v.z = z;
+        }
+        (a, b)
+    }
+
+    /// The seam of two crossed cylinders is two closed space curves
+    /// that meet at two points — not the single closed loop of a
+    /// sphere pair. Near the meeting points the two branches come
+    /// within a sampling width of each other, which is exactly where
+    /// a tolerance derived from anything but the seam's own sampling
+    /// step welds across structure.
+    #[test]
+    fn boolean_steinmetz_crossed_cylinders_exact_volume() {
+        let pi = std::f64::consts::PI;
+        let (a, b) = crossed_cylinders(0.08);
+        // The bicylinder is 16 r^3 / 3 (r = 1); both finite cylinders
+        // (height 4, so [-2, 2]) fully contain it.
+        let bicylinder = 16.0 / 3.0;
+        let cylinder = pi * 4.0;
+        let tolerance = derived_tolerance(&[&a, &b], &[cylinder, cylinder]);
+        assert_closed_positive_near(
+            &common(&a, &b),
+            bicylinder,
+            tolerance,
+            "crossed cylinders common (Steinmetz)",
+        );
+        assert_closed_positive_near(
+            &fuse(&a, &b),
+            2.0 * cylinder - bicylinder,
+            tolerance,
+            "crossed cylinders fuse",
+        );
+        assert_closed_positive_near(
+            &cut(&a, &b),
+            cylinder - bicylinder,
+            tolerance,
+            "crossed cylinders cut",
+        );
+        assert_no_degenerate(&common(&a, &b), "crossed cylinders common");
+    }
+
+    /// Two parallel cylinders with offset axes: the common is the
+    /// extruded circle-circle lens, a closed form. The seam is two
+    /// straight vertical lines — where both walls' discretizations
+    /// disagree by up to their chord errors — plus the lens arcs on
+    /// the coincident cap planes.
+    #[test]
+    fn boolean_parallel_offset_cylinders_lens_volume() {
+        let pi = std::f64::consts::PI;
+        let deflection = 0.04;
+        let a = TopoShape::Cylinder {
+            radius: 1.0,
+            height: 4.0,
+        }
+        .tessellate(deflection);
+        let mut b = TopoShape::Cylinder {
+            radius: 0.7,
+            height: 4.0,
+        }
+        .tessellate(deflection);
+        for v in &mut b.vertices {
+            v.x += 0.8;
+        }
+        // Lens of circles r1 = 1, r2 = 0.7, centers 0.8 apart,
+        // extruded over the common height 4.
+        let (r1, r2, d) = (1.0_f64, 0.7_f64, 0.8_f64);
+        let lens = 4.0
+            * (r1 * r1 * ((d * d + r1 * r1 - r2 * r2) / (2.0 * d * r1)).acos()
+                + r2 * r2 * ((d * d + r2 * r2 - r1 * r1) / (2.0 * d * r2)).acos()
+                - 0.5 * ((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)).sqrt());
+        let cyl_a = pi * 4.0;
+        let cyl_b = pi * 0.49 * 4.0;
+        let tolerance = derived_tolerance(&[&a, &b], &[cyl_a, cyl_b]);
+        assert_closed_positive_near(&common(&a, &b), lens, tolerance, "lens common");
+        assert_closed_positive_near(&fuse(&a, &b), cyl_a + cyl_b - lens, tolerance, "lens fuse");
+        assert_closed_positive_near(&cut(&a, &b), cyl_a - lens, tolerance, "lens cut");
+        assert_no_degenerate(&common(&a, &b), "lens common");
+    }
+
+    /// A cylinder tilted 30 degrees through a sphere: a genuine space
+    /// curve seam with no closed form. The honest assertions are the
+    /// structural ones — watertight, no degenerate pieces, and the
+    /// boolean identities that an exact kernel satisfies: cut + common
+    /// partitions the first operand.
+    #[test]
+    fn boolean_tilted_cylinder_sphere_skew_seam() {
+        let pi = std::f64::consts::PI;
+        let sphere = TopoShape::Sphere { radius: 1.0 }.tessellate(0.1);
+        let mut cylinder = TopoShape::Cylinder {
+            radius: 0.55,
+            height: 4.0,
+        }
+        .tessellate(0.1);
+        let (s, c) = ((pi / 6.0).sin(), (pi / 6.0).cos());
+        for v in &mut cylinder.vertices {
+            let y = v.y * c - v.z * s;
+            let z = v.y * s + v.z * c;
+            v.y = y;
+            v.z = z;
+        }
+        let fused = fuse(&cylinder, &sphere);
+        let holed = cut(&sphere, &cylinder);
+        let core = common(&cylinder, &sphere);
+        assert!(mesh_is_closed(&fused), "tilted fuse must be watertight");
+        assert!(mesh_is_closed(&holed), "tilted cut must be watertight");
+        assert!(mesh_is_closed(&core), "tilted common must be watertight");
+        assert_no_degenerate(&fused, "tilted fuse");
+        assert_no_degenerate(&holed, "tilted cut");
+        assert_no_degenerate(&core, "tilted common");
+        // Partition identities, both directions.
+        let sphere_exact = 4.0 * pi / 3.0;
+        let cylinder_exact = pi * 0.55 * 0.55 * 4.0;
+        let tolerance = derived_tolerance(&[&cylinder, &sphere], &[cylinder_exact, sphere_exact]);
+        let got = holed.volume() + core.volume();
+        assert!(
+            (got - sphere_exact).abs() <= tolerance * sphere_exact,
+            "cut + common must partition the sphere: {got} vs {sphere_exact}"
+        );
+        let got = cut(&cylinder, &sphere).volume() + core.volume();
+        assert!(
+            (got - cylinder_exact).abs() <= tolerance * cylinder_exact,
+            "cut + common must partition the cylinder: {got} vs {cylinder_exact}"
+        );
+        // The union swallows both operands.
+        assert!(
+            fused.volume() >= cylinder_exact - tolerance * cylinder_exact
+                && fused.volume() >= sphere_exact - tolerance * sphere_exact,
+            "fuse must contain both operands: {}",
+            fused.volume()
+        );
+    }
+
+    /// A cone tilted 36 degrees against a sphere: mixed primitives,
+    /// mixed curvatures, no symmetry at all.
+    #[test]
+    fn boolean_tilted_cone_sphere() {
+        let pi = std::f64::consts::PI;
+        let deflection = 0.08;
+        let mut cone = TopoShape::Cone {
+            radius1: 0.9,
+            radius2: 0.1,
+            height: 2.5,
+        }
+        .tessellate(deflection);
+        let (s, c) = ((pi / 5.0).sin(), (pi / 5.0).cos());
+        for v in &mut cone.vertices {
+            let y = v.y * c - v.z * s;
+            let z = v.y * s + v.z * c;
+            v.y = y;
+            v.z = z;
+        }
+        let sphere = TopoShape::Sphere { radius: 1.1 }.tessellate(deflection);
+        let fused = fuse(&cone, &sphere);
+        let core = common(&cone, &sphere);
+        let holed = cut(&sphere, &cone);
+        assert!(
+            mesh_is_closed(&fused),
+            "tilted cone fuse must be watertight"
+        );
+        assert!(
+            mesh_is_closed(&core),
+            "tilted cone common must be watertight"
+        );
+        assert!(mesh_is_closed(&holed), "tilted cone cut must be watertight");
+        assert_no_degenerate(&fused, "tilted cone fuse");
+        assert_no_degenerate(&core, "tilted cone common");
+        let sphere_exact = 4.0 * pi * 1.1 * 1.1 * 1.1 / 3.0;
+        let cone_exact = pi * (0.9 * 0.9 + 0.9 * 0.1 + 0.1 * 0.1) * 2.5 / 3.0;
+        let tolerance = derived_tolerance(&[&cone, &sphere], &[cone_exact, sphere_exact]);
+        let got = holed.volume() + core.volume();
+        assert!(
+            (got - sphere_exact).abs() <= tolerance * sphere_exact,
+            "cut + common must partition the sphere: {got} vs {sphere_exact}"
+        );
+    }
+
+    /// Two cylinders on skew axes (45 and -30 degrees, offset in Z):
+    /// every seam here is a closed space curve neither axis-aligned
+    /// nor planar.
+    #[test]
+    fn boolean_skew_cylinder_pair() {
+        let pi = std::f64::consts::PI;
+        let deflection = 0.08;
+        let mut a = TopoShape::Cylinder {
+            radius: 0.8,
+            height: 4.0,
+        }
+        .tessellate(deflection);
+        let mut b = TopoShape::Cylinder {
+            radius: 0.6,
+            height: 4.0,
+        }
+        .tessellate(deflection);
+        let (s, c) = ((pi / 4.0).sin(), (pi / 4.0).cos());
+        for v in &mut a.vertices {
+            let x = v.x * c - v.y * s;
+            let y = v.x * s + v.y * c;
+            v.x = x;
+            v.y = y;
+        }
+        let (s, c) = ((-pi / 6.0).sin(), (-pi / 6.0).cos());
+        for v in &mut b.vertices {
+            let y = v.y * c - v.z * s;
+            let z = v.y * s + v.z * c;
+            v.y = y;
+            v.z = z;
+            v.z += 0.3;
+        }
+        let fused = fuse(&a, &b);
+        let core = common(&a, &b);
+        let holed = cut(&a, &b);
+        assert!(mesh_is_closed(&fused), "skew fuse must be watertight");
+        assert!(mesh_is_closed(&core), "skew common must be watertight");
+        assert!(mesh_is_closed(&holed), "skew cut must be watertight");
+        assert_no_degenerate(&fused, "skew fuse");
+        assert_no_degenerate(&core, "skew common");
+        let cyl_a = pi * 0.64 * 4.0;
+        let tolerance = derived_tolerance(&[&a, &b], &[cyl_a, pi * 0.36 * 4.0]);
+        let got = holed.volume() + core.volume();
+        assert!(
+            (got - cyl_a).abs() <= tolerance * cyl_a,
+            "cut + common must partition A: {got} vs {cyl_a}"
+        );
+    }
+
+    /// The mixed-curved repairs must stay bit-deterministic: same
+    /// operands, same bytes, twice — including the two-branch seam of
+    /// the crossed cylinders and the tilted space-curve seam.
+    #[test]
+    fn boolean_mixed_curved_is_bit_deterministic() {
+        let (a, b) = crossed_cylinders(0.08);
+        let first = common(&a, &b);
+        let second = common(&a, &b);
+        assert_eq!(first.vertices, second.vertices);
+        assert_eq!(first.triangles, second.triangles);
+
+        let pi = std::f64::consts::PI;
+        let sphere = TopoShape::Sphere { radius: 1.0 }.tessellate(0.1);
+        let mut cylinder = TopoShape::Cylinder {
+            radius: 0.55,
+            height: 4.0,
+        }
+        .tessellate(0.1);
+        let (s, c) = ((pi / 6.0).sin(), (pi / 6.0).cos());
+        for v in &mut cylinder.vertices {
+            let y = v.y * c - v.z * s;
+            let z = v.y * s + v.z * c;
+            v.y = y;
+            v.z = z;
+        }
+        let first = fuse(&cylinder, &sphere);
+        let second = fuse(&cylinder, &sphere);
+        assert_eq!(first.vertices, second.vertices);
+        assert_eq!(first.triangles, second.triangles);
     }
 }

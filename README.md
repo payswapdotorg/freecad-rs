@@ -14,12 +14,15 @@ a GUI, not a full CAD kernel, and honest about both:
 > reimplements its *architecture and file format* from scratch; no
 > FreeCAD code is used or included. License: MIT.
 
-**Verified baseline** — `main` @ `8c4668b` (2026-10-21): nine crates,
-**428 tests, 0 failed** (`cargo build` / `cargo test --workspace
---locked`), `clippy --workspace --all-targets -- -D warnings` clean,
-`cargo fmt --all -- --check` clean. PartDesign v1, curved-seam boolean
-robustness, native-file interop breadth, rhai embedded scripting, the
-M1 offscreen viewer, and STEP exchange are implemented (details below).
+**Verified baseline** — `main` @ `adf3bf8` + the FC-12 mixed-curved
+seam fix (2026-10-21): nine crates, **434 tests, 0 failed** (`cargo
+build` / `cargo test --workspace --locked`), `clippy --workspace
+--all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
+clean. PartDesign v1, curved-seam boolean robustness (now on mixed
+curved operands: crossed/parallel/skew cylinders, tilted cone and
+cylinder vs sphere), native-file interop breadth, rhai embedded
+scripting, the M1 offscreen viewer, and STEP exchange are implemented
+(details below).
 
 ## What is implemented
 
@@ -35,7 +38,7 @@ the sketcher, and the `.FCStd` file format:
 | `src/App`                | `fc-app`       | `Document`, `DocumentObject`, typed `Property` system, dependency-ordered recompute with cycle detection |
 | `src/App/Transactions.cpp`| `fc-app`      | undo/redo: transaction stack with add/del/change records, property snapshots, auto-record on mutation, `undo`/`redo`/`history` CLI |
 | `src/App/Expression.cpp` | `fc-app`       | expression engine **evaluating to `Quantity`**: dimensional analysis, unit-aware arithmetic (dimension-checked `+`/`-`, unit-combining `*`/`/`, integer-exponent `^`), degree-mode trig, `<<Label>>.Property` references, document bindings with dependency-graph edges + cycle detection, honest binding rejection (a plain-float property rejects a unit-carrying expression, FreeCAD `PropertyFloat` behavior) |
-| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans with **curved-seam robustness** (sphere-sphere seam repair: consensus-grid snap, tolerance-based trace interleaving, fin welding — watertight curved-seam results under a wholesale-or-nothing volume guard), **profile kernels** (closed-wire extraction from sketch geometry, extrusion, revolution — watertight-by-construction meshes), **PartDesign v1 features** (`PartDesign::Pad/Pocket/Revolution` consuming a sketch, recompute-driven) |
+| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans with **curved-seam robustness** (consensus-grid snap at the seam's own sampling scale, tolerance-based trace interleaving, fin welding — watertight curved-seam results on sphere pairs and mixed curved operands — crossed/parallel/skew cylinders, tilted cone and cylinder vs sphere — under a wholesale-or-nothing volume guard), **profile kernels** (closed-wire extraction from sketch geometry, extrusion, revolution — watertight-by-construction meshes), **PartDesign v1 features** (`PartDesign::Pad/Pocket/Revolution` consuming a sketch, recompute-driven) |
 | `src/Mod/PartDesign` (v1) | `fc-part`      | `Pad` (Profile/Length/Midplane/Reversed), `Pocket` (Base/Length/Inverted — boolean cut), `Revolution` (Angle/Axis) — sketch links in the dependency graph, error propagation from failed profiles, parametric recompute proven end-to-end |
 | `src/Mod/Sketcher` (v1)  | `fc-sketcher`   | 2D geometry (point/line/circle/arc), 13 constraint kinds, Levenberg-Marquardt constraint solver with DOF report, FreeCAD-style `<Sketch>` XML fragments; `Sketcher::SketchObject` — a first-class document object (execute = solve) with `.FCStd` persistence |
 | `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings and `<Sketch>` fragments), OBJ/STL mesh export, **native-file interop breadth** (`App::Part`/`PartDesign::Body`/origin planes & axes/groups/links load with their parameters; quantity/vector/color/list/matrix property family; a committed fixtures corpus pins round-trip behavior) |
@@ -68,8 +71,11 @@ concrete terms:
   bindings is a *gated future decision*, not a v1 commitment — see
   [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md).
 * **Mesh Booleans are approximate.** `Part::Cut/Fuse/Common` are
-  watertight for planar/cylindrical seams; curved-surface seams
-  (sphere-sphere) can still leave open meshes at T-junctions.
+  watertight for planar/cylindrical seams and for curved-surface
+  seams (sphere-sphere, crossed/parallel/skew cylinders, tilted
+  cylinder or cone against a sphere) within the deflection-derived
+  tolerance; near-tangent curved pairs thinner than a chord still
+  honestly stay open.
 * **Sketcher v1 solves in the XY plane.** The sketch `Placement` is
   persisted but not yet applied — sketches on arbitrary planes and
   attachments are future work, and v1's PartDesign features inherit

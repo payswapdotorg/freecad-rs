@@ -110,12 +110,23 @@ Honest, incremental, no vaporware.
       deflection-parameterized import (planar + cylindrical faces),
       `Part::Feature` carrier with persistence, CLI verbs
       `import-step` / `export step` — 8c4668b
+- [x] **FC-12** Boolean robustness on mixed curved operands — the
+      seam repair's tolerance scale now measures the seam itself (the
+      median boundary-edge step) instead of the facets the seam
+      crosses, which overestimated it ~10–20× on coarse operands and
+      made every downstream tolerance loose enough to weld across
+      real structure; crossed cylinders (Steinmetz common = 16r³/3
+      exact-form), parallel offset cylinders (extruded lens,
+      closed form), a tilted cylinder through a sphere, a tilted
+      cone against a sphere, and a skew cylinder pair all close
+      watertight with cut+common partitioning within the
+      deflection-derived tolerance — the final roadmap candidate,
+      closed with the roadmap
 
 ## Next (candidates, in rough order)
 
-- [ ] Boolean robustness beyond the fixture classes (seam quality on
-      mixed curved operands) — honest incremental work, no milestone
-      gate pending
+- [ ] Deeper robustness sweeps (near-tangent mixed pairs, cone-cone
+      seams) — honest incremental work, no milestone gate pending
 
 ## Non-goals (explicit)
 
