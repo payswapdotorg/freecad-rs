@@ -704,7 +704,16 @@ const SEAM_REPAIR_VOLUME_GUARD: f64 = 0.05;
 ///   counterpart edge pairs those passes leave, with orientation
 ///   votes keeping the two sheets opposed across every merged edge),
 ///   and [`collapse_pinholes`] closes the point-sized weld-noise gaps
-///   directly.
+///   directly. Two more closures repair what the others cannot touch:
+///   [`zip_boundary_t_junctions`] closes the **needle slits** the
+///   degenerate pruner reopens (a boundary edge whose own sheet's
+///   boundary carries a chain of vertices lying on it — the hole a
+///   pruned sliver leaves — zips by inserting that chain into the
+///   owning triangle, bit-exact, no new geometry), and
+///   [`peel_overlapped_edges`] removes the over-covers the
+///   conservative thinning declines (an edge used more than twice
+///   whose every candidate victim has a twice-used flank), leaving
+///   the closers to repair the reopen.
 ///
 /// # Contract
 ///
@@ -712,15 +721,21 @@ const SEAM_REPAIR_VOLUME_GUARD: f64 = 0.05;
 ///   planar/cylindrical exact-weld paths keep their exact current
 ///   behavior; this pass only engages where the weld left damage.
 /// * A seam this pass cannot close — or whose closing would move
-///   volume beyond [`SEAM_REPAIR_VOLUME_GUARD`], as when zipping would
-///   bridge a structural opening — is left exactly as the weld produced
-///   it: the repair applies **wholesale or not at all**, so partial
-///   repairs never leak out.
+///   volume beyond [`SEAM_REPAIR_VOLUME_GUARD`] plus the repair's own
+///   geometric authority (the seam-length-by-scale-squared volume its
+///   grid welds and sagitta-bounded caps can move), as when zipping
+///   would bridge a structural opening — is left exactly as the weld
+///   produced it: the repair applies **wholesale or not at all**, so
+///   partial repairs never leak out. The authority term exists
+///   because the relative guard alone would hand a near-zero-volume
+///   result — a razor lens, a hairline cut — a zero tolerance and
+///   reject its own honest closure.
 /// * Deterministic throughout: sorted iteration orders, `BTreeMap`s,
 ///   tie-breaks by index — no hash container is ever iterated.
 fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     debug_assert_eq!(mesh.triangles.len(), sides.len());
-    if boundary_edges(mesh, sides).is_empty() {
+    let entry_seam = boundary_edges(mesh, sides);
+    if entry_seam.is_empty() {
         return; // Already watertight: the exact-weld path, untouched.
     }
     let original = mesh.clone();
@@ -730,10 +745,11 @@ fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     // agrees), interleave what staggers (the tolerance-based stitch),
     // weld the fin pairs the interleave leaves, and thin what the
     // snapping over-covered — then prune degenerate slivers and close
-    // what their removal reopens (slits weld, noise loops collapse),
-    // repeating a few rounds. Capping — the only pass that adds
-    // geometry — runs first each round and never emits a degenerate
-    // piece, so nothing churns against the pruner.
+    // what their removal reopens (needle slits zip bit-exactly, fins
+    // weld, noise loops collapse), repeating a few rounds. Capping —
+    // the only pass that adds geometry — runs first each round and
+    // never emits a degenerate piece, so nothing churns against the
+    // pruner.
     for round in 0..SEAM_MEND_ROUNDS {
         if boundary_edges(mesh, &repaired_sides).is_empty() {
             break;
@@ -758,28 +774,47 @@ fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
         }
         thin_overlaps(mesh, &mut repaired_sides);
         prune_degenerate(mesh, &mut repaired_sides);
-        // Close what the pruning reopened: needle slits weld (their
-        // two long edges lie within reach of each other), noise loops
+        // Close what the pruning reopened: needle slits zip (their
+        // middles lie on the surviving edge), fins weld, noise loops
         // collapse, over-covers thin again.
+        zip_boundary_t_junctions(mesh, &mut repaired_sides);
         weld_fin_edges(mesh, &mut repaired_sides);
         collapse_pinholes(mesh, &mut repaired_sides);
         thin_overlaps(mesh, &mut repaired_sides);
     }
     // Degenerate sweep: prune the sub-bar slivers the rounds left
     // (the closers never emit any), then close what their removal
-    // reopens. A seam that cannot take the sweep stays closed-but-
-    // slivered only if the sweep's reopens are un-closable — in which
-    // case the final gate below reverts the whole repair honestly.
+    // reopens — the needle slits first (bit-exact), then the honest
+    // punctures — sweeping once more after the closers so their own
+    // slivers cannot survive either. A seam that cannot take the
+    // sweep stays closed-but-slivered only if the sweep's reopens
+    // are un-closable — in which case the final gate below reverts
+    // the whole repair honestly.
     prune_degenerate(mesh, &mut repaired_sides);
+    // Peel the over-covers the conservative rounds declined (their
+    // removal reopens a flank — churn mid-round, repairable here),
+    // then close what the sweep and the peel reopened: needle slits
+    // zip bit-exactly, honest punctures cap, fins weld, noise loops
+    // collapse — sweeping once more after the closers so their own
+    // slivers cannot survive either. A seam that cannot take the
+    // sweep stays open only if the sweep's reopens are un-closable —
+    // in which case the final gate below reverts the whole repair
+    // honestly.
+    peel_overlapped_edges(mesh, &mut repaired_sides);
     if !boundary_edges(mesh, &repaired_sides).is_empty() {
+        zip_boundary_t_junctions(mesh, &mut repaired_sides);
         cap_small_rims(mesh, &mut repaired_sides);
         weld_fin_edges(mesh, &mut repaired_sides);
         collapse_pinholes(mesh, &mut repaired_sides);
         thin_overlaps(mesh, &mut repaired_sides);
+        prune_degenerate(mesh, &mut repaired_sides);
+        zip_boundary_t_junctions(mesh, &mut repaired_sides);
         cap_small_rims(mesh, &mut repaired_sides);
     }
     collapse_duplicate_triangles(&mut mesh.triangles, &mut repaired_sides);
-    if boundary_edges(mesh, &repaired_sides).is_empty() && volume_within_guard(mesh, &original) {
+    let gate_closed = mesh_is_closed(mesh);
+    let gate_guard = volume_within_guard(mesh, &original, &entry_seam);
+    if gate_closed && gate_guard {
         compact_vertices(mesh);
         *sides = repaired_sides;
     } else {
@@ -1412,49 +1447,220 @@ fn interleave_traces(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
         // carries insertions is replaced by the fan along the split
         // edge (winding preserved); pieces go back on a worklist in
         // case another of their edges is scheduled too.
-        let mut new_triangles: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len());
-        let mut new_sides: Vec<Side> = Vec::with_capacity(sides.len());
-        for (i, &triangle) in mesh.triangles.iter().enumerate() {
-            let side_here = sides[i];
-            let mut worklist = vec![triangle];
-            while let Some(tri) = worklist.pop() {
-                let mut pieces: Option<Vec<[u32; 3]>> = None;
-                for k in 0..3 {
-                    let (x, y) = (tri[k], tri[(k + 1) % 3]);
-                    let key = if x < y { (x, y) } else { (y, x) };
-                    let Some(mut inserts) = schedule.remove(&key) else {
-                        continue;
-                    };
-                    // Insertions are sorted by parameter along key.0 ->
-                    // key.1; orient along this triangle's directed
-                    // edge, then fan across the apex.
-                    if (x, y) == key {
-                        inserts.sort_by(|s, t| s.0.partial_cmp(&t.0).expect("finite t"));
-                    } else {
-                        inserts.sort_by(|s, t| t.0.partial_cmp(&s.0).expect("finite t"));
-                    }
-                    let apex = tri[(k + 2) % 3];
-                    let mut chain: Vec<u32> = Vec::with_capacity(inserts.len() + 2);
-                    chain.push(x);
-                    chain.extend(inserts.iter().map(|&(_, v)| v));
-                    chain.push(y);
-                    pieces = Some(chain.windows(2).map(|w| [w[0], w[1], apex]).collect());
-                    break;
-                }
-                match pieces {
-                    Some(pieces) => worklist.extend(pieces),
-                    None => {
-                        new_triangles.push(tri);
-                        new_sides.push(side_here);
-                    }
-                }
-            }
-        }
-        mesh.triangles = new_triangles;
-        *sides = new_sides;
+        apply_boundary_splits(mesh, sides, &mut schedule);
         any_inserted = true;
     }
     any_inserted
+}
+
+/// Rebuild the triangle list applying scheduled boundary-edge
+/// splits: a triangle whose edge carries insertions is replaced by
+/// the fan along the split edge (winding preserved); pieces go back
+/// on a worklist in case another of their edges is scheduled too.
+/// `schedule` maps each canonical edge to its `(t, vertex)`
+/// insertions and is consumed as it is applied.
+fn apply_boundary_splits(
+    mesh: &mut Mesh,
+    sides: &mut Vec<Side>,
+    schedule: &mut BTreeMap<(u32, u32), Vec<(f64, u32)>>,
+) {
+    let mut new_triangles: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len());
+    let mut new_sides: Vec<Side> = Vec::with_capacity(sides.len());
+    for (i, &triangle) in mesh.triangles.iter().enumerate() {
+        let side_here = sides[i];
+        let mut worklist = vec![triangle];
+        while let Some(tri) = worklist.pop() {
+            let mut pieces: Option<Vec<[u32; 3]>> = None;
+            for k in 0..3 {
+                let (x, y) = (tri[k], tri[(k + 1) % 3]);
+                let key = if x < y { (x, y) } else { (y, x) };
+                let Some(mut inserts) = schedule.remove(&key) else {
+                    continue;
+                };
+                // Insertions are sorted by parameter along key.0 ->
+                // key.1; orient along this triangle's directed edge,
+                // then fan across the apex.
+                if (x, y) == key {
+                    inserts.sort_by(|s, t| s.0.partial_cmp(&t.0).expect("finite t"));
+                } else {
+                    inserts.sort_by(|s, t| t.0.partial_cmp(&s.0).expect("finite t"));
+                }
+                let apex = tri[(k + 2) % 3];
+                let mut chain: Vec<u32> = Vec::with_capacity(inserts.len() + 2);
+                chain.push(x);
+                chain.extend(inserts.iter().map(|&(_, v)| v));
+                chain.push(y);
+                pieces = Some(chain.windows(2).map(|w| [w[0], w[1], apex]).collect());
+                break;
+            }
+            match pieces {
+                Some(pieces) => worklist.extend(pieces),
+                None => {
+                    new_triangles.push(tri);
+                    new_sides.push(side_here);
+                }
+            }
+        }
+    }
+    mesh.triangles = new_triangles;
+    *sides = new_sides;
+}
+
+/// Peel the over-covers the conservative thinning declined: the mend
+/// rounds leave an edge used more than twice only when every triangle
+/// that could thin it has a twice-used flank whose removal would
+/// reopen a neighbor — and mid-round, that reopen is churn. Here at
+/// the tail the closers stand by, so the peel removes the
+/// smallest-area user of each over-used edge (the sliver of the
+/// cover, deterministic in tie-break by index) and lets the close
+/// sequence repair whatever boundary the removal reopens. The final
+/// gate still decides honestly whether the result survives.
+fn peel_overlapped_edges(mesh: &mut Mesh, sides: &mut Vec<Side>) {
+    for _ in 0..8 {
+        let mut users: HashMap<(u32, u32), Vec<usize>> =
+            HashMap::with_capacity(3 * mesh.triangles.len());
+        for (i, triangle) in mesh.triangles.iter().enumerate() {
+            for (u, v) in [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                let edge = if u < v { (u, v) } else { (v, u) };
+                users.entry(edge).or_default().push(i);
+            }
+        }
+        let mut over_edges: Vec<(u32, u32)> = users
+            .iter()
+            .filter(|(_, u)| u.len() > 2)
+            .map(|(e, _)| *e)
+            .collect();
+        over_edges.sort_unstable();
+        if over_edges.is_empty() {
+            return;
+        }
+        let mut victims: BTreeSet<usize> = BTreeSet::new();
+        for edge in &over_edges {
+            let victim = users[edge]
+                .iter()
+                .copied()
+                .filter(|i| !victims.contains(i))
+                .min_by(|a, b| {
+                    triangle_area_x2(mesh, &mesh.triangles[*a])
+                        .partial_cmp(&triangle_area_x2(mesh, &mesh.triangles[*b]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(b))
+                });
+            if let Some(v) = victim {
+                victims.insert(v);
+            }
+        }
+        if victims.is_empty() {
+            return;
+        }
+        let keep: Vec<usize> = (0..mesh.triangles.len())
+            .filter(|i| !victims.contains(i))
+            .collect();
+        let triangles: Vec<[u32; 3]> = keep.iter().map(|&i| mesh.triangles[i]).collect();
+        let new_sides: Vec<Side> = keep.iter().map(|&i| sides[i]).collect();
+        mesh.triangles = triangles;
+        *sides = new_sides;
+    }
+}
+
+/// Zip same-sheet boundary T-junctions — the **needle slits** the
+/// sliver pruner reopens. A boundary edge `(a, b)` of one sheet whose
+/// own boundary also carries a chain of vertices `m1..mk` lying in
+/// the interior of the segment `[a, b]` bounds, together with that
+/// chain, a zero-area puncture: the hole a pruned degenerate
+/// triangle leaves behind is exactly one boundary edge on one side
+/// and the chain on the other, all nearly collinear. Inserting the
+/// chain's vertices into the owning triangle of `(a, b)` — the same
+/// bit-exact fan split [`interleave_traces`] applies across sheets —
+/// makes every chain edge shared and closes the slit with no new
+/// geometry at all (the inserted vertices are existing ones, reused
+/// at their own coordinates; the owner's surface gains vertices that
+/// lie on it to within the bridge tolerance). A rim that is flat
+/// enough to be a needle cannot be capped (its fan would be
+/// degenerate) and is too long to be a pinhole; the zip is the only
+/// honest closure. Returns whether anything was inserted.
+fn zip_boundary_t_junctions(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
+    let boundary = boundary_edges(mesh, sides);
+    if boundary.is_empty() {
+        return false;
+    }
+    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, &boundary);
+    let mut edges_of: [BTreeSet<(u32, u32)>; 2] = [BTreeSet::new(), BTreeSet::new()];
+    for ((u, v), side) in &boundary {
+        edges_of[index_of(*side)].insert((*u, *v));
+    }
+    let mut schedule: BTreeMap<(u32, u32), Vec<(f64, u32)>> = BTreeMap::new();
+    for edges in &edges_of {
+        let edges: Vec<(u32, u32)> = edges.iter().copied().collect();
+        if edges.is_empty() {
+            continue;
+        }
+        let mut verts: BTreeSet<u32> = BTreeSet::new();
+        for (u, v) in &edges {
+            verts.insert(*u);
+            verts.insert(*v);
+        }
+        for &(a, b) in &edges {
+            let pa = mesh.vertices[a as usize];
+            let pb = mesh.vertices[b as usize];
+            let ab = pb - pa;
+            let len = ab.length();
+            if len <= 0.0 || !len.is_finite() {
+                continue;
+            }
+            // Chain candidates on this edge, sorted by parameter.
+            let mut inserts: Vec<(f64, u32)> = Vec::new();
+            for &m in &verts {
+                if m == a || m == b {
+                    continue;
+                }
+                let pm = mesh.vertices[m as usize];
+                let t = (pm - pa).dot(&ab) / (len * len);
+                // Interior foot only; the endcap zone is snapping's
+                // business.
+                if t * len <= PLANE_EPS || (1.0 - t) * len <= PLANE_EPS {
+                    continue;
+                }
+                if t <= 0.0 || t >= 1.0 {
+                    continue;
+                }
+                let dist = (pm - (pa + ab * t)).length();
+                if dist > reach {
+                    continue;
+                }
+                inserts.push((t, m));
+            }
+            if inserts.is_empty() {
+                continue;
+            }
+            inserts.sort_by(|s, t| s.0.partial_cmp(&t.0).expect("finite t"));
+            // The needle condition: the chain a - m1 - ... - mk - b
+            // must itself be boundary of this sheet — only then does
+            // the split close a hole instead of subdividing an edge
+            // in vain.
+            let mut chain_ok = true;
+            let mut prev = a;
+            for &(_, m) in &inserts {
+                if !edges.contains(&(prev.min(m), prev.max(m))) {
+                    chain_ok = false;
+                    break;
+                }
+                prev = m;
+            }
+            if chain_ok && edges.contains(&(prev.min(b), prev.max(b))) {
+                schedule.insert((a, b), inserts);
+            }
+        }
+    }
+    if schedule.is_empty() {
+        return false;
+    }
+    apply_boundary_splits(mesh, sides, &mut schedule);
+    true
 }
 
 /// Weld near-coincident boundary edge pairs endpoint to endpoint: the
@@ -1768,10 +1974,29 @@ fn drop_repeated_index_triangles(mesh: &mut Mesh, sides: &mut Vec<Side>) {
 /// replacing a band of surface with a ruled strip between the same rims
 /// moves volume by a whisker; anything beyond a small fraction means
 /// the pass fabricated structure, and the repair is rejected wholesale.
-fn volume_within_guard(repaired: &Mesh, original: &Mesh) -> bool {
+fn volume_within_guard(repaired: &Mesh, original: &Mesh, seam: &[((u32, u32), Side)]) -> bool {
     let before = original.volume();
     let after = repaired.volume();
-    (after - before).abs() <= SEAM_REPAIR_VOLUME_GUARD * before.abs() + PLANE_EPS
+    // The repair's own authority: it welds within the consensus grid,
+    // bridges within the snap scale, and caps with at most
+    // [`HOLE_CAP_SCALE`] sampling widths of sagitta — over a strip of
+    // surface no longer than the seam and no wider than the sampling
+    // scale, which together can move a volume of order
+    // (seam length) x (sampling scale)^2. The relative term alone
+    // would hand a near-zero-volume result — a razor lens, a hairline
+    // cut — a tolerance of zero and reject its own honest closure;
+    // the authority floor keeps the guard honest exactly where the
+    // relative term degenerates, and stays negligible against it
+    // wherever the result is chunky.
+    let scale = seam_scale(original, seam);
+    let seam_length: f64 = seam
+        .iter()
+        .map(|((u, v), _)| {
+            (original.vertices[*v as usize] - original.vertices[*u as usize]).length()
+        })
+        .sum();
+    let authority = 2.0 * seam_length * scale * scale;
+    (after - before).abs() <= SEAM_REPAIR_VOLUME_GUARD * before.abs() + authority + PLANE_EPS
 }
 
 /// Drop vertices no triangle references (the ones the cut band left
@@ -3087,5 +3312,283 @@ mod tests {
         let second = fuse(&cylinder, &sphere);
         assert_eq!(first.vertices, second.vertices);
         assert_eq!(first.triangles, second.triangles);
+    }
+
+    // -----------------------------------------------------------------
+    // Near-tangent mixed pairs & cone-cone seams (FC-13)
+    // -----------------------------------------------------------------
+
+    /// A cylinder at `dx`, `dy`, `dz` (axis Z), tessellated at the
+    /// given deflection — the mixed near-tangent companion of
+    /// [`sphere_at`].
+    fn cylinder_at(deflection: f64, r: f64, h: f64, dx: f64, dy: f64, dz: f64) -> Mesh {
+        let mut mesh = TopoShape::Cylinder {
+            radius: r,
+            height: h,
+        }
+        .tessellate(deflection);
+        for v in &mut mesh.vertices {
+            v.x += dx;
+            v.y += dy;
+            v.z += dz;
+        }
+        mesh
+    }
+
+    /// A cone frustum at `dx, dy, dz` (axis Z, `radius1` at the
+    /// base `z = -h/2`), tessellated at the given deflection.
+    fn cone_at(
+        deflection: f64,
+        radius1: f64,
+        radius2: f64,
+        h: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Mesh {
+        let mut mesh = TopoShape::Cone {
+            radius1,
+            radius2,
+            height: h,
+        }
+        .tessellate(deflection);
+        for v in &mut mesh.vertices {
+            v.x += dx;
+            v.y += dy;
+            v.z += dz;
+        }
+        mesh
+    }
+
+    /// Rotate a mesh 90 degrees about Y so its Z axis maps onto +X
+    /// (an orientation-preserving swap: (x, y, z) -> (z, y, -x)).
+    fn axis_z_to_x(mut mesh: Mesh) -> Mesh {
+        for v in &mut mesh.vertices {
+            let (ox, oy, oz) = (v.x, v.y, v.z);
+            v.x = oz;
+            v.y = oy;
+            v.z = -ox;
+        }
+        mesh
+    }
+
+    /// The near-tangent contract for a mixed pair: every operation
+    /// closes watertight and degenerate-free, stays positive, and —
+    /// the exact invariant for tessellated operands — the three
+    /// results partition the operands:
+    /// `cut + common = A` and `fuse + common = A + B`. The identities
+    /// hold exactly for the polyhedra the BSP actually booleans; what
+    /// breaks them is the weld/mend noise at the razor seam, so the
+    /// tolerance is a seam-repair allowance per operation (the same
+    /// percent the [`SEAM_REPAIR_VOLUME_GUARD`] family allows), not
+    /// any tessellation error of the operands themselves.
+    #[test]
+    fn boolean_near_tangent_sphere_pair_partitions() {
+        for d in [1.9_f64, 1.95, 1.99] {
+            let a = sphere_at(DEFAULT_DEFLECTION, 0.0, 0.0, 0.0);
+            let b = sphere_at(DEFAULT_DEFLECTION, d, 0.0, 0.0);
+            let (fuse, cut, common) = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+            let what = format!("sphere-sphere near-tangent d={d}");
+            assert!(mesh_is_closed(&fuse), "{what}: fuse must be watertight");
+            assert!(fuse.volume() > 0.0, "{what}: fuse volume must be positive");
+            assert_no_degenerate(&cut, &what);
+            assert_no_degenerate(&common, &what);
+            assert!(mesh_is_closed(&cut), "{what}: cut must be watertight");
+            assert!(mesh_is_closed(&common), "{what}: common must be watertight");
+            assert!(cut.volume() > 0.0 && common.volume() > 0.0, "{what}");
+            let (va, vb) = (a.volume(), b.volume());
+            // The lens is a razor: a high-order small quantity (it
+            // vanishes quadratically in 2 - d) that the operands'
+            // own tessellation coarseness dwarfs — so the checks are
+            // the partition identities, never the analytic lens.
+            assert!(
+                common.volume() < 0.01 * va,
+                "{what}: common is not the near-tangent razor it should be"
+            );
+            let allowance = 0.02 * va;
+            assert!(
+                (cut.volume() + common.volume() - va).abs() <= allowance,
+                "{what}: cut + common = {} vs A = {va}",
+                cut.volume() + common.volume()
+            );
+            assert!(
+                (fuse.volume() + common.volume() - va - vb).abs() <= allowance,
+                "{what}: fuse + common = {} vs A + B = {}",
+                fuse.volume() + common.volume(),
+                va + vb
+            );
+        }
+    }
+
+    /// The mixed near-tangent pair (sphere against a cylinder whose
+    /// axis misses the sphere's center): the razor intersection is a
+    /// lens bounded by a spherical patch and a cylindrical band that
+    /// meet along two near-degenerate seam circles. Same partition
+    /// contract as the sphere pair.
+    #[test]
+    fn boolean_near_tangent_sphere_cylinder_partitions() {
+        for d in [1.9_f64, 1.95, 1.99] {
+            let a = sphere_at(DEFAULT_DEFLECTION, 0.0, 0.0, 0.0);
+            let b = cylinder_at(DEFAULT_DEFLECTION, 1.0, 2.0, d, 0.0, 0.0);
+            let (fuse, cut, common) = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+            let what = format!("sphere-cylinder near-tangent d={d}");
+            assert!(mesh_is_closed(&fuse), "{what}: fuse must be watertight");
+            assert!(mesh_is_closed(&cut), "{what}: cut must be watertight");
+            assert!(mesh_is_closed(&common), "{what}: common must be watertight");
+            assert_no_degenerate(&fuse, &what);
+            assert_no_degenerate(&cut, &what);
+            assert_no_degenerate(&common, &what);
+            assert!(
+                common.volume() > 0.0 && common.volume() < 0.01 * a.volume(),
+                "{what}"
+            );
+            let (va, vb) = (a.volume(), b.volume());
+            // A coarser seam than the sphere pair's (the cylinder's
+            // band deflection and the sphere's rings disagree in
+            // sampling density along the seam circles, and the
+            // consensus-grid weld's direction is blind to which side
+            // is outward, so its noise enters the identity signed):
+            // the worst measured deviation is 1.1% at d = 1.95, and
+            // the allowance holds the identity with margin.
+            let allowance = 0.03 * va;
+            assert!(
+                (cut.volume() + common.volume() - va).abs() <= allowance,
+                "{what}: cut + common = {} vs A = {va}",
+                cut.volume() + common.volume()
+            );
+            assert!(
+                (fuse.volume() + common.volume() - va - vb).abs() <= allowance,
+                "{what}: fuse + common = {} vs A + B = {}",
+                fuse.volume() + common.volume(),
+                va + vb
+            );
+        }
+    }
+
+    /// Exactly tangent spheres (d = r1 + r2): the intersection has
+    /// zero measure, so `common` must honestly come back empty, and
+    /// the union/difference must each be the operands to within the
+    /// tangency seam's repair noise. The exact-weld path closes these
+    /// bit-identically but may carry zero-area slivers at the tangent
+    /// point — the mesh is still a valid watertight solid, its volume
+    /// exact — so this is the one fixture family where degenerates
+    /// are tolerated (and documented) rather than rejected.
+    #[test]
+    fn boolean_exactly_tangent_sphere_pair() {
+        let a = sphere_at(DEFAULT_DEFLECTION, 0.0, 0.0, 0.0);
+        let b = sphere_at(DEFAULT_DEFLECTION, 2.0, 0.0, 0.0);
+        let fuse = fuse(&a, &b);
+        let cut = cut(&a, &b);
+        assert!(mesh_is_closed(&fuse), "tangent fuse must be watertight");
+        assert!(mesh_is_closed(&cut), "tangent cut must be watertight");
+        let (va, vb) = (a.volume(), b.volume());
+        assert_volume(&fuse, va + vb, 0.02, "tangent fuse volume");
+        assert_volume(&cut, va, 0.02, "tangent cut volume");
+        match try_common(&a, &b) {
+            Err(BooleanError::EmptyResult) => {}
+            other => panic!("tangent common must be empty, got {other:?}"),
+        }
+    }
+
+    /// Crossed cones (perpendicular axes, different radii): the seam
+    /// is a closed quartic curve neither operand samples, and the
+    /// cut — the operation whose B-sheet interior faces the seam's
+    /// most tangled stretch — is the fixture that exposed the
+    /// over-cover the conservative thinning declined. Partition
+    /// contract as before, plus the analytic intersection of the
+    /// *ideal* cones is only a sanity floor: the tessellated cones
+    /// bound it, so common is only checked to sit between the
+    /// inscribed and circumscribed bounds loosely.
+    #[test]
+    fn boolean_crossed_cones_partitions() {
+        // The FC-12 curved-seam fixture deflections (0.04-0.08): the
+        // cone walls' own sampling is what the seam inherits, and at
+        // the default 0.2 the repair authority dwarfs the partition
+        // identity's signal.
+        let deflection = 0.06;
+        let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+        let b = axis_z_to_x(cone_at(deflection, 2.0, 0.0, 4.0, 0.0, 0.0, 0.0));
+        let (fuse, cut, common) = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+        let what = "crossed cones";
+        assert!(mesh_is_closed(&fuse), "{what}: fuse must be watertight");
+        assert!(mesh_is_closed(&cut), "{what}: cut must be watertight");
+        assert!(mesh_is_closed(&common), "{what}: common must be watertight");
+        assert_no_degenerate(&fuse, what);
+        assert_no_degenerate(&cut, what);
+        assert_no_degenerate(&common, what);
+        let (va, vb) = (a.volume(), b.volume());
+        let allowance = 0.01 * va;
+        assert!(
+            (cut.volume() + common.volume() - va).abs() <= allowance,
+            "{what}: cut + common = {} vs A = {va}",
+            cut.volume() + common.volume()
+        );
+        assert!(
+            (fuse.volume() + common.volume() - va - vb).abs() <= allowance,
+            "{what}: fuse + common = {} vs A + B = {}",
+            fuse.volume() + common.volume(),
+            va + vb
+        );
+    }
+
+    /// Coaxial cones of opposite taper (an hourglass pair meeting at
+    /// the shared midplane): the analytic intersection is 3 pi r^2 h
+    /// / 8 at equal tapers... for two full cones of equal radius r
+    /// and height h mirrored about the meeting plane, the common is
+    /// the bicone of the inscribed disks — with r = 3, h = 4 the
+    /// crossing circle has radius 1.5 and the ideal common is
+    /// 2 * (1/3) pi (1.5)^2 (2) = 3 pi. The tessellated cones bound
+    /// it from outside (their facets are chords across a convex
+    /// flare), so the assertion uses the operands' own tessellation
+    /// error, never a bare magic percent.
+    #[test]
+    fn boolean_coaxial_opposed_cones_hourglass() {
+        let pi = std::f64::consts::PI;
+        let deflection = 0.06;
+        let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+        // Mirror about z = 0 and repair the winding a reflection
+        // reverses; the operand must stay outward-facing.
+        let mut b = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+        for v in &mut b.vertices {
+            v.z = -v.z;
+        }
+        for t in b.triangles.iter_mut() {
+            t.swap(1, 2);
+        }
+        let cone = pi * 3.0 * 3.0 * 4.0 / 3.0;
+        let tolerance = derived_tolerance(&[&a, &b], &[cone, cone]);
+        assert_closed_positive_near(
+            &common(&a, &b),
+            3.0 * pi,
+            tolerance,
+            "opposed cones common (hourglass)",
+        );
+        let (va, vb) = (a.volume(), b.volume());
+        let hourglass = 3.0 * pi;
+        assert_closed_positive_near(&cut(&a, &b), va - hourglass, tolerance, "opposed cones cut");
+        assert_closed_positive_near(
+            &fuse(&a, &b),
+            va + vb - hourglass,
+            tolerance,
+            "opposed cones fuse",
+        );
+    }
+
+    /// The near-tangent repairs are deterministic: a rerun of the
+    /// razor fixture is bit-identical in vertices and triangles.
+    #[test]
+    fn boolean_near_tangent_determinism() {
+        let a = sphere_at(DEFAULT_DEFLECTION, 0.0, 0.0, 0.0);
+        let b = sphere_at(DEFAULT_DEFLECTION, 1.95, 0.0, 0.0);
+        let first = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+        let second = (fuse(&a, &b), cut(&a, &b), common(&a, &b));
+        for (x, y) in [
+            (&first.0, &second.0),
+            (&first.1, &second.1),
+            (&first.2, &second.2),
+        ] {
+            assert_eq!(x.vertices, y.vertices);
+            assert_eq!(x.triangles, y.triangles);
+        }
     }
 }

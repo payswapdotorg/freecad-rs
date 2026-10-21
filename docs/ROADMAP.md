@@ -122,11 +122,39 @@ Honest, incremental, no vaporware.
       watertight with cut+common partitioning within the
       deflection-derived tolerance — the final roadmap candidate,
       closed with the roadmap
+- [x] **FC-13** Near-tangent mixed pairs & cone-cone seams — the
+      degenerate pruner's reopen is a *needle slit* (a boundary edge
+      with the same sheet's vertices lying on it), which caps cannot
+      fan (sub-bar) and pinholes cannot collapse (arc vs span);
+      `zip_boundary_t_junctions` inserts the chain into the owning
+      triangle bit-exactly; `peel_overlapped_edges` removes the
+      over-covers conservative thinning declines; the volume guard
+      gains the repair's own authority floor (seam length x scale
+      squared) so razor lenses are not held to zero tolerance; the
+      acceptance gate now requires a manifold mesh (every edge
+      exactly twice), not just an empty boundary. Fixtures: near
+      tangent sphere pairs and sphere-cylinder pairs at d in
+      {1.9, 1.95, 1.99} (all three ops watertight, degenerate-free,
+      partitioning the operands), exact tangency (empty common
+      honestly), crossed cones and coaxial opposed cones at
+      deflection 0.06 (partition identities within 1%, hourglass
+      common within the tessellation-derived tolerance of 3pi),
+      bit-determinism on the razor fixture
 
 ## Next (candidates, in rough order)
 
-- [ ] Deeper robustness sweeps (near-tangent mixed pairs, cone-cone
-      seams) — honest incremental work, no milestone gate pending
+- [ ] Mirrored near-coincident seams at fine deflections: two operand
+      sheets that nearly touch without sharing a seam curve (a cone
+      against its own z-mirror at deflection 0.04) sit inside the
+      welders' tolerance, and the honest guard rejects the collapsed
+      repair — the result stays open rather than corrupted. No
+      milestone gate pending.
+- [ ] Exact-tangency slivers: at d = r1 + r2 the exact-weld path
+      closes bit-identically but may carry zero-area triangles at the
+      tangent point (watertight, manifold, volume exact — documented
+      in the near-tangent fixture). Pruning them would violate the
+      closed-mesh contract; a dedicated sliver filter at the boolean
+      boundary is honest follow-up work.
 
 ## Non-goals (explicit)
 

@@ -15,7 +15,7 @@ a GUI, not a full CAD kernel, and honest about both:
 > FreeCAD code is used or included. License: MIT.
 
 **Verified baseline** — `main` @ `adf3bf8` + the FC-12 mixed-curved
-seam fix (2026-10-21): nine crates, **434 tests, 0 failed** (`cargo
+near-tangent & cone-cone seam robustness (2026-10-21): nine crates, **440 tests, 0 failed** (`cargo
 build` / `cargo test --workspace --locked`), `clippy --workspace
 --all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
 clean. PartDesign v1, curved-seam boolean robustness (now on mixed
@@ -72,10 +72,15 @@ concrete terms:
   [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md).
 * **Mesh Booleans are approximate.** `Part::Cut/Fuse/Common` are
   watertight for planar/cylindrical seams and for curved-surface
-  seams (sphere-sphere, crossed/parallel/skew cylinders, tilted
-  cylinder or cone against a sphere) within the deflection-derived
-  tolerance; near-tangent curved pairs thinner than a chord still
-  honestly stay open.
+  seams (sphere-sphere at any overlap down to razors a fiftieth of
+  the radius, sphere-cylinder near-tangent pairs, crossed/parallel/
+  skew cylinders, tilted cylinder or cone against a sphere, crossed
+  and coaxial opposed cones) within the deflection-derived
+  tolerance. Two classes honestly stay open rather than corrupt:
+  mirrored operands whose sheets nearly coincide without sharing a
+  seam curve (a cone against its own z-mirror at fine deflection),
+  and exact-tangency unions may carry zero-area slivers at the
+  tangent point (watertight, manifold, volume exact).
 * **Sketcher v1 solves in the XY plane.** The sketch `Placement` is
   persisted but not yet applied — sketches on arbitrary planes and
   attachments are future work, and v1's PartDesign features inherit
