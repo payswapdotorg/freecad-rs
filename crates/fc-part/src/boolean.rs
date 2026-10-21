@@ -688,14 +688,16 @@ const SEAM_REPAIR_VOLUME_GUARD: f64 = 0.05;
 ///   operands' traces of the seam disagree. [`cap_small_rims`] first
 ///   fan-caps the punctures that are smaller than the mesh's own
 ///   sampling scale (tears, thinned-out spots). The braid itself is
-///   then cut out wholesale ([`delete_seam_band`]: every triangle
-///   within [`SEAM_BAND_RINGS`] rings of a boundary edge) and the clean
-///   rims left on either side are re-connected ([`zip_rim_pairs`]) by
-///   an arc-length-parameterized triangle strip — the generalization of
-///   the T-junction stitch to tolerance-based matching, with the
-///   tolerance being the band width the tessellation itself defines.
-///   Each strip triangle opposes its rim edge's direction, so every
-///   rim edge and every strip spoke is used exactly twice.
+///   then mended in rounds ([`snap_to_consensus`] welds the traces'
+///   near-agreeing vertices onto one consensus grid;
+///   [`interleave_traces`] inserts each trace's staggered samples into
+///   the other's boundary edges — the tolerance-based generalization
+///   of the T-junction stitch, with the tolerance derived from the
+///   seam's own sampling scale; [`weld_fin_edges`] merges the lone
+///   counterpart edge pairs those passes leave, with orientation
+///   votes keeping the two sheets opposed across every merged edge),
+///   and [`collapse_pinholes`] closes the point-sized weld-noise gaps
+///   directly.
 ///
 /// # Contract
 ///
