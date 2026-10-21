@@ -1,6 +1,8 @@
 # Application layer & interoperability plan
 
-- **Status:** planning (2026-10-21) — the audit P2 response
+- **Status:** executed (2026-10-21) — M1, M2, M3 and M4 are done;
+  see [`ROADMAP.md`](ROADMAP.md) for the landed commits. This document
+  is kept as the acceptance record each milestone was built against.
 - **Companions:** [`ROADMAP.md`](ROADMAP.md) (what the core does now),
   [`adr/0001-geometry-kernel.md`](adr/0001-geometry-kernel.md) (the
   kernel decision that gates M3 and part of M2)

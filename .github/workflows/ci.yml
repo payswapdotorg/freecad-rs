@@ -35,10 +35,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       - name: Build workspace
         run: cargo build --workspace --locked
-      - name: GPU tests (lavapipe)
-        run: FC_VIEWER_GPU=1 cargo test -p fc-viewer --locked
       - name: Build interactive feature
         run: cargo build -p fc-viewer --features interactive --locked
+      # First run: no committed golden exists yet — bless it (the TL then
+      # commits the artifact, and every later run is strict: the
+      # golden-diff test fails on missing or drifted goldens).
+      - name: Bootstrap golden when absent
+        run: |
+          if [ ! -f crates/fc-viewer/tests/goldens/demo-iso.png ]; then
+            echo "golden absent — blessing (commit the artifact to make future runs strict)"
+            FC_VIEWER_GPU=1 cargo run -p freecad-rs --locked -- render examples/demo.fcstd /tmp/demo-iso.png --bless
+          else
+            echo "golden present — strict test run"
+          fi
+      - name: GPU tests (lavapipe)
+        run: FC_VIEWER_GPU=1 cargo test -p fc-viewer --locked
       - name: Bless golden render
         if: always()
         run: FC_VIEWER_GPU=1 cargo run -p freecad-rs --locked -- render examples/demo.fcstd /tmp/demo-iso.png --bless

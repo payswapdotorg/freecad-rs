@@ -94,13 +94,28 @@ Honest, incremental, no vaporware.
       (failed recompute → error surfaced, non-zero exit), `script`
       CLI verb, committed example (`build-house.rhai`) — 65189af
 
+- [x] **FC-8 wave 1** Curved-seam boolean robustness — sphere-sphere
+      T-junction repair (WOK) — 9f4ac82
+- [x] **FC-8 wave 1** M2 native-file interop — reader breadth +
+      fixtures corpus (WOM) — 47258ee
+- [x] **FC-8 wave 1** M4 embedded scripting — rhai document API +
+      `script` verb (WON) — 8761490
+- [x] **FC-9/M1** Interactive 3D viewer — `fc-viewer`: wgpu 30
+      surface-less offscreen renderer, svg-parity cameras, CPU
+      orthographic picking, error-flagged objects, PNG output +
+      `--bless` goldens, `interactive` feature (winit; build-tested),
+      CI viewer job on lavapipe — 82005de
+- [x] **FC-9/M3** STEP exchange — `fc-step`: ruststep 0.4 parser
+      layer, faceted AP203 export with the marker in the file,
+      deflection-parameterized import (planar + cylindrical faces),
+      `Part::Feature` carrier with persistence, CLI verbs
+      `import-step` / `export step` — 8c4668b
+
 ## Next (candidates, in rough order)
 
-- [ ] Application-layer milestones — interactive 3D viewer (wgpu),
-      STEP — sequenced with acceptance gates in
-      [`PLAN-APPLICATION.md`](PLAN-APPLICATION.md); STEP proceeds under
-      [`adr/0002-step-milestone.md`](adr/0002-step-milestone.md)
-      (trigger 1 of ADR-0001 fired; pure-Rust `ruststep` path)
+- [ ] Boolean robustness beyond the fixture classes (seam quality on
+      mixed curved operands) — honest incremental work, no milestone
+      gate pending
 
 ## Non-goals (explicit)
 

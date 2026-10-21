@@ -14,12 +14,12 @@ a GUI, not a full CAD kernel, and honest about both:
 > reimplements its *architecture and file format* from scratch; no
 > FreeCAD code is used or included. License: MIT.
 
-**Verified baseline** — `main` @ `65189af` (2026-10-21): seven crates,
-**399 tests, 0 failed** (`cargo build` / `cargo test --workspace
+**Verified baseline** — `main` @ `8c4668b` (2026-10-21): nine crates,
+**428 tests, 0 failed** (`cargo build` / `cargo test --workspace
 --locked`), `clippy --workspace --all-targets -- -D warnings` clean,
 `cargo fmt --all -- --check` clean. PartDesign v1, curved-seam boolean
-robustness, native-file interop breadth, and rhai embedded scripting
-are implemented (details below).
+robustness, native-file interop breadth, rhai embedded scripting, the
+M1 offscreen viewer, and STEP exchange are implemented (details below).
 
 ## What is implemented
 
@@ -40,14 +40,19 @@ the sketcher, and the `.FCStd` file format:
 | `src/Mod/Sketcher` (v1)  | `fc-sketcher`   | 2D geometry (point/line/circle/arc), 13 constraint kinds, Levenberg-Marquardt constraint solver with DOF report, FreeCAD-style `<Sketch>` XML fragments; `Sketcher::SketchObject` — a first-class document object (execute = solve) with `.FCStd` persistence |
 | `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings and `<Sketch>` fragments), OBJ/STL mesh export, **native-file interop breadth** (`App::Part`/`PartDesign::Body`/origin planes & axes/groups/links load with their parameters; quantity/vector/color/list/matrix property family; a committed fixtures corpus pins round-trip behavior) |
 | `Python console` (distilled) | `fc-script` | **embedded scripting via rhai** — sandboxed document API mirroring the CLI verbs (add/set/bind/recompute/stats/save/export), expression bindings through the `fc-app` engine, honest failure semantics (a failed recompute surfaces the error and exits non-zero), operation budget |
-| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, quantity-typed expressions, quantity arithmetic (`calc`), sketch verbs (`add sketch`, `sketch-import`, `sketch-export`, `sketch-info`, `sketch-solve`, `sketch-show`), **PartDesign verbs (`pad`, `pocket`, `revolution`)**, OBJ/STL/SVG export, **`script` (rhai embedded scripting)**, dependency graphs |
+| 3D view (M1, distilled)  | `fc-viewer`    | **offscreen wgpu 30 renderer** — the exports' tessellation rules + placements, flat shading with the SVG renderer's headlight, svg-parity cameras (`iso/top/front/right`, asserted equal to `export svg`'s matrices), orthographic CPU picking (nearest-hit), error objects rendered visibly flagged, PNG output with `--bless` goldens; `interactive` cargo feature adds a winit orbit/zoom/pan window (build-tested) |
+| STEP (AP203/AP214)       | `fc-step`      | **exchange with the CAD ecosystem** — faceted-B-rep export (deterministic, the faceted marker in every product name), deflection-parameterized import via `ruststep` 0.4 (planar + cylindrical faces, LINE/CIRCLE edges, POLY_LOOP facets; honest errors on anything else) |
+| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, quantity-typed expressions, quantity arithmetic (`calc`), sketch verbs (`add sketch`, `sketch-import`, `sketch-export`, `sketch-info`, `sketch-solve`, `sketch-show`), **PartDesign verbs (`pad`, `pocket`, `revolution`)**, OBJ/STL/SVG export, **`render` (M1 viewer)**, **`import-step` / `export step` (M3)**, **`script` (rhai embedded scripting)**, dependency graphs |
 
 **Not implemented (yet, if ever):** exact B-rep/NURBS geometry (OCCT),
-STEP import/export, GUI, Python scripting (the *embedded* scripting
-milestone is rhai — `fc-script`; a full Python surface remains a
-non-goal). Real FreeCAD files load with
-their parameters intact; OCCT `.brp` shape payloads are detected and
-skipped with a warning rather than misparsed — see `fc-io` crate docs.
+a GUI workbench (M1 is a viewer — orbit/pan/zoom + picking, not
+editing), Python scripting (the *embedded* scripting milestone is rhai
+— `fc-script`; a full Python surface remains a non-goal). STEP is
+**faceted** both ways (ADR-0002): exports carry the faceted marker in
+the file, import tessellates under an explicit deflection. Real FreeCAD
+files load with their parameters intact; OCCT `.brp` shape payloads are
+detected and skipped with a warning rather than misparsed — see `fc-io`
+crate docs.
 
 ## Honest limitations
 
@@ -97,6 +102,9 @@ freecad-rs add demo.fcstd --name Stem cylinder --radius 1.5 --height 12
 freecad-rs add demo.fcstd --name Lift transform --source Ball --translate 0,0,12 --rotate-deg 25
 freecad-rs stats demo.fcstd
 freecad-rs export svg demo.fcstd demo.svg --view iso
+freecad-rs render demo.fcstd demo.png                  # M1: wgpu offscreen
+freecad-rs export step demo.fcstd demo.step            # M3: faceted AP203
+freecad-rs import-step other.fcstd demo.step --deflection 0.1
 freecad-rs graph demo.fcstd graph.dot
 ```
 
