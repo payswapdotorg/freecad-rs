@@ -20,3 +20,32 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --all -- --check
+
+  viewer:
+    # M1: the GPU render tests on a software adapter (lavapipe). The
+    # golden image for the ISO frame is blessed here and uploaded as an
+    # artifact — the committed golden is regenerated, never hand-edited.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install lavapipe (software Vulkan)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: Build workspace
+        run: cargo build --workspace --locked
+      - name: GPU tests (lavapipe)
+        run: FC_VIEWER_GPU=1 cargo test -p fc-viewer --locked
+      - name: Build interactive feature
+        run: cargo build -p fc-viewer --features interactive --locked
+      - name: Bless golden render
+        if: always()
+        run: FC_VIEWER_GPU=1 cargo run -p freecad-rs --locked -- render examples/demo.fcstd /tmp/demo-iso.png --bless
+      - name: Upload golden artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-demo-iso
+          path: crates/fc-viewer/tests/goldens/demo-iso.png
+          if-no-files-found: error

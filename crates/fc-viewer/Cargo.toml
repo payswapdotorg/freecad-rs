@@ -12,3 +12,24 @@ fc-base.workspace = true
 fc-app.workspace = true
 fc-part.workspace = true
 fc-io.workspace = true
+# Pure-Rust rendering stack (ADR-0001 keeps the workspace C/C++-free):
+# wgpu (surface-less offscreen), png (golden + output encode/decode),
+# pollster (blocking bridge from wgpu's async device setup to the CLI's
+# synchronous API — no async runtime is pulled in).
+wgpu = "30"
+png = "0.18"
+pollster = "0.4"
+# Interactive mode is a non-default cargo feature: the headless workspace
+# build does not pay for a windowing stack.
+winit = { version = "0.30", optional = true }
+
+[features]
+interactive = ["dep:winit"]
+
+[dev-dependencies]
+# golden-image decode in the GPU tests (same version as the runtime dep)
+png = "0.18"
+
+[[example]]
+name = "viewer"
+required-features = ["interactive"]
