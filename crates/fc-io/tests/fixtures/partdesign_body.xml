@@ -1,0 +1,144 @@
+<Document SchemaVersion="4" ProgramVersion="0.21.2" FileVersion="1">
+ <Properties Count="1">
+  <Property name="Label" type="App::PropertyString">
+   <String value="Bracket body"/>
+  </Property>
+ </Properties>
+ <Objects Count="8" Dependencies="1">
+  <Object type="PartDesign::Body" name="Body" id="1"/>
+  <Object type="App::Origin" name="Origin" id="2"/>
+  <Object type="App::Plane" name="XY_Plane" id="3"/>
+  <Object type="App::Plane" name="XZ_Plane" id="4"/>
+  <Object type="App::Plane" name="YZ_Plane" id="5"/>
+  <Object type="App::Line" name="X_Axis" id="6"/>
+  <Object type="Sketcher::SketchObject" name="Sketch" id="7"/>
+  <Object type="PartDesign::Pad" name="Pad" id="8" Touched="1"/>
+ </Objects>
+ <ObjectData Count="8">
+  <Object name="Body">
+   <Properties Count="4">
+    <Property name="Group" type="App::PropertyStringList">
+     <StringList>Origin Sketch Pad</StringList>
+    </Property>
+    <Property name="Label" type="App::PropertyString">
+     <String value="Body"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+    <Property name="Tip" type="App::PropertyLink">
+     <Link value="Pad"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="Origin">
+   <Properties Count="3">
+    <Property name="Group" type="App::PropertyStringList">
+     <StringList>XY_Plane XZ_Plane YZ_Plane X_Axis</StringList>
+    </Property>
+    <Property name="Label" type="App::PropertyString">
+     <String value="Origin"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="XY_Plane">
+   <Properties Count="3">
+    <Property name="Label" type="App::PropertyString">
+     <String value="XY_Plane"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+    <Property name="Role" type="App::PropertyString">
+     <String value="XY_Plane"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="XZ_Plane">
+   <Properties Count="3">
+    <Property name="Label" type="App::PropertyString">
+     <String value="XZ_Plane"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+    <Property name="Role" type="App::PropertyString">
+     <String value="XZ_Plane"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="YZ_Plane">
+   <Properties Count="3">
+    <Property name="Label" type="App::PropertyString">
+     <String value="YZ_Plane"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+    <Property name="Role" type="App::PropertyString">
+     <String value="YZ_Plane"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="X_Axis">
+   <Properties Count="3">
+    <Property name="Label" type="App::PropertyString">
+     <String value="X_Axis"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+    <Property name="Role" type="App::PropertyString">
+     <String value="X_Axis"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="Sketch">
+   <Properties Count="2">
+    <Property name="Label" type="App::PropertyString">
+     <String value="ProfileSketch"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+   </Properties>
+   <Sketch>
+    <Geometry type="1" startx="0" starty="0" endx="40" endy="30"/>
+   </Sketch>
+  </Object>
+  <Object name="Pad">
+   <Properties Count="9">
+    <Property name="Angle" type="App::PropertyAngle">
+     <Float value="0" unit="deg"/>
+    </Property>
+    <Property name="Axis" type="App::PropertyVector">
+     <PropertyVector valueX="0" valueY="0" valueZ="1"/>
+    </Property>
+    <Property name="Label" type="App::PropertyString">
+     <String value="Pad"/>
+    </Property>
+    <Property name="Length" type="App::PropertyLength">
+     <Float value="12.5"/>
+    </Property>
+    <Property name="Midplane" type="App::PropertyBool">
+     <Bool value="false"/>
+    </Property>
+    <Property name="Profile" type="App::PropertyLink">
+     <Link value="Sketch"/>
+    </Property>
+    <Property name="Reversed" type="App::PropertyBool">
+     <Bool value="false"/>
+    </Property>
+    <Property name="Shape" type="Part::PropertyPartShape">
+     <Part file="Pad001.brp"/>
+    </Property>
+    <Property name="Type" type="App::PropertyEnumeration">
+     <String value="Length"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>

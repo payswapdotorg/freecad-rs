@@ -1,0 +1,58 @@
+<Document SchemaVersion="4" ProgramVersion="0.21.2" FileVersion="1">
+ <Properties Count="1">
+  <Property name="Label" type="App::PropertyString">
+   <String value="Grouped links"/>
+  </Property>
+ </Properties>
+ <Objects Count="4" Dependencies="1">
+  <Object type="App::DocumentGroup" name="Outer" id="1"/>
+  <Object type="App::DocumentGroup" name="Nested" id="2"/>
+  <Object type="Part::Box" name="LeafBox" id="3"/>
+  <Object type="App::Link" name="LinkLeaf" id="4"/>
+ </Objects>
+ <ObjectData Count="4">
+  <Object name="Outer">
+   <Properties Count="2">
+    <Property name="Group" type="App::PropertyStringList">
+     <StringList>Nested LinkLeaf</StringList>
+    </Property>
+    <Property name="Label" type="App::PropertyString">
+     <String value="Outer"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="Nested">
+   <Properties Count="2">
+    <Property name="Group" type="App::PropertyStringList">
+     <StringList>LeafBox</StringList>
+    </Property>
+    <Property name="Label" type="App::PropertyString">
+     <String value="Nested"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="LeafBox">
+   <Properties Count="2">
+    <Property name="Label" type="App::PropertyString">
+     <String value="LeafBox"/>
+    </Property>
+    <Property name="Length" type="App::PropertyFloat">
+     <Float value="4"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="LinkLeaf">
+   <Properties Count="3">
+    <Property name="Label" type="App::PropertyString">
+     <String value="LinkLeaf"/>
+    </Property>
+    <Property name="LinkedObject" type="App::PropertyLink">
+     <Link value="LeafBox"/>
+    </Property>
+    <Property name="LinkTransform" type="App::PropertyBool">
+     <Bool value="false"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>

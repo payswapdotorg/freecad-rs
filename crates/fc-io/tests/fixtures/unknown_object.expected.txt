@@ -1,0 +1,3 @@
+Part::Box Known Valid
+  Label = The known one
+  Length = 3

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use fc_app::{Document, DocumentObject, ObjectStatus, Property};
+use fc_app::{Document, DocumentObject, ObjectStatus, Property, PropertyContainer};
 use fc_base::{Placement, Rotation, Vector3};
 use fc_part::brep::{self, BrpFormat};
 use fc_part::features::{
@@ -53,7 +53,30 @@ pub struct LoadReport {
     pub objects: usize,
     /// Objects skipped entirely (unknown type, unreadable).
     pub skipped: usize,
+    /// Per-property skips (WOM reader breadth): properties whose value
+    /// could not be read at all — unknown value element or malformed
+    /// payload — as `Object.Property` paths. The owning object still
+    /// loads with its other parameters; the reason is always in
+    /// [`LoadReport::warnings`] too. A property here is never a silent
+    /// drop.
+    pub skipped_properties: Vec<String>,
+    /// Properties that arrived quantity-typed (`App::PropertyAngle` /
+    /// `App::PropertyLength` / `App::PropertyDistance`) and were mapped
+    /// to plain floats, as `Object.Property`, plus ` (unit X)` when the
+    /// file carried a unit attribute. Bookkeeping, not a loss: the
+    /// float value is kept.
+    pub quantity_properties: Vec<String>,
 }
+
+/// Property types whose file form is a plain float with an optional
+/// unit attribute (FreeCAD `App::PropertyQuantity` family, as far as
+/// this loader's contract reaches). Mapped to [`Property::Float`] and
+/// recorded in [`LoadReport::quantity_properties`].
+const QUANTITY_TYPES: [&str; 3] = [
+    "App::PropertyAngle",
+    "App::PropertyLength",
+    "App::PropertyDistance",
+];
 
 // ---------------------------------------------------------------------------
 // Saving
@@ -666,6 +689,26 @@ fn parse_objects_section(
                         report.objects += 1;
                         Some(object)
                     }
+                    // Unknown `Part::` family member (a `Part::Feature`
+                    // derivative we do not model): load it as a
+                    // parameter carrier so its readable properties come
+                    // along — the geometry payload, if any, is skipped
+                    // with the usual warnings. The source type id is
+                    // kept in a `TypeId` string property; the object
+                    // lists as `Part::Feature` (the family root).
+                    None if type_id.starts_with("Part::") => {
+                        report.warnings.push(format!(
+                            "object '{name}': unknown Part:: family type '{type_id}' — loaded as \
+                             'Part::Feature' parameter container (TypeId kept, geometry skipped)"
+                        ));
+                        let mut object = LoadContainer::new("Part::Feature", &name);
+                        object
+                            .container
+                            .set("TypeId", Property::String(type_id.clone()));
+                        object.set_status(status);
+                        report.objects += 1;
+                        Some(Box::new(object) as Box<dyn DocumentObject>)
+                    }
                     None => {
                         report.skipped += 1;
                         report.warnings.push(format!(
@@ -771,6 +814,7 @@ fn parse_object_properties(
                         }
                     }
                     (true, _) => {
+                        report.skipped_properties.push(format!("{owner}.<unnamed>"));
                         report
                             .warnings
                             .push(format!("{owner}: property without a name — skipped"));
@@ -780,6 +824,11 @@ fn parse_object_properties(
             }
             Event::Empty(e) if e.name().as_ref() == b"Property" => {
                 let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
+                if name.is_empty() {
+                    report.skipped_properties.push(format!("{owner}.<unnamed>"));
+                } else {
+                    report.skipped_properties.push(format!("{owner}.{name}"));
+                }
                 report
                     .warnings
                     .push(format!("{owner}: property '{name}' has no value — skipped"));
@@ -910,17 +959,27 @@ fn parse_property_value(
         match next_event(reader, buf)? {
             // Self-closing value element, the normal case.
             Event::Empty(e) => {
-                let value = parse_value_element(&e, None, owner, prop, prop_type, report)?;
+                let value = parse_value_element(&e, None, &[], owner, prop, prop_type, report)?;
                 return finish_property(reader, buf, value);
             }
             // Value element with content (e.g. FreeCAD's inline
-            // `<Part brep="1">CASCADE Topology ...` payloads).
+            // `<Part brep="1">CASCADE Topology ...` payloads, or the
+            // child-entry forms of the list properties). Direct child
+            // elements are collected (name + attributes) so the value
+            // parser can accept element forms (see `parse_value_element`).
             Event::Start(e) => {
                 let element_name = e.name().as_ref().to_vec();
                 let mut text = Vec::new();
+                let mut children: Vec<(String, BTreeMap<String, String>)> = Vec::new();
                 loop {
                     match next_event(reader, buf)? {
                         Event::Text(t) => text.extend_from_slice(&t.into_inner()),
+                        Event::Start(e) | Event::Empty(e) => {
+                            children.push((
+                                String::from_utf8_lossy(e.name().as_ref()).into_owned(),
+                                attrs_of(&e),
+                            ));
+                        }
                         Event::End(end) if end.name().as_ref() == element_name.as_slice() => break,
                         Event::Eof => {
                             return Err(FcstdError::Xml(format!(
@@ -931,10 +990,19 @@ fn parse_property_value(
                         _ => continue,
                     }
                 }
-                let value = parse_value_element(&e, Some(&text), owner, prop, prop_type, report)?;
+                let value = parse_value_element(
+                    &e,
+                    Some(&text),
+                    &children,
+                    owner,
+                    prop,
+                    prop_type,
+                    report,
+                )?;
                 return finish_property(reader, buf, value);
             }
             Event::End(e) if e.name().as_ref() == b"Property" => {
+                report.skipped_properties.push(format!("{owner}.{prop}"));
                 report
                     .warnings
                     .push(format!("{owner}: property '{prop}' has no value — skipped"));
@@ -970,12 +1038,20 @@ fn finish_property(
 }
 
 /// Parse one value element (Bool/Integer/Float/String/PropertyVector/
-/// PropertyPlacement/Link/LinkList/Part) by its element name, per the
-/// crate's element table. `text` is the element's content when it was not
-/// self-closing.
+/// PropertyPlacement/Link/LinkList/Part/StringList/FloatList/IntegerList/
+/// PropertyColor/PropertyMatrix) by its element name, per the crate's
+/// element table. `text` is the element's content when it was not
+/// self-closing; `children` its direct child elements (name + attributes).
+///
+/// Type-sensitive dispatch: `prop_type` refines the element — quantity
+/// types (`App::PropertyAngle`/`Length`/`Distance`) arrive as a Float
+/// with an optional unit and are mapped to plain floats (recorded in the
+/// report), and unknown value elements are recorded per-property in
+/// `LoadReport::skipped_properties` (never fatal).
 fn parse_value_element(
     e: &BytesStart<'_>,
     text: Option<&[u8]>,
+    children: &[(String, BTreeMap<String, String>)],
     owner: &str,
     prop: &str,
     prop_type: &str,
@@ -983,6 +1059,7 @@ fn parse_value_element(
 ) -> Result<Option<PropValue>, FcstdError> {
     macro_rules! skip_warn {
         ($($arg:tt)*) => {{
+            report.skipped_properties.push(format!("{owner}.{prop}"));
             report.warnings.push(format!($($arg)*));
             return Ok(None);
         }};
@@ -1005,6 +1082,33 @@ fn parse_value_element(
                 map.get("value").map_or("?", String::as_str)
             ),
         },
+        // Quantity family (`App::PropertyAngle` / `PropertyLength` /
+        // `PropertyDistance`): a float value with an optional unit
+        // string attribute. Mapped to a plain float (the property
+        // vocabulary has no quantity-carrying float); the fact it was
+        // quantity-typed is recorded in the report, which is not a loss.
+        "Float" if QUANTITY_TYPES.contains(&prop_type) => {
+            match map.get("value").and_then(|v| v.trim().parse::<f64>().ok()) {
+                Some(v) => {
+                    let unit = map
+                        .get("unit")
+                        .or_else(|| prop_attrs_quant_unit(children))
+                        .map_or("", String::as_str)
+                        .trim()
+                        .to_string();
+                    report.quantity_properties.push(if unit.is_empty() {
+                        format!("{owner}.{prop}")
+                    } else {
+                        format!("{owner}.{prop} (unit {unit})")
+                    });
+                    Ok(Some(PropValue::Value(Property::Float(v))))
+                }
+                None => skip_warn!(
+                    "{owner}: property '{prop}': malformed {prop_type} value '{}' — skipped",
+                    map.get("value").map_or("?", String::as_str)
+                ),
+            }
+        }
         "Float" => match map.get("value").and_then(|v| v.trim().parse::<f64>().ok()) {
             Some(v) => Ok(Some(PropValue::Value(Property::Float(v)))),
             None => skip_warn!(
@@ -1015,21 +1119,28 @@ fn parse_value_element(
         "String" => Ok(Some(PropValue::Value(Property::String(
             map.get("value").cloned().unwrap_or_default(),
         )))),
-        "PropertyVector" => match (
-            attr_f64(&map, "valueX"),
-            attr_f64(&map, "valueY"),
-            attr_f64(&map, "valueZ"),
-        ) {
-            (Some(x), Some(y), Some(z)) => {
-                Ok(Some(PropValue::Value(Property::Vector(Vector3::new(x, y, z)))))
+        // Attribute form (valueX/valueY/valueZ on the element itself) or
+        // element form (the first child carrying the same attributes).
+        "PropertyVector" => {
+            let coords = vector_of_attrs(&map).or_else(|| {
+                children
+                    .iter()
+                    .find(|(_, m)| vector_of_attrs(m).is_some())
+                    .and_then(|(_, m)| vector_of_attrs(m))
+            });
+            match coords {
+                Some((x, y, z)) => {
+                    Ok(Some(PropValue::Value(Property::Vector(Vector3::new(x, y, z)))))
+                }
+                None => skip_warn!(
+                    "{owner}: property '{prop}': malformed PropertyVector — skipped"
+                ),
             }
-            _ => skip_warn!(
-                "{owner}: property '{prop}': malformed PropertyVector — skipped"
-            ),
-        },
+        }
         "PropertyPlacement" => match parse_placement(&map) {
             Some(p) => Ok(Some(PropValue::Value(Property::Placement(p)))),
             None => {
+                report.skipped_properties.push(format!("{owner}.{prop}"));
                 report.warnings.push(format!(
                     "{owner}: property '{prop}': malformed PropertyPlacement — skipped"
                 ));
@@ -1059,6 +1170,117 @@ fn parse_value_element(
                 .unwrap_or_default();
             Ok(Some(PropValue::Value(Property::LinkList(list))))
         }
+        // Packed-uint color (the work order form: `value="16711680"` is
+        // 0xFF0000). We have no color type: stored as the documented
+        // string "#RRGGBB" (uppercase hex; bits above the low 24 — an
+        // alpha channel in a 32-bit packed form — are not representable
+        // and dropped).
+        "PropertyColor" | "Color" => {
+            match map.get("value").and_then(|v| v.trim().parse::<u64>().ok()) {
+                Some(v) => Ok(Some(PropValue::Value(Property::String(format!(
+                    "#{:06X}",
+                    v & 0xFF_FF_FF
+                ))))),
+                None => skip_warn!(
+                    "{owner}: property '{prop}': malformed packed color '{}' — skipped",
+                    map.get("value").map_or("?", String::as_str)
+                ),
+            }
+        }
+        // String list. Accepted forms: a `value` attribute or inner text
+        // payload split on whitespace (the work order form), plus
+        // repeated `<String value="..."/>` child entries. Canonical
+        // storage: entries joined with single spaces, as a plain string
+        // property (entries cannot contain whitespace by construction).
+        "StringList" => {
+            let mut entries = list_payload_strings(&map, text);
+            for (name, attrs) in children {
+                if name == "String" {
+                    if let Some(v) = attrs.get("value") {
+                        entries.push(v.clone());
+                    }
+                }
+            }
+            Ok(Some(PropValue::Value(Property::String(entries.join(" ")))))
+        }
+        // Numeric lists. Accepted forms: `value` attribute or inner text
+        // payload split on whitespace, plus `<Float|Integer value=".."/>`
+        // child entries. Canonical storage: single-space-joined numbers
+        // as a plain string property. One malformed entry skips the whole
+        // property (with a per-property record), never the load.
+        "FloatList" => {
+            let mut items = list_payload_strings(&map, text);
+            for (name, attrs) in children {
+                if name == "Float" {
+                    if let Some(v) = attrs.get("value") {
+                        items.push(v.clone());
+                    }
+                }
+            }
+            let mut values = Vec::with_capacity(items.len());
+            for item in &items {
+                match item.trim().parse::<f64>() {
+                    Ok(v) => values.push(v),
+                    Err(_) => skip_warn!(
+                        "{owner}: property '{prop}': malformed FloatList entry '{item}' — skipped"
+                    ),
+                }
+            }
+            Ok(Some(PropValue::Value(Property::String(
+                numbers_text(&values),
+            ))))
+        }
+        "IntegerList" => {
+            let mut items = list_payload_strings(&map, text);
+            for (name, attrs) in children {
+                if name == "Integer" {
+                    if let Some(v) = attrs.get("value") {
+                        items.push(v.clone());
+                    }
+                }
+            }
+            let mut values = Vec::with_capacity(items.len());
+            for item in &items {
+                match item.trim().parse::<i64>() {
+                    Ok(v) => values.push(v),
+                    Err(_) => skip_warn!(
+                        "{owner}: property '{prop}': malformed IntegerList entry '{item}' — skipped"
+                    ),
+                }
+            }
+            Ok(Some(PropValue::Value(Property::String(
+                numbers_text(&values),
+            ))))
+        }
+        // 16-float matrix, attributes a11..a44 (row-major) on the element
+        // itself or on its first child carrying them. Canonical storage:
+        // the 16 floats row-major, single-space joined, as a plain string
+        // property. All 16 are required; a missing one skips the property.
+        "PropertyMatrix" | "Matrix" => {
+            let source = if MATRIX_KEYS.iter().all(|k| map.contains_key(*k)) {
+                Some(&map)
+            } else {
+                children
+                    .iter()
+                    .find(|(_, m)| MATRIX_KEYS.iter().all(|k| m.contains_key(*k)))
+                    .map(|(_, m)| m)
+            };
+            let Some(m) = source else {
+                skip_warn!("{owner}: property '{prop}': malformed PropertyMatrix — skipped");
+            };
+            let mut values = Vec::with_capacity(16);
+            for key in MATRIX_KEYS {
+                match attr_f64(m, key) {
+                    Some(v) => values.push(v),
+                    None => skip_warn!(
+                        "{owner}: property '{prop}': malformed PropertyMatrix (bad '{key}') — skipped"
+                    ),
+                }
+            }
+            Ok(Some(PropValue::Value(Property::String(
+                numbers_text(&values),
+            ))))
+        }
         "Part" => Ok(Some(PropValue::Shape(ShapeRef {
             file: map.get("file").filter(|f| !f.is_empty()).cloned(),
             inline: text.unwrap_or_default().to_vec(),
@@ -1067,6 +1289,59 @@ fn parse_value_element(
             "{owner}: property '{prop}': unsupported value element <{element}> (type '{prop_type}') — skipped"
         ),
     }
+}
+
+/// `(x, y, z)` from `valueX`/`valueY`/`valueZ` attributes, all required.
+fn vector_of_attrs(map: &BTreeMap<String, String>) -> Option<(f64, f64, f64)> {
+    match (
+        attr_f64(map, "valueX"),
+        attr_f64(map, "valueY"),
+        attr_f64(map, "valueZ"),
+    ) {
+        (Some(x), Some(y), Some(z)) => Some((x, y, z)),
+        _ => None,
+    }
+}
+
+/// Row-major attribute keys of a `<PropertyMatrix a11..a44/>`.
+const MATRIX_KEYS: [&str; 16] = [
+    "a11", "a12", "a13", "a14", "a21", "a22", "a23", "a24", "a31", "a32", "a33", "a34", "a41",
+    "a42", "a43", "a44",
+];
+
+/// The payload of a list property: its `value` attribute, or — when the
+/// element carried content — its inner text. Whitespace-separated.
+fn list_payload_strings(map: &BTreeMap<String, String>, text: Option<&[u8]>) -> Vec<String> {
+    let from_attr = map.get("value").map_or("", String::as_str);
+    if !from_attr.trim().is_empty() {
+        return from_attr.split_whitespace().map(String::from).collect();
+    }
+    match text {
+        Some(t) => String::from_utf8_lossy(t)
+            .split_whitespace()
+            .map(String::from)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Canonical text of a numeric list: shortest round-trip forms,
+/// single-space joined (the documented storage for list properties).
+fn numbers_text<T: std::fmt::Display>(values: &[T]) -> String {
+    values
+        .iter()
+        .map(|v| format!("{v}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The unit attribute is documented on the value element; accept it on a
+/// child element too (defensive breadth for files that wrap the float).
+fn prop_attrs_quant_unit(children: &[(String, BTreeMap<String, String>)]) -> Option<&String> {
+    children
+        .iter()
+        .find(|(_, m)| m.contains_key("unit"))
+        .and_then(|(_, m)| m.get("unit"))
 }
 
 /// `<PropertyPlacement>`: position + quaternion (Q0..Q3, scalar last).
@@ -1238,7 +1513,9 @@ pub(crate) fn escape_attr(s: &str) -> String {
 }
 
 /// Map a FreeCAD type id (e.g. `Part::Box`) to a fresh object instance.
-/// Returns `None` for unknown types (the loader reports + skips).
+/// Returns `None` for unknown types — except that unknown `Part::`
+/// family members are handled by the caller as parameter containers
+/// (see `parse_objects_section`).
 pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::DocumentObject>> {
     match type_id {
         "Part::Box" => Some(Box::new(BoxFeature::new(name))),
@@ -1253,7 +1530,92 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "PartDesign::Pocket" => Some(Box::new(PocketFeature::new(name))),
         "PartDesign::Revolution" => Some(Box::new(RevolutionFeature::new(name))),
         "Sketcher::SketchObject" => Some(Box::new(SketchObject::new(name))),
+        // Container / link / origin types: no geometry semantics of our
+        // own — loaded as plain property containers (see `LoadContainer`)
+        // that list and re-save under their own type id. Their `Group` /
+        // `Tip` / `LinkedObject` / `Role` / `Placement`/ parameters ride
+        // in as ordinary properties; no attachment or grouping semantics
+        // are derived from them (documented non-goal).
+        "App::Part" => Some(Box::new(LoadContainer::new("App::Part", name))),
+        "PartDesign::Body" => Some(Box::new(LoadContainer::new("PartDesign::Body", name))),
+        "App::DocumentGroup" => Some(Box::new(LoadContainer::new("App::DocumentGroup", name))),
+        "App::Link" => Some(Box::new(LoadContainer::new("App::Link", name))),
+        "App::Origin" => Some(Box::new(LoadContainer::new("App::Origin", name))),
+        "App::Plane" => Some(Box::new(LoadContainer::new("App::Plane", name))),
+        "App::Line" => Some(Box::new(LoadContainer::new("App::Line", name))),
+        "Part::Feature" => Some(Box::new(LoadContainer::new("Part::Feature", name))),
         _ => None,
+    }
+}
+
+/// Loader-side generic object: a named property container for FreeCAD
+/// object types that carry no geometry semantics we model — the
+/// container/link/origin family (`App::Part`, `PartDesign::Body`,
+/// `App::DocumentGroup`, `App::Link`, `App::Origin`, `App::Plane`,
+/// `App::Line`), the `Part::Feature` family root, and (via the caller)
+/// unknown `Part::`-family members with their source type id kept in a
+/// `TypeId` property.
+///
+/// It exists only on the load path: real FreeCAD files name far more
+/// object types than this kernel builds, and the work order's policy is
+/// to keep their readable parameters instead of dropping the objects.
+/// `execute` is a no-op (these objects carry no executable semantics in
+/// this kernel), so they survive recompute untouched and save back as
+/// their container type.
+pub(crate) struct LoadContainer {
+    pub container: PropertyContainer,
+    /// The static type id this object lists and re-saves as.
+    kind: &'static str,
+    expressions: BTreeMap<String, String>,
+}
+
+impl LoadContainer {
+    fn new(kind: &'static str, name: &str) -> Self {
+        Self {
+            container: PropertyContainer::new(name),
+            kind,
+            expressions: BTreeMap::new(),
+        }
+    }
+}
+
+impl DocumentObject for LoadContainer {
+    fn type_name(&self) -> &'static str {
+        self.kind
+    }
+    fn name(&self) -> &str {
+        self.container.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.container.set_name(name)
+    }
+    fn properties(&self) -> &BTreeMap<String, Property> {
+        &self.container.properties
+    }
+    fn properties_mut(&mut self) -> &mut BTreeMap<String, Property> {
+        &mut self.container.properties
+    }
+    fn expressions(&self) -> &BTreeMap<String, String> {
+        &self.expressions
+    }
+    fn expressions_mut(&mut self) -> Option<&mut BTreeMap<String, String>> {
+        Some(&mut self.expressions)
+    }
+    fn execute(&mut self, _doc: &Document) -> Result<(), String> {
+        // Parameter containers have nothing to execute.
+        Ok(())
+    }
+    fn status(&self) -> &ObjectStatus {
+        self.container.status()
+    }
+    fn set_status(&mut self, status: ObjectStatus) {
+        self.container.set_status(status)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

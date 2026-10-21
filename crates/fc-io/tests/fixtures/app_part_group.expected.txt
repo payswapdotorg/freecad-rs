@@ -1,0 +1,18 @@
+App::Part Part Valid
+  Group = BoxA BoxB LinkB
+  Label = Assembly
+  Placement = pos=(10,5,0);axis=(0,0,1);angle=0
+Part::Box BoxA Valid
+  Height = 5
+  Label = BoxA
+  Length = 10
+  Width = 20
+Part::Box BoxB Valid
+  Height = 8
+  Label = BoxB
+  Length = 8
+  Width = 8
+App::Link LinkB Valid
+  Label = LinkB
+  LinkedObject = BoxB
+  LinkTransform = true

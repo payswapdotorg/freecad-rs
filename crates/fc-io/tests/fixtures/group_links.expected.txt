@@ -1,0 +1,13 @@
+App::DocumentGroup Outer Valid
+  Group = Nested LinkLeaf
+  Label = Outer
+App::DocumentGroup Nested Valid
+  Group = LeafBox
+  Label = Nested
+Part::Box LeafBox Valid
+  Label = LeafBox
+  Length = 4
+App::Link LinkLeaf Valid
+  Label = LinkLeaf
+  LinkedObject = LeafBox
+  LinkTransform = false
