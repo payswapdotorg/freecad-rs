@@ -2,9 +2,9 @@
 
 Honest, incremental, no vaporware.
 
-> **Verified baseline** — `main` @ `08270c6`, verified locally on
+> **Verified baseline** — `main` @ `65189af`, verified locally on
 > 2026-10-21: `cargo build` / `cargo test --workspace --locked` green
-> (**361 tests, 0 failed**, six crates), `clippy --workspace
+> (**399 tests, 0 failed**, seven crates), `clippy --workspace
 > --all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
 > clean.
 
@@ -74,16 +74,33 @@ Honest, incremental, no vaporware.
       parametric propagation (sketch edit → feature re-executes) and
       save/reload round-trip proven by tests — 08270c6
 
+- [x] **FC-8** Curved-seam boolean robustness — sphere-sphere seam
+      repair: consensus-grid snap, tolerance-based trace interleaving
+      (the T-junction stitch generalized), fin welding, overlap
+      thinning, rim capping under a sagitta honesty bound —
+      wholesale-or-nothing under a 5% volume guard; already-closed
+      results pass through bit-identically; near-tangent lenses
+      thinner than a chord stay open honestly — 66d2994
+- [x] **FC-8 / M2** Native-file interop — reader breadth over real
+      `Document.xml` variety (`App::Part`, `PartDesign::Body`, origin
+      planes/axes, groups, links; quantity/vector/color/enumeration/
+      string-list/float-list/integer-list/matrix properties; extended
+      `LoadReport` with per-property skip records), a committed
+      fixtures corpus with expectation files, round-trip `list`-parity
+      gate, `.brp` skip asserted — c7770ea
+- [x] **FC-8 / M4** Embedded scripting — `fc-script`: rhai 1.26
+      sandboxed document API mirroring the CLI verbs, expression
+      bindings through the `fc-app` engine, honest failure semantics
+      (failed recompute → error surfaced, non-zero exit), `script`
+      CLI verb, committed example (`build-house.rhai`) — 65189af
+
 ## Next (candidates, in rough order)
 
-- [ ] Boolean robustness beyond boxes/cylinders: sphere-sphere seams
-      (T-junctions on curved seams) still produce open meshes
 - [ ] Application-layer milestones — interactive 3D viewer (wgpu),
-      deeper FreeCAD native-file interop, STEP, embedded scripting —
-      sequenced with acceptance gates in
-      [`PLAN-APPLICATION.md`](PLAN-APPLICATION.md); STEP is gated on
-      the [`adr/0001-geometry-kernel.md`](adr/0001-geometry-kernel.md)
-      triggers
+      STEP — sequenced with acceptance gates in
+      [`PLAN-APPLICATION.md`](PLAN-APPLICATION.md); STEP proceeds under
+      [`adr/0002-step-milestone.md`](adr/0002-step-milestone.md)
+      (trigger 1 of ADR-0001 fired; pure-Rust `ruststep` path)
 
 ## Non-goals (explicit)
 

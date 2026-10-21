@@ -14,12 +14,12 @@ a GUI, not a full CAD kernel, and honest about both:
 > reimplements its *architecture and file format* from scratch; no
 > FreeCAD code is used or included. License: MIT.
 
-**Verified baseline** — `main` @ `08270c6` (2026-10-21): six crates,
-**361 tests, 0 failed** (`cargo build` / `cargo test --workspace
+**Verified baseline** — `main` @ `65189af` (2026-10-21): seven crates,
+**399 tests, 0 failed** (`cargo build` / `cargo test --workspace
 --locked`), `clippy --workspace --all-targets -- -D warnings` clean,
-`cargo fmt --all -- --check` clean. PartDesign v1 — `Pad`, `Pocket`,
-`Revolution` as sketch-consuming document objects with CLI verbs and
-`.FCStd` persistence — is implemented.
+`cargo fmt --all -- --check` clean. PartDesign v1, curved-seam boolean
+robustness, native-file interop breadth, and rhai embedded scripting
+are implemented (details below).
 
 ## What is implemented
 
@@ -35,14 +35,17 @@ the sketcher, and the `.FCStd` file format:
 | `src/App`                | `fc-app`       | `Document`, `DocumentObject`, typed `Property` system, dependency-ordered recompute with cycle detection |
 | `src/App/Transactions.cpp`| `fc-app`      | undo/redo: transaction stack with add/del/change records, property snapshots, auto-record on mutation, `undo`/`redo`/`history` CLI |
 | `src/App/Expression.cpp` | `fc-app`       | expression engine **evaluating to `Quantity`**: dimensional analysis, unit-aware arithmetic (dimension-checked `+`/`-`, unit-combining `*`/`/`, integer-exponent `^`), degree-mode trig, `<<Label>>.Property` references, document bindings with dependency-graph edges + cycle detection, honest binding rejection (a plain-float property rejects a unit-carrying expression, FreeCAD `PropertyFloat` behavior) |
-| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans, **profile kernels** (closed-wire extraction from sketch geometry, extrusion, revolution — watertight-by-construction meshes), **PartDesign v1 features** (`PartDesign::Pad/Pocket/Revolution` consuming a sketch, recompute-driven) |
+| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans with **curved-seam robustness** (sphere-sphere seam repair: consensus-grid snap, tolerance-based trace interleaving, fin welding — watertight curved-seam results under a wholesale-or-nothing volume guard), **profile kernels** (closed-wire extraction from sketch geometry, extrusion, revolution — watertight-by-construction meshes), **PartDesign v1 features** (`PartDesign::Pad/Pocket/Revolution` consuming a sketch, recompute-driven) |
 | `src/Mod/PartDesign` (v1) | `fc-part`      | `Pad` (Profile/Length/Midplane/Reversed), `Pocket` (Base/Length/Inverted — boolean cut), `Revolution` (Angle/Axis) — sketch links in the dependency graph, error propagation from failed profiles, parametric recompute proven end-to-end |
 | `src/Mod/Sketcher` (v1)  | `fc-sketcher`   | 2D geometry (point/line/circle/arc), 13 constraint kinds, Levenberg-Marquardt constraint solver with DOF report, FreeCAD-style `<Sketch>` XML fragments; `Sketcher::SketchObject` — a first-class document object (execute = solve) with `.FCStd` persistence |
-| `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings and `<Sketch>` fragments), OBJ/STL mesh export |
-| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, quantity-typed expressions, quantity arithmetic (`calc`), sketch verbs (`add sketch`, `sketch-import`, `sketch-export`, `sketch-info`, `sketch-solve`, `sketch-show`), **PartDesign verbs (`pad`, `pocket`, `revolution`)**, OBJ/STL/SVG export, dependency graphs |
+| `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings and `<Sketch>` fragments), OBJ/STL mesh export, **native-file interop breadth** (`App::Part`/`PartDesign::Body`/origin planes & axes/groups/links load with their parameters; quantity/vector/color/list/matrix property family; a committed fixtures corpus pins round-trip behavior) |
+| `Python console` (distilled) | `fc-script` | **embedded scripting via rhai** — sandboxed document API mirroring the CLI verbs (add/set/bind/recompute/stats/save/export), expression bindings through the `fc-app` engine, honest failure semantics (a failed recompute surfaces the error and exits non-zero), operation budget |
+| `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, quantity-typed expressions, quantity arithmetic (`calc`), sketch verbs (`add sketch`, `sketch-import`, `sketch-export`, `sketch-info`, `sketch-solve`, `sketch-show`), **PartDesign verbs (`pad`, `pocket`, `revolution`)**, OBJ/STL/SVG export, **`script` (rhai embedded scripting)**, dependency graphs |
 
 **Not implemented (yet, if ever):** exact B-rep/NURBS geometry (OCCT),
-STEP import/export, GUI, Python scripting. Real FreeCAD files load with
+STEP import/export, GUI, Python scripting (the *embedded* scripting
+milestone is rhai — `fc-script`; a full Python surface remains a
+non-goal). Real FreeCAD files load with
 their parameters intact; OCCT `.brp` shape payloads are detected and
 skipped with a warning rather than misparsed — see `fc-io` crate docs.
 
