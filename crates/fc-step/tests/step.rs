@@ -311,3 +311,133 @@ fn freecad_whole_sphere_vertex_loop_imports() {
         assert!((r - 5.0).abs() < 1e-9, "every vertex on the sphere (r={r})");
     }
 }
+
+/// FreeCAD 1.0 writes `Part::Cone` (radius 3 → 0, height 10) and
+/// `Part::Torus` (major 5, minor 1) as single curved faces — the
+/// cone over a CONICAL_SURFACE whose placement axis points DOWN
+/// (OCCT parametrizes v from the apex), the torus over a
+/// TOROIDAL_SURFACE whose seam loop carries both full circles. The
+/// reader tessellates both and the shell-level orientation makes
+/// the solids positive.
+#[test]
+fn freecad_cone_and_torus_import() {
+    let step = concat!(
+        "ISO-10303-21;\n",
+        "HEADER;\n",
+        "FILE_DESCRIPTION(('FreeCAD 1.0 cone+torus'),'2;1');\n",
+        "ENDSEC;\n",
+        "DATA;\n",
+        "#2 = APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#1);\n",
+        "#11 = AXIS2_PLACEMENT_3D('',#8,#9,#10);\n",
+        "#8 = CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#9 = DIRECTION('',(0.,0.,1.));\n",
+        "#10 = DIRECTION('',(1.,0.,0.));\n",
+        "#24 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );\n",
+        "#14 = PRODUCT_DEFINITION_SHAPE('','',#15);\n",
+        "#15 = PRODUCT_DEFINITION('design','',#16,#18);\n",
+        "#16 = PRODUCT_DEFINITION_FORMATION('','',#17);\n",
+        "#18 = PRODUCT_DEFINITION_CONTEXT('part definition',#2,'design');\n",
+        // ---- the cone, verbatim FreeCAD structure: lateral face over
+        // CONICAL_SURFACE (axis pointing DOWN — v from the apex),
+        // loop = seam line + base circle + seam back
+        "#80 = PRODUCT('Cone','Cone','',(#81));\n",
+        "#81 = PRODUCT_CONTEXT('',#2,'mechanical');\n",
+        "#82 = MANIFOLD_SOLID_BREP('',#83);\n",
+        "#83 = CLOSED_SHELL('',(#84,#108));\n",
+        "#84 = ADVANCED_FACE('',(#85),#95,.T.);\n",
+        "#85 = FACE_BOUND('',#86,.T.);\n",
+        "#86 = EDGE_LOOP('',(#87,#93,#94));\n",
+        "#87 = ORIENTED_EDGE('',*,*,#88,.F.);\n",
+        "#88 = EDGE_CURVE('',#89,#91,#90,.T.);\n",
+        "#89 = VERTEX_POINT('',#100);\n",
+        "#100 = CARTESIAN_POINT('',(3.,0.,0.));\n",
+        "#91 = VERTEX_POINT('',#92);\n",
+        "#92 = CARTESIAN_POINT('',(0.,0.,10.));\n",
+        "#90 = LINE('',#101,#102);\n",
+        "#101 = CARTESIAN_POINT('',(3.,0.,0.));\n",
+        "#102 = VECTOR('',#103,1.);\n",
+        "#103 = DIRECTION('',(-0.287347885566,0.,0.957826285221));\n",
+        "#93 = ORIENTED_EDGE('',*,*,#104,.T.);\n",
+        "#104 = EDGE_CURVE('',#89,#89,#105,.T.);\n",
+        "#105 = CIRCLE('',#106,3.);\n",
+        "#106 = AXIS2_PLACEMENT_3D('',#8,#9,#10);\n",
+        "#94 = ORIENTED_EDGE('',*,*,#88,.T.);\n",
+        "#95 = CONICAL_SURFACE('',#96,3.,0.291456794478);\n",
+        "#96 = AXIS2_PLACEMENT_3D('',#8,#97,#10);\n",
+        "#97 = DIRECTION('',(0.,0.,-1.));\n",
+        // the base disk: the same base circle, as a planar face
+        "#108 = ADVANCED_FACE('',(#109),#113,.F.);\n",
+        "#109 = FACE_BOUND('',#110,.T.);\n",
+        "#110 = EDGE_LOOP('',(#111));\n",
+        "#111 = ORIENTED_EDGE('',*,*,#104,.F.);\n",
+        "#113 = PLANE('',#114);\n",
+        "#114 = AXIS2_PLACEMENT_3D('',#8,#9,#10);\n",
+        // ---- the torus: one toroidal face, the seam loop with both circles
+        "#40 = PRODUCT_DEFINITION_SHAPE('','',#41);\n",
+        "#41 = PRODUCT_DEFINITION('design','',#42,#44);\n",
+        "#42 = PRODUCT_DEFINITION_FORMATION('','',#43);\n",
+        "#43 = PRODUCT('Ring','Ring','',(#45));\n",
+        "#44 = PRODUCT_DEFINITION_CONTEXT('part definition',#2,'design');\n",
+        "#45 = PRODUCT_CONTEXT('',#2,'mechanical');\n",
+        "#46 = MANIFOLD_SOLID_BREP('',#47);\n",
+        "#47 = CLOSED_SHELL('',(#48));\n",
+        "#48 = ADVANCED_FACE('',(#49),#68,.T.);\n",
+        "#49 = FACE_BOUND('',#50,.F.);\n",
+        "#50 = EDGE_LOOP('',(#51,#60,#66,#67));\n",
+        "#51 = ORIENTED_EDGE('',*,*,#52,.T.);\n",
+        "#52 = EDGE_CURVE('',#53,#53,#55,.T.);\n",
+        "#53 = VERTEX_POINT('',#54);\n",
+        "#54 = CARTESIAN_POINT('',(4.,0.,-1.224646799147E-16));\n",
+        "#55 = CIRCLE('',#56,4.);\n",
+        "#56 = AXIS2_PLACEMENT_3D('',#57,#58,#59);\n",
+        "#57 = CARTESIAN_POINT('',(0.,0.,-1.224646799147E-16));\n",
+        "#58 = DIRECTION('',(0.,0.,1.));\n",
+        "#59 = DIRECTION('',(1.,0.,0.));\n",
+        "#60 = ORIENTED_EDGE('',*,*,#61,.F.);\n",
+        "#61 = EDGE_CURVE('',#53,#53,#62,.T.);\n",
+        "#62 = CIRCLE('',#63,1.);\n",
+        "#63 = AXIS2_PLACEMENT_3D('',#64,#65,#10);\n",
+        "#64 = CARTESIAN_POINT('',(5.,0.,0.));\n",
+        "#65 = DIRECTION('',(0.,1.,0.));\n",
+        "#66 = ORIENTED_EDGE('',*,*,#52,.F.);\n",
+        "#67 = ORIENTED_EDGE('',*,*,#61,.T.);\n",
+        "#68 = TOROIDAL_SURFACE('',#11,5.,1.);\n",
+        "ENDSEC;\n",
+        "END-ISO-10303-21;\n"
+    );
+    let dir = std::env::temp_dir().join("fc-step-freecad-cone-torus-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("freecad-cone-torus.step");
+    std::fs::write(&path, step).unwrap();
+    let set = fc_step::parse::EntitySet::parse(step).unwrap();
+    let solids = fc_step::import::import_solids(&set, 0.05).unwrap();
+    assert_eq!(solids.len(), 2, "two solids");
+    // Ascending entity id order: the torus's brep (#46) precedes the
+    // cone's (#82).
+    let (torus, cone) = (&solids[0].1, &solids[1].1);
+    for (name, m) in [("cone", cone), ("torus", torus)] {
+        assert!(fc_part::boolean::mesh_is_closed(m), "{name}: watertight");
+        assert!(
+            fc_part::boolean::mesh_is_consistently_oriented(m),
+            "{name}: consistently oriented"
+        );
+    }
+    // The cone: the apex VERTEX_LOOP makes it a whole cone; positive
+    // volume (OCCT's cone placement axis points down — the shell
+    // orienter, not the per-face flag, settles the sign).
+    let cone_exact = std::f64::consts::PI * 9.0 * 10.0 / 3.0;
+    let got = cone.volume();
+    assert!(got > 0.0, "cone volume positive (got {got})");
+    assert!(
+        (got - cone_exact).abs() / cone_exact < 0.05,
+        "cone volume {got} within the deflection contract of {cone_exact}"
+    );
+    // The torus: whole-torus grid, positive volume.
+    let torus_exact = 2.0 * std::f64::consts::PI * std::f64::consts::PI * 5.0;
+    let got = torus.volume();
+    assert!(got > 0.0, "torus volume positive (got {got})");
+    assert!(
+        (got - torus_exact).abs() / torus_exact < 0.12,
+        "torus volume {got} within the deflection contract of {torus_exact}"
+    );
+}

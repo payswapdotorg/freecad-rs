@@ -319,6 +319,27 @@ fn boolean_prepared(a: &Mesh, polygons_a: Vec<Polygon>, polygons_b: Vec<Polygon>
     mesh
 }
 
+/// Orient a closed shell as a solid boundary: reconcile the face
+/// windings through the shared-edge graph (every edge traversed
+/// oppositely), then set the global sign so the divergence volume
+/// is positive — the material's outward normals. This is the
+/// reader-side generalization of the boolean tail's own orientation
+/// pass: a STEP writer's per-face `same_sense` flags encode each
+/// face against its SURFACE's natural normal, a convention that
+/// varies per surface type (OCCT's cones parametrize v from the
+/// apex, mirroring the cylinder); reconciling the assembled shell
+/// once is convention-independent and needs only that every face's
+/// triangles are wound consistently among themselves.
+pub fn orient_closed_shell(mesh: &mut Mesh) {
+    orient_consistently(mesh);
+    let v = mesh.volume();
+    if v < 0.0 {
+        for t in &mut mesh.triangles {
+            *t = [t[0], t[2], t[1]];
+        }
+    }
+}
+
 /// Orientation consistency: every shared edge must be traversed
 /// by its two faces in OPPOSITE directions — the outward-normal
 /// contract a B-rep kernel (OCCT, FreeCAD's `BRepCheck`) enforces

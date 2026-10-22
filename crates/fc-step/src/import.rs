@@ -148,6 +148,12 @@ enum Surface {
     Plane(Placement),
     Cylinder(Placement, f64),
     Sphere(Placement, f64),
+    /// placement, radius at the placement plane, semi_angle (radians):
+    /// radius(z) = radius + z * tan(semi_angle).
+    Cone(Placement, f64, f64),
+    /// placement, major radius (to the tube center), minor radius
+    /// (the tube).
+    Torus(Placement, f64, f64),
 }
 
 /// Import every `MANIFOLD_SOLID_BREP` in the file as a mesh.
@@ -189,14 +195,19 @@ fn import_solid(set: &EntitySet, shell_id: u64, deflection: f64) -> Result<Mesh,
         import_face(set, face_id, deflection, &mut builder)
             .map_err(|e| format!("face #{face_id}: {e}"))?;
     }
-    let mesh = Mesh::new(builder.vertices, builder.triangles);
+    let mut mesh = Mesh::new(builder.vertices, builder.triangles);
     mesh.validate()
         .map_err(|e| format!("imported mesh invalid: {e}"))?;
+    // The shell is the solid's whole boundary: reconcile the face
+    // windings through the shared-edge graph and set the global sign
+    // by the divergence volume (the writer's per-surface natural
+    // normals do not survive a convention-independent reader).
+    fc_part::boolean::orient_closed_shell(&mut mesh);
     let volume = mesh.volume();
     if volume <= 0.0 {
         return Err(format!(
             "imported solid has non-positive volume ({volume:.6} over {} triangles — \
-             orientation could not be resolved for this face combination)",
+             the shell could not be oriented as a solid boundary)",
             mesh.triangles.len()
         ));
     }
@@ -239,6 +250,20 @@ fn import_face(
             let radius = e.params[2].as_f64()?;
             Surface::Sphere(pl, radius)
         }
+        id if set.get(id)?.name == "CONICAL_SURFACE" => {
+            let e = set.entity(id, "CONICAL_SURFACE")?;
+            let pl = placement(set, e.params[1].as_ref_id()?)?;
+            let radius = e.params[2].as_f64()?;
+            let semi_angle = e.params[3].as_f64()?;
+            Surface::Cone(pl, radius, semi_angle)
+        }
+        id if set.get(id)?.name == "TOROIDAL_SURFACE" => {
+            let e = set.entity(id, "TOROIDAL_SURFACE")?;
+            let pl = placement(set, e.params[1].as_ref_id()?)?;
+            let major = e.params[2].as_f64()?;
+            let minor = e.params[3].as_f64()?;
+            Surface::Torus(pl, major, minor)
+        }
         id => {
             return Err(format!(
                 "unsupported surface '#{}' ({}) — this reader covers                  planes, cylinders and spheres",
@@ -263,6 +288,18 @@ fn import_face(
         }
         Surface::Sphere(pl, radius) => {
             import_spherical_face(pl, *radius, &loops, same_sense, deflection, builder)
+        }
+        Surface::Cone(pl, radius, semi_angle) => import_conical_face(
+            pl,
+            *radius,
+            *semi_angle,
+            &loops,
+            same_sense,
+            deflection,
+            builder,
+        ),
+        Surface::Torus(pl, major, minor) => {
+            import_toroidal_face(pl, *major, *minor, &loops, same_sense, deflection, builder)
         }
     }
 }
@@ -349,6 +386,211 @@ fn emit_latlong_bands(
             }
         }
     }
+}
+
+/// A conical face: the cylinder's sampler with the radius linear in
+/// z (`radius(z) = radius + z·tan(semi_angle)`), which also covers
+/// the cylinder as the semi_angle → 0 limit. The apex (radius → 0)
+/// is handled by the degenerate-triangle guard.
+fn import_conical_face(
+    pl: &Placement,
+    radius: f64,
+    semi_angle: f64,
+    loops: &[Vec<Vector3>],
+    same_sense: bool,
+    deflection: f64,
+    builder: &mut MeshBuilder,
+) -> Result<(), String> {
+    let tan_a = semi_angle.tan();
+    let to_params = |p: &Vector3| -> (f64, f64) {
+        let d = Vector3::new(p.x - pl.origin.x, p.y - pl.origin.y, p.z - pl.origin.z);
+        let x = d.x * pl.ref_dir.x + d.y * pl.ref_dir.y + d.z * pl.ref_dir.z;
+        let y = d.x * second(pl).x + d.y * second(pl).y + d.z * second(pl).z;
+        let z = d.x * pl.axis.x + d.y * pl.axis.y + d.z * pl.axis.z;
+        (y.atan2(x), z)
+    };
+    let world = |theta: f64, z: f64| -> Vector3 {
+        let r = (radius + z * tan_a).max(0.0);
+        let (c, s) = (theta.cos(), theta.sin());
+        Vector3::new(
+            pl.origin.x + r * (c * pl.ref_dir.x + s * second(pl).x) + z * pl.axis.x,
+            pl.origin.y + r * (c * pl.ref_dir.y + s * second(pl).y) + z * pl.axis.y,
+            pl.origin.z + r * (c * pl.ref_dir.z + s * second(pl).z) + z * pl.axis.z,
+        )
+    };
+    // Extents.
+    let mut z_min = f64::INFINITY;
+    let mut z_max = f64::NEG_INFINITY;
+    let mut thetas: Vec<f64> = Vec::new();
+    for l in loops {
+        for p in l {
+            let (theta, z) = to_params(p);
+            thetas.push(theta);
+            z_min = z_min.min(z);
+            z_max = z_max.max(z);
+        }
+    }
+    if thetas.is_empty() {
+        return Err("conical face without loop points".to_string());
+    }
+    thetas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let step_angle = step_angle_for(radius.max(1e-9), deflection);
+    let mut max_gap: f64 = 0.0;
+    if thetas.len() >= 2 {
+        for w in thetas.windows(2) {
+            max_gap = max_gap.max(w[1] - w[0]);
+        }
+        max_gap = max_gap.max(thetas[0] + std::f64::consts::TAU - thetas[thetas.len() - 1]);
+    }
+    let full_turn = max_gap < step_angle * 1.5;
+    let segments = ((std::f64::consts::TAU / step_angle).ceil() as usize).clamp(8, 4096);
+    let flip = !same_sense;
+    if full_turn {
+        // A full band: subdivide z so every cell's slant stays within
+        // the deflection (the slant is the cone's own sampling
+        // direction between its exact circular rims).
+        let slant = ((z_max - z_min) * (1.0 + tan_a * tan_a).sqrt()).max(1e-9);
+        let rows = ((slant / deflection.max(1e-9)).ceil() as usize).clamp(1, 4096);
+        for row in 0..rows {
+            let z0 = z_min + (z_max - z_min) * row as f64 / rows as f64;
+            let z1 = z_min + (z_max - z_min) * (row + 1) as f64 / rows as f64;
+            for i in 0..segments {
+                let t0 = i as f64 / segments as f64 * std::f64::consts::TAU;
+                let t1 = (i + 1) as f64 / segments as f64 * std::f64::consts::TAU;
+                let (p00, p10, p01, p11) =
+                    (world(t0, z0), world(t1, z0), world(t0, z1), world(t1, z1));
+                let ok =
+                    |a: Vector3, b: Vector3, c: Vector3| (b - a).cross(&(c - a)).length() > 1e-18;
+                if flip {
+                    if ok(p00, p10, p11) {
+                        builder.tri(p00, p10, p11);
+                    }
+                    if ok(p00, p11, p01) {
+                        builder.tri(p00, p11, p01);
+                    }
+                } else {
+                    if ok(p00, p11, p10) {
+                        builder.tri(p00, p11, p10);
+                    }
+                    if ok(p00, p01, p11) {
+                        builder.tri(p00, p01, p11);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    // Partial: ear-clip in the developed (r·θ, s) plane, where s is
+    // the slant parameter (z scaled by the slant factor).
+    // (partial patches: reported below)
+    // Partial conical patches (not written by the primitives) need a
+    // development inversion the full-turn path does not; report it.
+    Err("partial conical face (full-turn bands are supported)".to_string())
+}
+
+/// A toroidal face. FreeCAD's `Part::Torus` is ONE face whose seam
+/// loop carries both full circles (the major seam and the tube's),
+/// so the loop points cover θ and ψ completely — the whole-torus
+/// grid. Partial patches are reported (not written by the
+/// primitives).
+fn import_toroidal_face(
+    pl: &Placement,
+    major: f64,
+    minor: f64,
+    loops: &[Vec<Vector3>],
+    same_sense: bool,
+    deflection: f64,
+    builder: &mut MeshBuilder,
+) -> Result<(), String> {
+    if major <= 0.0 || minor <= 0.0 || minor > major {
+        return Err(format!("toroidal face with radii {major}/{minor}"));
+    }
+    let second_v = second(pl);
+    let to_params = |p: &Vector3| -> (f64, f64) {
+        let d = Vector3::new(p.x - pl.origin.x, p.y - pl.origin.y, p.z - pl.origin.z);
+        let x = d.x * pl.ref_dir.x + d.y * pl.ref_dir.y + d.z * pl.ref_dir.z;
+        let y = d.x * second_v.x + d.y * second_v.y + d.z * second_v.z;
+        let z = d.x * pl.axis.x + d.y * pl.axis.y + d.z * pl.axis.z;
+        let rho = (x * x + y * y).sqrt();
+        (y.atan2(x), (z).atan2(rho - major))
+    };
+    let world = |theta: f64, psi: f64| -> Vector3 {
+        let (st, ct) = (theta.sin(), theta.cos());
+        let (sp, cp) = (psi.sin(), psi.cos());
+        let ring = major + minor * cp;
+        let radial = Vector3::new(
+            ct * pl.ref_dir.x + st * second_v.x,
+            ct * pl.ref_dir.y + st * second_v.y,
+            ct * pl.ref_dir.z + st * second_v.z,
+        );
+        Vector3::new(
+            pl.origin.x + ring * radial.x + minor * sp * pl.axis.x,
+            pl.origin.y + ring * radial.y + minor * sp * pl.axis.y,
+            pl.origin.z + ring * radial.z + minor * sp * pl.axis.z,
+        )
+    };
+    // Coverage census over the loop points.
+    let mut thetas: Vec<f64> = Vec::new();
+    let mut psis: Vec<f64> = Vec::new();
+    for l in loops {
+        for p in l {
+            let (theta, psi) = to_params(p);
+            thetas.push(theta);
+            psis.push(psi);
+        }
+    }
+    if thetas.is_empty() {
+        return Err("toroidal face without loop points".to_string());
+    }
+    thetas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    psis.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let full = |xs: &[f64], step: f64| -> bool {
+        let mut gap: f64 = 0.0;
+        if xs.len() >= 2 {
+            for w in xs.windows(2) {
+                gap = gap.max(w[1] - w[0]);
+            }
+            gap = gap.max(xs[0] + std::f64::consts::TAU - xs[xs.len() - 1]);
+        }
+        gap < step * 1.5
+    };
+    let step_theta = step_angle_for(major + minor, deflection);
+    let step_psi = step_angle_for(minor, deflection);
+    if full(&thetas, step_theta) && full(&psis, step_psi) {
+        let segments = ((std::f64::consts::TAU / step_theta).ceil() as usize).clamp(8, 4096);
+        let rings = ((std::f64::consts::TAU / step_psi).ceil() as usize).clamp(4, 4096);
+        let flip = !same_sense;
+        let ok = |a: Vector3, b: Vector3, c: Vector3| {
+            (b - a).cross(&(c - a)).length() > 1e-18 * (major + minor).max(1.0)
+        };
+        for r in 0..rings {
+            let s0 = r as f64 / rings as f64 * std::f64::consts::TAU;
+            let s1 = (r + 1) as f64 / rings as f64 * std::f64::consts::TAU;
+            for i in 0..segments {
+                let t0 = i as f64 / segments as f64 * std::f64::consts::TAU;
+                let t1 = (i + 1) as f64 / segments as f64 * std::f64::consts::TAU;
+                let (p00, p10, p01, p11) =
+                    (world(t0, s0), world(t1, s0), world(t0, s1), world(t1, s1));
+                if flip {
+                    if ok(p00, p10, p11) {
+                        builder.tri(p00, p10, p11);
+                    }
+                    if ok(p00, p11, p01) {
+                        builder.tri(p00, p11, p01);
+                    }
+                } else {
+                    if ok(p00, p11, p10) {
+                        builder.tri(p00, p11, p10);
+                    }
+                    if ok(p00, p01, p11) {
+                        builder.tri(p00, p01, p11);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    Err("partial toroidal face (the whole-torus grid is supported)".to_string())
 }
 
 /// A spherical face. The whole-sphere case — one face, one seam
