@@ -1,0 +1,90 @@
+name: release
+
+# Release builds, FreeCAD-style: on every v* tag, build the CLI for
+# Linux (x86_64 + aarch64), Windows and macOS, checksum everything,
+# and publish the artifacts to the GitHub release for the tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross toolchain setup (aarch64-linux)
+        if: matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build (release)
+        run: cargo build --release --locked -p freecad-rs --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          DIR="freecad-rs-$VER-${{ matrix.target }}"
+          mkdir -p "$DIR/docs"
+          cp "target/${{ matrix.target }}/release/freecad-rs" "$DIR/"
+          cp README.md LICENSE "$DIR/"
+          cp docs/cli.md "$DIR/docs/"
+          tar -czf "$DIR.tar.gz" "$DIR"
+          shasum -a 256 "$DIR.tar.gz" > "$DIR.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          DIR="freecad-rs-$VER-${{ matrix.target }}"
+          mkdir -p "$DIR/docs"
+          cp "target/${{ matrix.target }}/release/freecad-rs.exe" "$DIR/"
+          cp README.md LICENSE "$DIR/"
+          cp docs/cli.md "$DIR/docs/"
+          7z a "$DIR.zip" "$DIR" > /dev/null
+          sha256sum "$DIR.zip" | awk '{print $1"  '"$DIR"'.zip"}' > "$DIR.zip.sha256"
+
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            freecad-rs-*.tar.gz
+            freecad-rs-*.tar.gz.sha256
+            freecad-rs-*.zip
+            freecad-rs-*.zip.sha256

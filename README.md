@@ -97,6 +97,32 @@ concrete terms:
 
 ## Install & build
 
+### Download a binary (v0.1.0)
+
+Prebuilt executables live on the
+[releases page](https://github.com/payswapdotorg/freecad-rs/releases/tag/v0.1.0),
+with `SHA256SUMS` for every asset — pick what matches your system:
+
+| Asset | Platform | Install |
+|---|---|---|
+| `freecad-rs-0.1.0-x86_64.AppImage` | Linux x86_64 | `chmod +x` and run; zero install. On FUSE-less systems use `APPIMAGE_EXTRACT_AND_RUN=1` |
+| `freecad-rs-0.1.0-amd64.deb` | Debian/Ubuntu (amd64) | `sudo dpkg -i freecad-rs-0.1.0-amd64.deb` → `/usr/bin/freecad-rs` |
+| `freecad-rs-0.1.0-x86_64-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
+
+```sh
+# Linux AppImage, the FreeCAD-style way:
+chmod +x freecad-rs-0.1.0-x86_64.AppImage
+./freecad-rs-0.1.0-x86_64.AppImage --version
+# freecad-rs 0.1.0
+```
+
+Rebuild the packages locally with `scripts/package.sh` (needs `dpkg-deb`;
+AppImage via [appimagetool](https://github.com/AppImage/appimagetool)).
+Releases are built and checksummed automatically by CI on every `v*` tag
+(`.github/workflows/release.yml`).
+
+### Build from source
+
 Requires Rust 1.75+ (stable).
 
 ```sh
