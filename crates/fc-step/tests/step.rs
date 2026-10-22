@@ -239,3 +239,75 @@ fn cli_path() -> PathBuf {
         .join("../../target/debug")
         .join(exe)
 }
+
+/// FreeCAD 1.0 writes `Part::Sphere` as ONE spherical face whose only
+/// bound is a VERTEX_LOOP at a pole — the whole sphere, no edge
+/// geometry. The reader must tessellate the surface itself
+/// (lat/long bands under the sagitta rule), and the mesh must be
+/// closed with a positive volume converging to the exact sphere.
+#[test]
+fn freecad_whole_sphere_vertex_loop_imports() {
+    // Verbatim structure of FreeCAD 1.0's export of Part::Sphere
+    // (radius 5): one MANIFOLD_SOLID_BREP, one face, VERTEX_LOOP.
+    let step = concat!(
+        "ISO-10303-21;\n",
+        "HEADER;\n",
+        "FILE_DESCRIPTION(('FreeCAD 1.0 sphere'),'2;1');\n",
+        "ENDSEC;\n",
+        "DATA;\n",
+        "#2 = APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#1);\n",
+        "#11 = AXIS2_PLACEMENT_3D('',#8,#9,#10);\n",
+        "#8 = CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#9 = DIRECTION('',(0.,0.,1.));\n",
+        "#10 = DIRECTION('',(1.,0.,0.));\n",
+        "#14 = PRODUCT_DEFINITION_SHAPE('','',#15);\n",
+        "#15 = PRODUCT_DEFINITION('design','',#16,#18);\n",
+        "#16 = PRODUCT_DEFINITION_FORMATION('','',#17);\n",
+        "#17 = PRODUCT('Ball','Ball','',(#19));\n",
+        "#18 = PRODUCT_DEFINITION_CONTEXT('part definition',#2,'design');\n",
+        "#19 = PRODUCT_CONTEXT('',#2,'mechanical');\n",
+        "#20 = MANIFOLD_SOLID_BREP('',#21);\n",
+        "#21 = CLOSED_SHELL('',(#22));\n",
+        "#22 = ADVANCED_FACE('',(#23),#26,.T.);\n",
+        "#23 = FACE_BOUND('',#24,.T.);\n",
+        "#24 = VERTEX_LOOP('',#25);\n",
+        "#25 = VERTEX_POINT('',#27);\n",
+        "#27 = CARTESIAN_POINT('',(3.061616997868383E-16,0.,-5.));\n",
+        "#26 = SPHERICAL_SURFACE('',#28,5.);\n",
+        "#28 = AXIS2_PLACEMENT_3D('',#8,#9,#10);\n",
+        "ENDSEC;\n",
+        "END-ISO-10303-21;\n"
+    );
+    let dir = std::env::temp_dir().join("fc-step-freecad-sphere-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("freecad-sphere.step");
+    std::fs::write(&path, step).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let set = fc_step::parse::EntitySet::parse(&text).unwrap();
+    let solids = fc_step::import::import_solids(&set, 0.05).unwrap();
+    assert_eq!(solids.len(), 1, "one solid");
+    let (_, mesh) = &solids[0];
+    assert!(mesh.triangle_count() > 100, "a tessellated sphere");
+    // Closed and consistently oriented.
+    assert!(
+        fc_part::boolean::mesh_is_closed(mesh),
+        "whole-sphere import is watertight"
+    );
+    assert!(
+        fc_part::boolean::mesh_is_consistently_oriented(mesh),
+        "whole-sphere import is consistently oriented"
+    );
+    // Converging to the exact sphere: the sagitta bound is 0.05 mm
+    // on r = 5, so the volume lands within a few percent and the
+    // surface points sit ON the radius.
+    let exact = 4.0 / 3.0 * std::f64::consts::PI * 125.0;
+    let got = mesh.volume();
+    assert!(
+        (got - exact).abs() / exact < 0.06,
+        "volume {got} within the deflection contract of {exact}"
+    );
+    for v in &mesh.vertices {
+        let r = v.length();
+        assert!((r - 5.0).abs() < 1e-9, "every vertex on the sphere (r={r})");
+    }
+}

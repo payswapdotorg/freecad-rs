@@ -147,6 +147,7 @@ impl MeshBuilder {
 enum Surface {
     Plane(Placement),
     Cylinder(Placement, f64),
+    Sphere(Placement, f64),
 }
 
 /// Import every `MANIFOLD_SOLID_BREP` in the file as a mesh.
@@ -226,11 +227,24 @@ fn import_face(
             set,
             set.entity(id, "PLANE")?.params[1].as_ref_id()?,
         )?),
-        id => {
+        id if set.get(id)?.name == "CYLINDRICAL_SURFACE" => {
             let e = set.entity(id, "CYLINDRICAL_SURFACE")?;
             let pl = placement(set, e.params[1].as_ref_id()?)?;
             let radius = e.params[2].as_f64()?;
             Surface::Cylinder(pl, radius)
+        }
+        id if set.get(id)?.name == "SPHERICAL_SURFACE" => {
+            let e = set.entity(id, "SPHERICAL_SURFACE")?;
+            let pl = placement(set, e.params[1].as_ref_id()?)?;
+            let radius = e.params[2].as_f64()?;
+            Surface::Sphere(pl, radius)
+        }
+        id => {
+            return Err(format!(
+                "unsupported surface '#{}' ({}) — this reader covers                  planes, cylinders and spheres",
+                id,
+                set.get(id)?.name
+            ))
         }
     };
     let bounds = face.params[1].as_list()?;
@@ -247,7 +261,230 @@ fn import_face(
         Surface::Cylinder(pl, radius) => {
             import_cylindrical_face(pl, *radius, &loops, same_sense, deflection, builder)
         }
+        Surface::Sphere(pl, radius) => {
+            import_spherical_face(pl, *radius, &loops, same_sense, deflection, builder)
+        }
     }
+}
+
+/// Sagitta-rule angular step: the arc whose chord sags one
+/// deflection on the given radius.
+fn step_angle_for(radius: f64, deflection: f64) -> f64 {
+    let ratio = (1.0 - deflection / radius).clamp(-1.0, 1.0);
+    2.0 * ratio.acos().max(1e-3)
+}
+
+/// Latitude/longitude bands over the whole sphere (mirroring the
+/// kernel's own sphere tessellation): `segments` meridians,
+/// `bands` latitudes, two triangles per cell.
+fn emit_latlong_bands(
+    builder: &mut MeshBuilder,
+    pl: &Placement,
+    radius: f64,
+    segments: usize,
+    bands: usize,
+    flip: bool,
+) {
+    let pi = std::f64::consts::PI;
+    let second_v = second(pl);
+    let world = |theta: f64, phi: f64| -> Vector3 {
+        // The poles are ONE point, bit-exact for every meridian:
+        // sin(pi) is 1.2e-16, and a per-meridian sprinkling of
+        // last-bit pole copies would pepper the cap with micro
+        // edges the exact-weld cannot pair.
+        if phi <= 0.0 {
+            return Vector3::new(
+                pl.origin.x + radius * pl.axis.x,
+                pl.origin.y + radius * pl.axis.y,
+                pl.origin.z + radius * pl.axis.z,
+            );
+        }
+        if phi >= std::f64::consts::PI {
+            return Vector3::new(
+                pl.origin.x - radius * pl.axis.x,
+                pl.origin.y - radius * pl.axis.y,
+                pl.origin.z - radius * pl.axis.z,
+            );
+        }
+        let (st, ct) = (theta.sin(), theta.cos());
+        let (sp, cp) = (phi.sin(), phi.cos());
+        let radial = Vector3::new(
+            ct * pl.ref_dir.x + st * second_v.x,
+            ct * pl.ref_dir.y + st * second_v.y,
+            ct * pl.ref_dir.z + st * second_v.z,
+        );
+        Vector3::new(
+            pl.origin.x + radius * (sp * radial.x + cp * pl.axis.x),
+            pl.origin.y + radius * (sp * radial.y + cp * pl.axis.y),
+            pl.origin.z + radius * (sp * radial.z + cp * pl.axis.z),
+        )
+    };
+    let area2_ok = |a: Vector3, b: Vector3, c: Vector3| -> bool {
+        // Twice the area must clear a degeneracy bar of the cell's
+        // own scale (the pole cells carry one zero-area triangle by
+        // construction and one real one — each decides for itself).
+        (b - a).cross(&(c - a)).length() > 1e-18 * radius.max(1.0)
+    };
+    for b in 0..bands {
+        let f0 = b as f64 / bands as f64 * pi;
+        let f1 = (b + 1) as f64 / bands as f64 * pi;
+        for i in 0..segments {
+            let t0 = i as f64 / segments as f64 * std::f64::consts::TAU;
+            let t1 = (i + 1) as f64 / segments as f64 * std::f64::consts::TAU;
+            let (p00, p10, p01, p11) = (world(t0, f0), world(t1, f0), world(t0, f1), world(t1, f1));
+            if flip {
+                if area2_ok(p00, p10, p11) {
+                    builder.tri(p00, p10, p11);
+                }
+                if area2_ok(p00, p11, p01) {
+                    builder.tri(p00, p11, p01);
+                }
+            } else {
+                if area2_ok(p00, p11, p10) {
+                    builder.tri(p00, p11, p10);
+                }
+                if area2_ok(p00, p01, p11) {
+                    builder.tri(p00, p01, p11);
+                }
+            }
+        }
+    }
+}
+
+/// A spherical face. The whole-sphere case — one face, one seam
+/// loop, both poles — is the shape FreeCAD's `Part::Sphere` exports;
+/// partial patches ear-clip in the unwrapped (θ, φ) plane the same
+/// way the cylinder's partial turn does.
+fn import_spherical_face(
+    pl: &Placement,
+    radius: f64,
+    loops: &[Vec<Vector3>],
+    same_sense: bool,
+    deflection: f64,
+    builder: &mut MeshBuilder,
+) -> Result<(), String> {
+    if radius <= 0.0 {
+        return Err(format!("spherical face with radius {radius}"));
+    }
+    let to_params = |p: &Vector3| -> (f64, f64) {
+        let d = Vector3::new(p.x - pl.origin.x, p.y - pl.origin.y, p.z - pl.origin.z);
+        let x = d.x * pl.ref_dir.x + d.y * pl.ref_dir.y + d.z * pl.ref_dir.z;
+        let y = d.x * second(pl).x + d.y * second(pl).y + d.z * second(pl).z;
+        let z = d.x * pl.axis.x + d.y * pl.axis.y + d.z * pl.axis.z;
+        let rho = (x * x + y * y).sqrt();
+        (y.atan2(x), rho.atan2(z))
+    };
+    let world = |theta: f64, phi: f64| -> Vector3 {
+        let (st, ct) = (theta.sin(), theta.cos());
+        let (sp, cp) = (phi.sin(), phi.cos());
+        let radial = Vector3::new(
+            ct * pl.ref_dir.x + st * second(pl).x,
+            ct * pl.ref_dir.y + st * second(pl).y,
+            ct * pl.ref_dir.z + st * second(pl).z,
+        );
+        Vector3::new(
+            pl.origin.x + radius * (sp * radial.x + cp * pl.axis.x),
+            pl.origin.y + radius * (sp * radial.y + cp * pl.axis.y),
+            pl.origin.z + radius * (sp * radial.z + cp * pl.axis.z),
+        )
+    };
+
+    // Parameter extents over every loop point.
+    let mut phi_min = f64::INFINITY;
+    let mut phi_max = f64::NEG_INFINITY;
+    let mut thetas: Vec<f64> = Vec::new();
+    for l in loops {
+        for p in l {
+            let (theta, phi) = to_params(p);
+            thetas.push(theta);
+            phi_min = phi_min.min(phi);
+            phi_max = phi_max.max(phi);
+        }
+    }
+    // A spherical face whose every bound is degenerate is the whole
+    // sphere: FreeCAD writes `Part::Sphere` as one face with a single
+    // VERTEX_LOOP at a pole — the surface itself is the domain.
+    if thetas.is_empty() {
+        let flip = !same_sense;
+        let segments = ((std::f64::consts::TAU / step_angle_for(radius, deflection)).ceil()
+            as usize)
+            .clamp(8, 4096);
+        let pi = std::f64::consts::PI;
+        let bands = ((pi / step_angle_for(radius, deflection)).ceil() as usize)
+            .clamp(4, 2048)
+            .max(2);
+        emit_latlong_bands(builder, pl, radius, segments, bands, flip);
+        return Ok(());
+    }
+    thetas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let step_angle = step_angle_for(radius, deflection);
+    let mut max_gap: f64 = 0.0;
+    if thetas.len() >= 2 {
+        for w in thetas.windows(2) {
+            max_gap = max_gap.max(w[1] - w[0]);
+        }
+        max_gap = max_gap.max(thetas[0] + std::f64::consts::TAU - thetas[thetas.len() - 1]);
+    }
+    let pi = std::f64::consts::PI;
+    let whole_sphere = phi_min <= 1e-9 && phi_max >= pi - 1e-9 && max_gap < step_angle * 1.5;
+    if whole_sphere {
+        let segments = ((std::f64::consts::TAU / step_angle).ceil() as usize).clamp(8, 4096);
+        let bands = ((pi / step_angle).ceil() as usize).clamp(4, 2048).max(2);
+        emit_latlong_bands(builder, pl, radius, segments, bands, !same_sense);
+        return Ok(());
+    }
+
+    // Partial patch: unwrap θ (shift by the biggest gap so the loop
+    // does not straddle the wrap), then ear-clip in the scaled
+    // (θ, φ) plane. The metric is exact at the patch's own latitudes
+    // to the extent the plane can carry it — patches are small.
+    let mut rings: Vec<Vec<Point2>> = loops
+        .iter()
+        .filter(|l| l.len() >= 3)
+        .map(|l| {
+            let mut ring: Vec<Point2> = l
+                .iter()
+                .map(|p| {
+                    let (theta, phi) = to_params(p);
+                    Point2 {
+                        x: theta * radius,
+                        y: phi * radius,
+                    }
+                })
+                .collect();
+            if ring.len() > 1 && ring[0] == ring[ring.len() - 1] {
+                ring.pop();
+            }
+            ring
+        })
+        .filter(|r| r.len() >= 3)
+        .collect();
+    if rings.is_empty() {
+        return Err("spherical face's loops all degenerate".to_string());
+    }
+    rings.sort_by(|a, b| ring_area(a).abs().total_cmp(&ring_area(b).abs()).reverse());
+    let outer = rings.remove(0);
+    let triangles = triangulate_planar_region(&outer, &rings)
+        .map_err(|e| format!("spherical face triangulation failed: {e}"))?;
+    let flip = !same_sense;
+    let mut all_pts: Vec<Point2> = outer;
+    for r in &rings {
+        all_pts.extend(r.iter().copied());
+    }
+    for t in triangles {
+        let to3 = |p: &Point2| world(p.x / radius, p.y / radius);
+        let (a, b, c) = (
+            to3(&all_pts[t[0] as usize]),
+            to3(&all_pts[t[1] as usize]),
+            to3(&all_pts[t[2] as usize]),
+        );
+        if flip {
+            builder.tri(a, c, b);
+        } else {
+            builder.tri(a, b, c);
+        }
+    }
+    Ok(())
 }
 
 /// A `FACE_OUTER_BOUND` (or `FACE_BOUND`) → sampled 3D polyline.
@@ -272,6 +509,10 @@ fn face_bound_loop(
     };
     let loop_entity = set.get(loop_id)?;
     let mut points = match loop_entity.name.as_str() {
+        // A degenerate boundary (a sphere's pole, a cone's apex): one
+        // vertex, no edges — its face's geometry is the surface, not
+        // the loop, so it samples nothing here.
+        "VERTEX_LOOP" => Vec::new(),
         "POLY_LOOP" => {
             let mut pts = Vec::new();
             let list = loop_entity
@@ -345,9 +586,9 @@ fn face_bound_loop(
     if !orientation {
         points.reverse();
     }
-    if points.len() < 3 {
-        return Err(format!("loop #{loop_id} degenerates to < 3 points"));
-    }
+    // A degenerate loop (its face's whole boundary is a vertex — a
+    // sphere written as one face over its full surface) samples to
+    // nothing; the FACE's geometry then decides what it covers.
     Ok(points)
 }
 
