@@ -997,7 +997,12 @@ fn info(file: &str) -> Result<(), String> {
 }
 
 fn stats(file: &str) -> Result<(), String> {
-    let (doc, _) = load(file)?;
+    let (mut doc, _) = load(file)?;
+    // Parametric features reload Touched (the writer persists
+    // parameters, not shapes — a real FreeCAD restores solely OCCT
+    // BRep), so their geometry is one recompute away.
+    doc.recompute_all()
+        .map_err(|e| format!("recompute failed: {e}"))?;
     let mut total_volume = 0.0;
     for s in doc.summary() {
         let Some(obj) = doc.get(s.id) else { continue };
@@ -1096,14 +1101,13 @@ fn placed_meshes(file: &str, deflection: f64) -> Result<Vec<(String, Mesh)>, Str
         let Some(mut mesh) = mesh_of(obj, deflection) else {
             continue;
         };
-        // Primitives keep their shape at the origin: their `Placement`
-        // property is applied here, at export time. Part::Transform and
-        // the booleans already bake geometry into the computed mesh —
+        // Primitives keep their shape in local coordinates: their
+        // `Placement` property is applied here, at export time — the
+        // FreeCAD rule. Booleans/mirrors bake their *operands'* placements
+        // during execute; their own `Placement` still applies here.
+        // Only `Part::Transform` bakes its own Placement into the mesh —
         // re-applying would double the transform.
-        if !matches!(
-            obj.type_name(),
-            "Part::Transform" | "Part::Cut" | "Part::Fuse" | "Part::Common"
-        ) {
+        if obj.type_name() != "Part::Transform" {
             if let Some(Property::Placement(p)) = obj.properties().get("Placement") {
                 mesh.transform(&p.to_matrix());
             }

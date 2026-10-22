@@ -6,14 +6,14 @@
 //! dimensions are `App::PropertyFloat`, `Placement` is
 //! `App::PropertyPlacement`, `Source` is `App::PropertyLink`).
 //!
-//! Honest limitation (mirroring the kernel's scope): the primitives'
-//! `Placement` is carried as a persisted, editable document property but
-//! the analytic `TopoShape` itself is always built in the canonical
-//! position documented in [`crate::shape`]; consumers that need placed
-//! geometry go through [`TransformFeature`] or `Mesh::transformed`.
+//! Honest scope note: the primitives' `Placement` positions their
+//! local shape in global space at consumption time
+//! ([`placed_mesh_of`]) — the same rule FreeCAD applies when it hands
+//! out `Part::Feature::Shape`. `Part::Transform` is the one exception:
+//! it bakes its Placement (and Scale) into the computed mesh itself.
 
 use fc_app::{impl_document_object, Document, DocumentObject, Property, PropertyContainer};
-use fc_base::Placement;
+use fc_base::{Placement, Vector3};
 
 use crate::shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
 
@@ -366,7 +366,7 @@ impl BooleanFeature {
                 let object = doc
                     .get_by_name(&target)
                     .ok_or_else(|| format!("{type_name} '{name}': {key} '{target}' not found"))?;
-                mesh_of(object, DEFAULT_DEFLECTION).ok_or_else(|| {
+                placed_mesh_of(object, DEFAULT_DEFLECTION).ok_or_else(|| {
                     format!(
                         "{type_name} '{name}': {key} '{target}' has no computed geometry \
                      (not a part feature, or not yet recomputed)"
@@ -418,6 +418,172 @@ impl DocumentObject for BooleanFeature {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+}
+
+/// FreeCAD `Part::MultiFuse` (`Mod/Part/App/FeaturePartFuse.cpp`): a
+/// boolean union over a `Shapes` link list, in list order. FreeCAD
+/// hands the operands to OCCT's multi-fuse in one call; this kernel
+/// folds the pairwise BSP union left-to-right, which reaches the same
+/// solid for well-behaved operands (volumes agree to tessellation
+/// resolution).
+pub struct MultiFuseFeature {
+    pub container: PropertyContainer,
+    /// Union result mesh, set by `execute_impl`.
+    pub result: Option<Mesh>,
+}
+
+impl MultiFuseFeature {
+    /// Properties: `Shapes` (LinkList, required), `Refine` (Bool, false),
+    /// `Placement` identity — FreeCAD's set.
+    pub fn new(name: &str) -> Self {
+        let mut container = PropertyContainer::new(name);
+        container.set("Shapes", Property::LinkList(Vec::new()));
+        container.set("Refine", Property::Bool(false));
+        container.set("Placement", Property::Placement(Placement::IDENTITY));
+        Self {
+            container,
+            result: None,
+        }
+    }
+
+    fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
+        let type_name = "Part::MultiFuse";
+        let name = self.container.name().to_string();
+        let targets = match self.container.get("Shapes") {
+            Some(Property::LinkList(list)) if !list.is_empty() => list.clone(),
+            _ => {
+                return Err(format!(
+                    "{type_name} '{name}': Shapes must link to at least one document object"
+                ))
+            }
+        };
+        let mut meshes = Vec::with_capacity(targets.len());
+        for target in &targets {
+            let object = doc.get_by_name(target).ok_or_else(|| {
+                format!("{type_name} '{name}': Shapes entry '{target}' not found")
+            })?;
+            meshes.push(placed_mesh_of(object, DEFAULT_DEFLECTION).ok_or_else(|| {
+                format!(
+                    "{type_name} '{name}': Shapes entry '{target}' has no computed geometry \
+                     (not a part feature, or not yet recomputed)"
+                )
+            })?);
+        }
+        let mut accumulated = meshes.remove(0);
+        for next in &meshes {
+            accumulated = crate::boolean::fuse(&accumulated, next);
+        }
+        self.result = Some(accumulated);
+        Ok(())
+    }
+}
+
+impl_document_object!(MultiFuseFeature, "Part::MultiFuse");
+
+/// FreeCAD `Part::Mirroring` (`Mod/Part/App/FeatureMirroring.cpp`):
+/// reflects the `Source` shape through the plane given by `Base`
+/// (point) and `Normal` (direction). FreeCAD's optional `MirrorPlane`
+/// link (a face/datum overriding Base+Normal) has no geometry to read
+/// in this kernel — an error names it honestly instead of guessing.
+///
+/// Mirroring flips orientation, so the reflected mesh's triangles are
+/// re-wound to keep outward normals (FreeCAD/OCCT handles this inside
+/// `BRepBuilderAPI_Transform` with the mirror flag).
+pub struct MirroringFeature {
+    pub container: PropertyContainer,
+    /// Mirrored result mesh, set by `execute_impl`.
+    pub result: Option<Mesh>,
+}
+
+impl MirroringFeature {
+    /// Properties: `Source` (Link, required), `Base` (Vector, origin),
+    /// `Normal` (Vector, +Z), `Placement` identity — FreeCAD's set
+    /// (`MirrorPlane` omitted; see the struct docs).
+    pub fn new(name: &str) -> Self {
+        let mut container = PropertyContainer::new(name);
+        container.set("Source", Property::Link(String::new()));
+        container.set("Base", Property::Vector(Vector3::ZERO));
+        container.set("Normal", Property::Vector(Vector3::new(0.0, 0.0, 1.0)));
+        container.set("Placement", Property::Placement(Placement::IDENTITY));
+        Self {
+            container,
+            result: None,
+        }
+    }
+
+    fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
+        let type_name = "Part::Mirroring";
+        let name = self.container.name().to_string();
+        let source = match self.container.get("Source") {
+            Some(Property::Link(target)) if !target.is_empty() => target.clone(),
+            _ => {
+                return Err(format!(
+                    "{type_name} '{name}': Source must link to a document object"
+                ))
+            }
+        };
+        let base = match self.container.get("Base") {
+            Some(Property::Vector(v)) => *v,
+            _ => return Err(format!("{type_name} '{name}': missing property 'Base'")),
+        };
+        let mut normal = match self.container.get("Normal") {
+            Some(Property::Vector(v)) => *v,
+            _ => return Err(format!("{type_name} '{name}': missing property 'Normal'")),
+        };
+        let length = (normal.x * normal.x + normal.y * normal.y + normal.z * normal.z).sqrt();
+        if !length.is_finite() || length <= 1e-12 {
+            return Err(format!(
+                "{type_name} '{name}': Normal must be a non-zero direction"
+            ));
+        }
+        normal = Vector3::new(normal.x / length, normal.y / length, normal.z / length);
+
+        let object = doc
+            .get_by_name(&source)
+            .ok_or_else(|| format!("{type_name} '{name}': Source '{source}' not found"))?;
+        let mesh = placed_mesh_of(object, DEFAULT_DEFLECTION).ok_or_else(|| {
+            format!(
+                "{type_name} '{name}': Source '{source}' has no computed geometry \
+                 (not a part feature, or not yet recomputed)"
+            )
+        })?;
+
+        // Reflect v through the plane (base, n): v' = v - 2 (n . (v - b)) n
+        let mut reflected = Vec::with_capacity(mesh.vertices.len());
+        for v in &mesh.vertices {
+            let d =
+                normal.x * (v.x - base.x) + normal.y * (v.y - base.y) + normal.z * (v.z - base.z);
+            reflected.push(Vector3::new(
+                v.x - 2.0 * d * normal.x,
+                v.y - 2.0 * d * normal.y,
+                v.z - 2.0 * d * normal.z,
+            ));
+        }
+        // A reflection reverses handedness: swap two indices per triangle
+        // so the windings stay outward.
+        let triangles = mesh.triangles.iter().map(|t| [t[0], t[2], t[1]]).collect();
+        self.result = Some(Mesh::new(reflected, triangles));
+        Ok(())
+    }
+}
+
+impl_document_object!(MirroringFeature, "Part::Mirroring");
+
+/// The operand geometry of `object` with its own `Placement` applied —
+/// the rule FreeCAD applies when a consumer asks for a shape: local
+/// shape in global space. Objects whose `execute` already bakes the
+/// transform into the computed mesh (`Part::Transform`) skip the second
+/// application; the boolean/mirror family bakes its *operands'*
+/// placements but keeps its own `Placement` for consumers, exactly as
+/// FreeCAD positions a `Part::Cut` result.
+pub fn placed_mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
+    let mut mesh = mesh_of(obj, deflection)?;
+    if obj.type_name() != "Part::Transform" {
+        if let Some(Property::Placement(p)) = obj.properties().get("Placement") {
+            mesh.transform(&p.to_matrix());
+        }
+    }
+    Some(mesh)
 }
 
 /// `Part::Feature` — FreeCAD's generic shape carrier: imported geometry
@@ -498,6 +664,12 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
     let any = obj.as_any();
     if let Some(f) = any.downcast_ref::<MeshFeature>() {
         return f.shape.as_ref().map(|s| s.tessellate(deflection));
+    }
+    if let Some(f) = any.downcast_ref::<MultiFuseFeature>() {
+        return f.result.clone();
+    }
+    if let Some(f) = any.downcast_ref::<MirroringFeature>() {
+        return f.result.clone();
     }
     if let Some(f) = any.downcast_ref::<BoxFeature>() {
         return f.shape.as_ref().map(|s| s.tessellate(deflection));

@@ -1,4 +1,4 @@
-Part::Box Zoo Valid
+Part::Box Zoo Touched
   AColor = #FF0000
   AConstraint = 7
   ADistance = 3.25

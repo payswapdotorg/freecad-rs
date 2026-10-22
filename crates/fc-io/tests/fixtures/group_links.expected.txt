@@ -4,7 +4,7 @@ App::DocumentGroup Outer Valid
 App::DocumentGroup Nested Valid
   Group = LeafBox
   Label = Nested
-Part::Box LeafBox Valid
+Part::Box LeafBox Touched
   Label = LeafBox
   Length = 4
 App::Link LinkLeaf Valid

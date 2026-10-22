@@ -287,13 +287,13 @@ impl PocketFeature {
         let base_object = doc
             .get_by_name(&base_target)
             .ok_or_else(|| format!("{type_name} '{name}': Base '{base_target}' not found"))?;
-        let base = crate::features::mesh_of(base_object, crate::shape::DEFAULT_DEFLECTION)
+        let base = crate::features::placed_mesh_of(base_object, crate::shape::DEFAULT_DEFLECTION)
             .ok_or_else(|| {
-                format!(
-                    "{type_name} '{name}': Base '{base_target}' has no computed geometry \
+            format!(
+                "{type_name} '{name}': Base '{base_target}' has no computed geometry \
                      (not a part feature, or not yet recomputed)"
-                )
-            })?;
+            )
+        })?;
 
         let wires = profile_wires(&self.container, type_name, doc)?;
         let direction = if inverted {
@@ -671,7 +671,17 @@ mod tests {
     #[test]
     fn pocket_cuts_a_notch_out_of_a_box() {
         let mut doc = Document::new("test");
-        doc.add(Box::new(BoxFeature::new("Body")));
+        let mut body = BoxFeature::new("Body");
+        // Real-assembly geometry: the box (corner-origin `[0, 10]³`,
+        // FreeCAD 1.0 convention) is centered under the sketch.
+        body.container.set(
+            "Placement",
+            Property::Placement(Placement::new(
+                Vector3::new(-5.0, -5.0, 0.0),
+                fc_base::Rotation::IDENTITY,
+            )),
+        );
+        doc.add(Box::new(body));
         doc.add(Box::new(SketchObject::with_sketch(
             "Sketch",
             centered_square_sketch(2.0),
@@ -739,9 +749,10 @@ mod tests {
 
     #[test]
     fn pocket_without_base_link_is_an_honest_dangling_dependency() {
-        // Through the recompute loop an unset Base is a dangling link:
-        // the run aborts before the pocket executes (the repo's honest
-        // MissingLink semantics), and the pocket stays Touched.
+        // An unset Base is an empty link — "no link" in FreeCAD terms
+        // (real files carry them for optional links), so the graph walk
+        // no longer rejects it; the pocket's own execute reports the
+        // missing required base and the object lands in Error.
         let mut doc = Document::new("test");
         doc.add(Box::new(SketchObject::with_sketch(
             "Sketch",
@@ -751,11 +762,14 @@ mod tests {
         doc.set_property("Pocket", "Profile", Property::Link("Sketch".into()))
             .unwrap();
         let err = doc.recompute_all().expect_err("Base is required");
-        assert!(err.to_string().contains("links to missing object"), "{err}");
-        assert_eq!(
-            *doc.get_by_name("Pocket").unwrap().status(),
-            ObjectStatus::Touched
-        );
+        assert!(err.to_string().contains("Base must link"), "{err}");
+        // The failed execute marks the pocket Error (FreeCAD behavior:
+        // a feature that fails recompute is flagged, its dependents
+        // stop), not merely Touched.
+        assert!(matches!(
+            doc.get_by_name("Pocket").unwrap().status(),
+            ObjectStatus::Error(_)
+        ));
 
         // The feature-level message surfaces on a direct execute (the
         // validation the CLI and future API callers hit first; the

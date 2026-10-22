@@ -9,6 +9,11 @@ parametric 3D modeler. This repo is a **clean-room reimplementation of
 its architectural core** in safe Rust — a headless CAD core + CLI, not
 a GUI, not a full CAD kernel, and honest about both:
 
+**Same as FreeCAD?** The parity matrix — verified against the real
+FreeCAD 1.0 binaries in both directions (files, geometry semantics,
+placements, sketches) — lives in
+[`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md).
+
 > ⚠️ **Not affiliated with or endorsed by the FreeCAD project.** FreeCAD
 > is LGPL-2.1 software by the FreeCAD community. This project
 > reimplements its *architecture and file format* from scratch; no

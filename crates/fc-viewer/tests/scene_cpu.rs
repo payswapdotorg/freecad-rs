@@ -119,11 +119,11 @@ fn missing_file_and_bad_view_error_honestly() {
 fn error_doc_scene_flags_the_broken_object_with_geometry() {
     let (path, broken) = common::error_doc();
     let scene = build_scene(path.to_string_lossy().as_ref()).expect("error doc loads");
-    // A loaded document's objects are not Touched, so the load-time
-    // recompute is a no-op — the failure state arrives via the
-    // *persisted* Error status (FreeCAD persists object errors in the
-    // file; loading shows them). The flag, not a fresh recompute
-    // failure, is what the viewer must render honestly.
+    // The writer persists the last-good geometry of an errored feature
+    // (exactly what a real FreeCAD's file carries), so the broken
+    // object loads with its shape and its Error status — nothing is
+    // Touched, the load-time recompute is a no-op, and the flag, not a
+    // fresh recompute failure, is what the viewer renders honestly.
     assert!(
         scene.recompute_error.is_none(),
         "load-time recompute must be a no-op (nothing Touched)"

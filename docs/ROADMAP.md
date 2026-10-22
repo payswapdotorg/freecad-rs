@@ -10,6 +10,17 @@ Honest, incremental, no vaporware.
 
 ## Done
 
+- [x] **FC-16 / parity** "Same as FreeCAD" — verified against the real
+      FreeCAD 1.0 binaries (AppImage r39109) both directions: the
+      kernel's primitive conventions now match FreeCAD's own
+      (corner-origin box, base-on-XY cylinder/cone — checked with
+      `Shape.BoundBox`); booleans consume placed operands; `Part::
+      MultiFuse` and `Part::Mirroring` load and execute; real-FreeCAD
+      files restore (nested `LinkList`s, `LinkSub` profiles, sketch
+      `GeometryList`, quantity-typed dimensions, empty links); our
+      files restore in real FreeCAD (parameters, links, placements,
+      sketches — one touch+recompute rebuilds natively in OCCT).
+      The full matrix: [`docs/EQUIVALENCE.md`](EQUIVALENCE.md).
 - [x] Workspace scaffold + CI (build, test, clippy, fmt — the test step
       + `work/**` push triggers were added in FC-5)
 - [x] `fc-base`: vectors, quaternions, matrices, placements, bounding boxes

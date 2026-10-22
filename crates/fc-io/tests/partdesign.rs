@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fc_app::{Document, ObjectStatus, Property};
+use fc_base::{Placement, Rotation, Vector3};
 use fc_io::{load_document, load_document_with_hook, save_document};
 use fc_part::features::BoxFeature;
 use fc_part::mesh_of;
@@ -133,6 +134,19 @@ fn partdesign_document() -> Document {
         .unwrap();
 
     doc.add(Box::new(BoxFeature::new("Body")));
+    // Real-assembly geometry: the 10×10×10 base box sits centered
+    // under the pocket sketch — `Part::Box` occupies its corner-origin
+    // `[0, 10]³` now (FreeCAD 1.0 convention, verified against the
+    // AppImage), so the placement moves it to `[-5, 5] × [-5, 5]`.
+    doc.set_property(
+        "Body",
+        "Placement",
+        Property::Placement(Placement::new(
+            Vector3::new(-5.0, -5.0, 0.0),
+            Rotation::IDENTITY,
+        )),
+    )
+    .unwrap();
     doc.add(Box::new(SketchObject::with_sketch(
         "PocketSketch",
         rectangle_at(-2.0, -2.0, 4.0, 4.0),
@@ -208,10 +222,21 @@ fn partdesign_document_round_trips_with_links_and_geometry() {
     let actual: Vec<(&str, &str)> = rows.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
     assert_eq!(actual, expected);
     for (name, _) in &rows {
+        let expected = if matches!(
+            loaded.get_by_name(name).unwrap().type_name(),
+            "PartDesign::Pad" | "PartDesign::Pocket" | "PartDesign::Revolution" | "Part::Box"
+        ) {
+            // Parametric features reload Touched: the writer persists
+            // parameters only (real FreeCAD restores solely OCCT BRep),
+            // so the first recompute rebuilds their geometry.
+            ObjectStatus::Touched
+        } else {
+            ObjectStatus::Valid
+        };
         assert_eq!(
             *loaded.get_by_name(name).unwrap().status(),
-            ObjectStatus::Valid,
-            "{name} must reload as Valid"
+            expected,
+            "{name} status after reload"
         );
     }
 
@@ -245,7 +270,11 @@ fn partdesign_document_round_trips_with_links_and_geometry() {
         .dependents_of("PocketSketch")
         .contains(&"Pocket".to_string()));
 
-    // Computed geometry survived (FCBREP stores full f64 vertices).
+    // Computed geometry rebuilds on the reload recompute (parameters,
+    // links and placements are the persisted truth — like a real
+    // FreeCAD, whose engine rebuilds what it cannot restore).
+    let mut loaded = loaded;
+    loaded.recompute_all().expect("reload recompute");
     let volumes_after = (
         volume_of(&loaded, "Pad"),
         volume_of(&loaded, "Pocket"),
@@ -314,9 +343,11 @@ fn replacing_sketch_content_propagates_to_the_pad() {
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert!(replaced.get(), "the hook found the sketch");
 
-    // The recompute re-solves the sketch and re-executes the pad: the
-    // volume scales with the new width (30 x 10 x 10), proving the
-    // sketch -> feature dependency edge works end-to-end.
+    // The recompute re-solves the sketch and re-executes the pad (the
+    // volume scales with the new width, 30 x 10 x 10): the sketch ->
+    // feature dependency edge works end-to-end. The other parametric
+    // features reload Touched (no shape payloads — FreeCAD restores
+    // only OCCT BRep), so they rebuild in the same pass.
     let recomputed = reloaded.recompute_all().expect("propagated recompute");
     let names: Vec<&str> = recomputed
         .iter()
@@ -324,7 +355,7 @@ fn replacing_sketch_content_propagates_to_the_pad() {
         .collect();
     assert_eq!(
         names,
-        vec!["RectSketch", "Pad"],
+        vec!["RectSketch", "Pad", "Body", "Pocket", "Revolution"],
         "the cascade ran exactly these"
     );
     assert!(

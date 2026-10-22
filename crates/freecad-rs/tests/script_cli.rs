@@ -148,13 +148,18 @@ fn example_script_builds_document_with_exact_stats() {
         height.starts_with("60\n") && height.contains("(bound to expression: 2 * Base.Length)"),
         "bound height reads back as 60: {height}"
     );
+    // The script session saves after a full recompute, so the objects
+    // persist as Valid — but geometry is not among the persisted bytes
+    // (a real FreeCAD restores solely OCCT BRep; parameters are the
+    // truth), so a fresh `list` shows the features Touched for their
+    // rebuild recompute.
     let list = run_in(None, &["list", file]);
     assert!(
-        list.contains("Base    Part::Box       Valid"),
+        list.contains("Base    Part::Box       Touched"),
         "list:\n{list}"
     );
     assert!(
-        list.contains("Lift    Part::Transform Valid"),
+        list.contains("Lift    Part::Transform Touched"),
         "list:\n{list}"
     );
     std::fs::remove_dir_all(&dir).ok();

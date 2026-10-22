@@ -122,12 +122,13 @@ fn bbox_is_exact_and_transform_translation_shifts_it_exactly() {
         let box1 = doc.add_box(\"Base\", 30.0, 20.0, 5.0);
         doc.recompute();
         let bb = doc.bbox(box1);
-        // Part::Box: centered in XY, sitting on the XY plane.
-        expect(bb.min[0], -15.0, \"bb min x\");
-        expect(bb.min[1], -10.0, \"bb min y\");
+        // Part::Box (FreeCAD 1.0): corner at the origin —
+        // [0, 30] x [0, 20] x [0, 5].
+        expect(bb.min[0], 0.0, \"bb min x\");
+        expect(bb.min[1], 0.0, \"bb min y\");
         expect(bb.min[2], 0.0, \"bb min z\");
-        expect(bb.max[0], 15.0, \"bb max x\");
-        expect(bb.max[1], 10.0, \"bb max y\");
+        expect(bb.max[0], 30.0, \"bb max x\");
+        expect(bb.max[1], 20.0, \"bb max y\");
         expect(bb.max[2], 5.0, \"bb max z\");
         expect(bb.size[0], 30.0, \"bb size x\");
         expect(bb.center[2], 2.5, \"bb center z\");

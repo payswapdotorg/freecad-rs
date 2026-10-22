@@ -3523,6 +3523,8 @@ mod tests {
         }
         .tessellate(DEFAULT_DEFLECTION);
         for v in &mut tool.vertices {
+            v.x -= 2.0;
+            v.y -= 2.0;
             v.z += 0.5;
         }
         let result = cut(&sphere, &tool);
@@ -3791,12 +3793,18 @@ mod tests {
         // answer.
         let pi = std::f64::consts::PI;
         let sphere = TopoShape::Sphere { radius: 1.0 }.tessellate(0.12);
-        let tool = TopoShape::Box {
+        let mut tool = TopoShape::Box {
             length: 4.0,
             width: 4.0,
             height: 2.0,
         }
         .tessellate(DEFAULT_DEFLECTION);
+        // The box's corner-origin span `[0, 4]²` (FreeCAD 1.0
+        // convention) recenters over the sphere.
+        for v in &mut tool.vertices {
+            v.x -= 2.0;
+            v.y -= 2.0;
+        }
         let half_sphere = 2.0 * pi / 3.0;
         let tolerance = derived_tolerance(&[&sphere], &[4.0 * pi / 3.0]);
         let result = cut(&sphere, &tool);
@@ -3815,6 +3823,8 @@ mod tests {
         }
         .tessellate(DEFAULT_DEFLECTION);
         for v in &mut tool.vertices {
+            v.x -= 2.0;
+            v.y -= 2.0;
             v.z += 0.5;
         }
         let h = 0.5_f64;
@@ -3835,11 +3845,16 @@ mod tests {
         // core is the spherical segment inside radius a,
         // (4*pi/3)*(1 - (1-a^2)^(3/2)).
         let pi = std::f64::consts::PI;
-        let cylinder = TopoShape::Cylinder {
+        let mut cylinder = TopoShape::Cylinder {
             radius: 0.6,
             height: 4.0,
         }
         .tessellate(0.1);
+        // The cylinder's base-on-XY span `[0, 4]` (FreeCAD 1.0
+        // convention) recenters over the sphere.
+        for v in &mut cylinder.vertices {
+            v.z -= 2.0;
+        }
         let sphere = TopoShape::Sphere { radius: 1.0 }.tessellate(0.1);
         let core = 4.0 * pi / 3.0 * (1.0 - (1.0 - 0.36_f64).powf(1.5));
         let tolerance =
@@ -3988,11 +4003,16 @@ mod tests {
     /// below builds, has no exact form — this construction keeps the
     /// classic ones.
     fn crossed_cylinders(deflection: f64) -> (Mesh, Mesh) {
-        let a = TopoShape::Cylinder {
+        let mut a = TopoShape::Cylinder {
             radius: 1.0,
             height: 4.0,
         }
         .tessellate(deflection);
+        // Base-on-XY span `[0, 4]` (FreeCAD 1.0 convention): center both
+        // cylinders on the origin so the bicylinder is fully contained.
+        for v in &mut a.vertices {
+            v.z -= 2.0;
+        }
         let mut b = TopoShape::Cylinder {
             radius: 1.0,
             height: 4.0,
@@ -4007,6 +4027,11 @@ mod tests {
             let z = v.y * s + v.z * c;
             v.y = y;
             v.z = z;
+        }
+        // The rotation carried the base-on-XY span into y ∈ [−4, 0]:
+        // recenter it as well, so both axes cross at the origin.
+        for v in &mut b.vertices {
+            v.y += 2.0;
         }
         (a, b)
     }
@@ -4506,10 +4531,13 @@ mod tests {
     fn boolean_coaxial_opposed_cones_hourglass() {
         let pi = std::f64::consts::PI;
         let deflection = 0.06;
-        let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+        // The cone's base-on-XY span `[0, 4]` (FreeCAD 1.0 convention)
+        // shifts down to `[-2, 2]` so the z-mirror opposes it apex to
+        // apex across z = 0.
+        let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, -2.0);
         // Mirror about z = 0 and repair the winding a reflection
         // reverses; the operand must stay outward-facing.
-        let mut b = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+        let mut b = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, -2.0);
         for v in &mut b.vertices {
             v.z = -v.z;
         }
@@ -4552,10 +4580,10 @@ mod tests {
     fn boolean_mirrored_cone_fine_deflections_close() {
         let pi = std::f64::consts::PI;
         for deflection in [0.06_f64, 0.05, 0.04, 0.03] {
-            let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+            let a = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, -2.0);
             // Mirror about z = 0 and repair the winding a reflection
             // reverses; the operand must stay outward-facing.
-            let mut b = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0);
+            let mut b = cone_at(deflection, 3.0, 0.0, 4.0, 0.0, 0.0, -2.0);
             for v in &mut b.vertices {
                 v.z = -v.z;
             }
@@ -4625,19 +4653,15 @@ mod parity_tests {
     #[test]
     fn boolean_corner_box_sphere_full_brep_contract() {
         let pi = std::f64::consts::PI;
-        let mut box10 = TopoShape::Box {
+        let box10 = TopoShape::Box {
             length: 10.0,
             width: 10.0,
             height: 10.0,
         }
         .tessellate(DEFAULT_DEFLECTION);
-        // Shift off the face center: the sphere then meets the box
-        // at its bottom corner — the transversal (non-coincident)
-        // curved seam.
-        for v in &mut box10.vertices {
-            v.x += 5.0;
-            v.y += 5.0;
-        }
+        // The box's corner-origin span `[0, 10]³` (FreeCAD 1.0
+        // convention) puts its bottom corner at the sphere's center:
+        // the transversal (non-coincident) curved seam.
         let sphere = TopoShape::Sphere { radius: 4.0 }.tessellate(DEFAULT_DEFLECTION);
         let octant = 4.0 / 3.0 * pi * 64.0 / 8.0; // inside the corner
         for (name, m, expected) in [
@@ -4672,12 +4696,18 @@ mod parity_tests {
     #[test]
     fn boolean_face_center_box_sphere_watertight_and_honest() {
         let pi = std::f64::consts::PI;
-        let box10 = TopoShape::Box {
+        let mut box10 = TopoShape::Box {
             length: 10.0,
             width: 10.0,
             height: 10.0,
         }
         .tessellate(DEFAULT_DEFLECTION);
+        // Recentre the corner-origin box (FreeCAD 1.0 convention) so
+        // the sphere's equator lies exactly in its bottom face.
+        for v in &mut box10.vertices {
+            v.x -= 5.0;
+            v.y -= 5.0;
+        }
         let sphere = TopoShape::Sphere { radius: 4.0 }.tessellate(DEFAULT_DEFLECTION);
         let half = 4.0 / 3.0 * pi * 64.0 / 2.0; // half the sphere
         for (name, m, expected) in [

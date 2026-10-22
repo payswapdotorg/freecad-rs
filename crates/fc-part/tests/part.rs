@@ -102,8 +102,8 @@ fn assert_outward_winding(mesh: &Mesh, inside: Vector3, what: &str) {
 
 #[test]
 fn box_analytic_invariants() {
-    // V = l*w*h, A = 2(lw + lh + wh); FreeCAD placement: centered in XY,
-    // sitting on the XY plane.
+    // V = l*w*h, A = 2(lw + lh + wh); FreeCAD 1.0 placement: the corner
+    // sits at the origin — [0, l] x [0, w] x [0, h].
     let s = TopoShape::Box {
         length: 3.0,
         width: 4.0,
@@ -113,8 +113,8 @@ fn box_analytic_invariants() {
     assert_rel(s.volume(), 60.0, "box volume");
     assert_rel(s.surface_area(), 2.0 * (12.0 + 15.0 + 20.0), "box area");
     let bbox = s.bbox();
-    assert_eq!(bbox.min, Vector3::new(-1.5, -2.0, 0.0));
-    assert_eq!(bbox.max, Vector3::new(1.5, 2.0, 5.0));
+    assert_eq!(bbox.min, Vector3::new(0.0, 0.0, 0.0));
+    assert_eq!(bbox.max, Vector3::new(3.0, 4.0, 5.0));
 
     // Mesh measures of a planar-faceted box are exact too.
     let mesh = s.tessellate(DEFAULT_DEFLECTION);
@@ -136,7 +136,8 @@ fn sphere_analytic_invariants() {
 
 #[test]
 fn cylinder_analytic_invariants() {
-    // V = pi r^2 h, A = 2 pi r^2 + 2 pi r h; along Z, centered.
+    // V = pi r^2 h, A = 2 pi r^2 + 2 pi r h; along Z, base on the XY
+    // plane (FreeCAD 1.0 convention).
     let (r, h) = (2.0, 7.0);
     let s = TopoShape::Cylinder {
         radius: r,
@@ -150,8 +151,8 @@ fn cylinder_analytic_invariants() {
         "cylinder area",
     );
     let bbox = s.bbox();
-    assert_eq!(bbox.min, Vector3::new(-r, -r, -h / 2.0));
-    assert_eq!(bbox.max, Vector3::new(r, r, h / 2.0));
+    assert_eq!(bbox.min, Vector3::new(-r, -r, 0.0));
+    assert_eq!(bbox.max, Vector3::new(r, r, h));
 }
 
 #[test]
@@ -187,10 +188,11 @@ fn cone_analytic_invariants() {
         PI * (r1 + r2) * lf + PI * r1 * r1 + PI * r2 * r2,
         "frustum area",
     );
-    // The widest ring bounds the frustum's horizontal extent.
+    // The widest ring bounds the frustum's horizontal extent; the base
+    // ring sits on the XY plane (FreeCAD 1.0 convention).
     let bbox = f.bbox();
-    assert_eq!(bbox.min, Vector3::new(-r1, -r1, -hf / 2.0));
-    assert_eq!(bbox.max, Vector3::new(r1, r1, hf / 2.0));
+    assert_eq!(bbox.min, Vector3::new(-r1, -r1, 0.0));
+    assert_eq!(bbox.max, Vector3::new(r1, r1, hf));
 }
 
 #[test]
@@ -370,18 +372,19 @@ fn box_tessellation_is_watertight_and_outward() {
     assert_eq!(mesh.vertex_count(), 8, "box vertices");
     assert_eq!(mesh.triangle_count(), 12, "box triangles");
     assert_watertight(&mesh, "box", 2);
-    // The FreeCAD box sits on the XY plane, centered in X and Y.
-    assert_outward_winding(&mesh, Vector3::new(0.0, 0.0, h / 2.0), "box");
-    // All 8 corners of [-l/2, l/2] x [-w/2, w/2] x [0, h] are present.
+    // The FreeCAD 1.0 box spans [0, l] x [0, w] x [0, h]; its center is
+    // the interior reference for the winding check.
+    assert_outward_winding(&mesh, Vector3::new(l / 2.0, w / 2.0, h / 2.0), "box");
+    // All 8 corners of [0, l] x [0, w] x [0, h] are present.
     let corners = [
-        (-l / 2.0, -w / 2.0, 0.0),
-        (l / 2.0, -w / 2.0, 0.0),
-        (l / 2.0, w / 2.0, 0.0),
-        (-l / 2.0, w / 2.0, 0.0),
-        (-l / 2.0, -w / 2.0, h),
-        (l / 2.0, -w / 2.0, h),
-        (l / 2.0, w / 2.0, h),
-        (-l / 2.0, w / 2.0, h),
+        (0.0, 0.0, 0.0),
+        (l, 0.0, 0.0),
+        (l, w, 0.0),
+        (0.0, w, 0.0),
+        (0.0, 0.0, h),
+        (l, 0.0, h),
+        (l, w, h),
+        (0.0, w, h),
     ];
     for (x, y, z) in corners {
         assert!(
@@ -789,8 +792,8 @@ fn features_execute_into_shapes_and_meshes() {
     );
 
     // Lift placed and scaled the source mesh: p -> 2 * (p + (10, 0, 5)).
-    // Base x in [-1, 1] -> [18, 22]; y in [-1.5, 1.5] -> [-3, 3];
-    // z in [0, 4] -> [10, 18]. Topology is untouched.
+    // Base is the FreeCAD 1.0 corner-origin box: x in [0, 2] -> [20, 24];
+    // y in [0, 3] -> [0, 6]; z in [0, 4] -> [10, 18]. Topology untouched.
     let lift_mesh =
         fc_part::mesh_of(doc.get_by_name("Lift").expect("lift"), 1.0).expect("lift mesh");
     assert_eq!(
@@ -799,8 +802,8 @@ fn features_execute_into_shapes_and_meshes() {
         "transform keeps triangle count"
     );
     let bbox = lift_mesh.bbox().expect("lift bbox");
-    assert_eq!(bbox.min, Vector3::new(18.0, -3.0, 10.0));
-    assert_eq!(bbox.max, Vector3::new(22.0, 3.0, 18.0));
+    assert_eq!(bbox.min, Vector3::new(20.0, 0.0, 10.0));
+    assert_eq!(bbox.max, Vector3::new(24.0, 6.0, 18.0));
 
     // The parametric cascade: growing Base's Length moves Lift's result
     // and keeps everything consistent after one recompute.
@@ -815,9 +818,9 @@ fn features_execute_into_shapes_and_meshes() {
     let lift_mesh =
         fc_part::mesh_of(doc.get_by_name("Lift").expect("lift"), 1.0).expect("lift mesh");
     let bbox = lift_mesh.bbox().expect("lift bbox");
-    // Base x now in [-2, 2] -> [16, 24].
-    assert_eq!(bbox.min, Vector3::new(16.0, -3.0, 10.0));
-    assert_eq!(bbox.max, Vector3::new(24.0, 3.0, 18.0));
+    // Base x now in [0, 4] (corner-origin) -> [20, 28].
+    assert_eq!(bbox.min, Vector3::new(20.0, 0.0, 10.0));
+    assert_eq!(bbox.max, Vector3::new(28.0, 6.0, 18.0));
     assert_eq!(base_id, doc.get_id("Base").expect("id stable"));
 
     // A transform whose Source dangles is caught by the graph walker

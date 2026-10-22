@@ -78,6 +78,13 @@ impl ScriptSession {
         // undoable history — the journal belongs to the file's session,
         // not this script run.
         doc.clear_history();
+        // Geometry is rebuilt, not restored: the writer persists
+        // parameters/links/placements (a real FreeCAD restores solely
+        // OCCT BRep), so every parametric feature reloads Touched —
+        // one recompute here and the script sees the same shapes the
+        // saver saw, the same experience FreeCAD's restored shapes give.
+        doc.recompute_all()
+            .map_err(|e| format!("recompute after open: {e}"))?;
         let count = doc.object_count();
         let session = Self {
             doc: Arc::new(Mutex::new(doc)),
@@ -456,10 +463,10 @@ impl ScriptSession {
                 let Some(mut mesh) = mesh_of(obj, fc_part::DEFAULT_DEFLECTION) else {
                     continue;
                 };
-                if !matches!(
-                    obj.type_name(),
-                    "Part::Transform" | "Part::Cut" | "Part::Fuse" | "Part::Common"
-                ) {
+                // FreeCAD rule: every object's own `Placement` positions
+                // its local shape; only `Part::Transform` bakes its own
+                // Placement into the computed mesh.
+                if obj.type_name() != "Part::Transform" {
                     if let Some(Property::Placement(p)) = obj.properties().get("Placement") {
                         mesh.transform(&p.to_matrix());
                     }

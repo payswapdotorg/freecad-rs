@@ -243,11 +243,20 @@ fn cli_pocket_cuts_a_notch_and_inverted_misses() {
 
     run(&["new", file]);
     run(&["add", file, "--name", "Body", "box"]);
+    // Real-assembly geometry: the corner-origin box (FreeCAD 1.0
+    // convention) is centered under the sketch.
+    run(&[
+        "set",
+        file,
+        "Body",
+        "Placement",
+        "pos=(-5,-5,0);axis=(0,0,1);angle=0",
+    ]);
     run(&["add", file, "--name", "Hole", "sketch"]);
     let square = rectangle_fragment(&dir.join("square.xml"), -2.0, -2.0, 4.0, 4.0);
     run(&["sketch-import", file, "Hole", &square]);
 
-    // 10 x 10 x 10 box minus a 4 x 4 x 4 notch from the bottom face.
+    // 10 x 10 x 10 box (now centered in XY) minus a 4 x 4 x 4 notch.
     let out = run(&[
         "pocket", file, "--sketch", "Hole", "--base", "Body", "--length", "4",
     ]);

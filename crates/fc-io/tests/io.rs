@@ -109,7 +109,7 @@ fn save_load_round_trip_preserves_everything() {
         shape_of(doc.get_by_name("Lift").expect("lift")).expect("lift computed a shape");
 
     let original_created = doc.created().to_string();
-    let original_summary = summary_pairs(&doc);
+    let _original_summary = summary_pairs(&doc);
     save_document(&doc, &path).expect("save");
     let (loaded, report) = load_document(&path).expect("load");
     cleanup(&path);
@@ -129,8 +129,19 @@ fn save_load_round_trip_preserves_everything() {
     assert_eq!(loaded.created(), original_created);
     assert_eq!(loaded.object_count(), 2);
 
-    // Object order, names, types and statuses survive.
-    assert_eq!(summary_pairs(&loaded), original_summary);
+    // Object order, names and types survive. Parametric features load
+    // Touched (the writer persists no Shape payloads for them — real
+    // FreeCAD restores only OCCT BRep — so the first recompute rebuilds
+    // their geometry, ours or FreeCAD's own engine's).
+    let expected_pairs: Vec<(String, String, ObjectStatus)> = vec![
+        ("Base".into(), "Part::Box".into(), ObjectStatus::Touched),
+        (
+            "Lift".into(),
+            "Part::Transform".into(),
+            ObjectStatus::Touched,
+        ),
+    ];
+    assert_eq!(summary_pairs(&loaded), expected_pairs);
     let rows = loaded.summary();
     let names: Vec<&str> = rows.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, vec!["Base", "Lift"]);
@@ -141,7 +152,7 @@ fn save_load_round_trip_preserves_everything() {
     );
     assert_eq!(
         loaded.get_by_name("Base").unwrap().status(),
-        &ObjectStatus::Valid
+        &ObjectStatus::Touched
     );
 
     // Scalar and aggregate properties are preserved exactly.
@@ -180,10 +191,16 @@ fn save_load_round_trip_preserves_everything() {
     assert_eq!(loaded.links_of("Lift"), vec!["Base".to_string()]);
     assert!(loaded.links_of("Base").is_empty());
 
-    // Shapes survive: the analytic box exactly, and the transform's
-    // computed mesh exactly (FCBREP round-trips f64 exactly).
+    // Geometry is rebuilt by recompute, not restored from the file: the
+    // writer persists parameters only for parametric features (a real
+    // FreeCAD restores solely OCCT BRep and would reject our bytes), so
+    // the loaded pair is Touched and one recompute rebuilds exactly.
+    assert_eq!(shape_of(loaded.get_by_name("Base").unwrap()), None);
+    let mut mutable = loaded;
+    let executed = mutable.recompute_all().expect("reload recompute");
+    assert_eq!(executed.len(), 2, "both Touched features recompute");
     assert_eq!(
-        shape_of(loaded.get_by_name("Base").unwrap()),
+        shape_of(mutable.get_by_name("Base").unwrap()),
         Some(TopoShape::Box {
             length: 3.5,
             width: 2.25,
@@ -191,18 +208,16 @@ fn save_load_round_trip_preserves_everything() {
         })
     );
     assert_eq!(
-        shape_of(loaded.get_by_name("Lift").unwrap()),
+        shape_of(mutable.get_by_name("Lift").unwrap()),
         Some(original_lift_shape.clone()),
-        "transform mesh preserved bit-for-bit"
+        "transform mesh rebuilt bit-for-bit (deterministic kernel)"
     );
     assert!(
         matches!(original_lift_shape, TopoShape::Mesh(_)),
         "the lift shape is a mesh"
     );
 
-    // A loaded-and-Valid document is recomputed idempotently: nothing
-    // to do.
-    let mut mutable = loaded;
+    // A recomputed document is recomputed idempotently: nothing to do.
     let executed = mutable.recompute_all().expect("idempotent recompute");
     assert_eq!(executed, Vec::<fc_app::ObjectId>::new());
 }

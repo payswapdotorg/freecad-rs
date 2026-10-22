@@ -3,6 +3,7 @@
 //! cycle detection, persistence round-trips.
 
 use fc_app::{Document, Property, RecomputeError};
+use fc_base::{Placement, Rotation, Vector3};
 use fc_io::{load_document, save_document};
 use fc_part::features::{BooleanFeature, BoxFeature, CylinderFeature, SphereFeature};
 use fc_part::{BooleanKind, TopoShape};
@@ -41,6 +42,16 @@ fn playground() -> Document {
     let mut stem = CylinderFeature::new("Stem");
     stem.container.set("Radius", Property::Float(1.5));
     stem.container.set("Height", Property::Float(12.0));
+    // Real-assembly geometry: the stem rises from the center of the
+    // base box — which now sits at its corner like FreeCAD's `Part::Box`
+    // (`[0, L] x [0, W] x [0, H]`), so the center is (15, 10).
+    stem.container.set(
+        "Placement",
+        Property::Placement(Placement::new(
+            Vector3::new(15.0, 10.0, 0.0),
+            Rotation::IDENTITY,
+        )),
+    );
     doc.add(Box::new(stem));
     doc.recompute_all().expect("playground recomputes");
     doc
@@ -217,13 +228,17 @@ fn booleans_survive_a_save_load_round_trip() {
     doc.set_creator("it");
     save_document(&doc, &path).expect("save");
 
-    let (reloaded, report) = load_document(&path).expect("load");
+    let (mut reloaded, report) = load_document(&path).expect("load");
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(
         reloaded.get_by_name("Fused").unwrap().type_name(),
         "Part::Fuse",
         "type preserved through the round trip"
     );
+    // The writer persists parameters, links and placements — geometry is
+    // rebuilt by recompute (ours, or FreeCAD's own engine in a real
+    // FreeCAD), so the round trip's second half is a recompute.
+    reloaded.recompute_all().expect("reload recompute");
     let after = match fc_part::shape_of(reloaded.get_by_name("Fused").unwrap()) {
         Some(TopoShape::Mesh(mesh)) => mesh,
         other => panic!("expected mesh, got {other:?}"),
@@ -241,16 +256,18 @@ fn boolean_with_missing_link_reports_error() {
     let mut doc = playground();
     let mut cut = BooleanFeature::new("Notch", BooleanKind::Cut);
     cut.container.set("Base", Property::Link("Base".into()));
-    // An unset Tool link is an empty name: the dependency walk rejects
-    // it before the feature even executes.
+    // An unset Tool link is an empty name — "no link" in FreeCAD terms
+    // (real files carry them for optional links like BaseFeature), so
+    // the graph walk no longer rejects it; the boolean's own execute
+    // reports the missing required operand.
     cut.container.set("Tool", Property::Link(String::new()));
     doc.add(Box::new(cut));
     let err = doc.recompute_all().expect_err("Tool is unset");
     match err {
-        RecomputeError::MissingLink { object, target } => {
+        RecomputeError::ExecuteFailed { object, reason } => {
             assert_eq!(object, "Notch");
-            assert_eq!(target, "");
+            assert!(reason.contains("Tool must link"), "{reason}");
         }
-        other => panic!("expected MissingLink, got {other:?}"),
+        other => panic!("expected ExecuteFailed, got {other:?}"),
     }
 }

@@ -1,13 +1,17 @@
 //! Parametric primitives and triangle meshes.
 //!
-//! # Conventions (binding for this kernel)
+//! # Conventions — verified against real FreeCAD 1.0 (AppImage r39109)
 //!
-//! * **Box** — FreeCAD `Part::Box`: centered in XY, sitting on the XY plane:
-//!   `x ∈ [-length/2, length/2]`, `y ∈ [-width/2, width/2]`, `z ∈ [0, height]`.
+//! Local coordinates of the analytic primitives, matching the shapes
+//! `FreeCAD 1.0` itself builds (checked with `Shape.BoundBox` on
+//! `Part::Box`/`Cylinder`/`Cone`/`Torus` with default placements):
+//!
+//! * **Box** — FreeCAD `Part::Box`: the corner sits at the origin:
+//!   `x ∈ [0, length]`, `y ∈ [0, width]`, `z ∈ [0, height]`.
 //! * **Sphere** — centered on the origin.
-//! * **Cylinder** — along Z, `z ∈ [-height/2, height/2]` (FreeCAD convention).
-//! * **Cone** — frustum with `radius1` at the **base** (`z = -height/2`) and
-//!   `radius2` at the **top** (`z = +height/2`); `radius2 == 0` is a plain
+//! * **Cylinder** — along Z, base on the XY plane: `z ∈ [0, height]`.
+//! * **Cone** — frustum with `radius1` at the **base** (`z = 0`) and
+//!   `radius2` at the **top** (`z = height`); `radius2 == 0` is a plain
 //!   cone with its apex up.
 //! * **Torus** — in the XY plane, centered on the origin; `radius1` = ring
 //!   radius, `radius2` = tube radius. Self-intersecting rings
@@ -26,9 +30,8 @@ pub const DEFAULT_DEFLECTION: f64 = 0.2;
 /// kernel (FreeCAD/OCCT `TopoDS_Shape`, distilled to its honest core).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TopoShape {
-    /// Axis-aligned box, centered on the origin like FreeCAD `Part::Box`:
-    /// occupies `[-length/2, length/2] x [-width/2, width/2] x
-    /// [0, height]`.
+    /// Axis-aligned box, corner at the origin like FreeCAD `Part::Box`:
+    /// occupies `[0, length] x [0, width] x [0, height]`.
     Box {
         length: f64,
         width: f64,
@@ -37,7 +40,8 @@ pub enum TopoShape {
     Sphere {
         radius: f64,
     },
-    /// Along +Z: `[-height/2, height/2]` like FreeCAD `Part::Cylinder`.
+    /// Along +Z, base on the XY plane: `[0, height]`, like FreeCAD
+    /// `Part::Cylinder`.
     Cylinder {
         radius: f64,
         height: f64,
@@ -149,16 +153,16 @@ impl TopoShape {
                 width,
                 height,
             } => BoundBox3::new(
-                Vector3::new(-length / 2.0, -width / 2.0, 0.0),
-                Vector3::new(length / 2.0, width / 2.0, *height),
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(*length, *width, *height),
             ),
             TopoShape::Sphere { radius } => BoundBox3::new(
                 Vector3::new(-radius, -radius, -radius),
                 Vector3::new(*radius, *radius, *radius),
             ),
             TopoShape::Cylinder { radius, height } => BoundBox3::new(
-                Vector3::new(-radius, -radius, -height / 2.0),
-                Vector3::new(*radius, *radius, *height / 2.0),
+                Vector3::new(-radius, -radius, 0.0),
+                Vector3::new(*radius, *radius, *height),
             ),
             TopoShape::Cone {
                 radius1,
@@ -167,10 +171,7 @@ impl TopoShape {
             } => {
                 // The widest ring bounds the horizontal extent.
                 let r = radius1.max(*radius2);
-                BoundBox3::new(
-                    Vector3::new(-r, -r, -height / 2.0),
-                    Vector3::new(r, r, *height / 2.0),
-                )
+                BoundBox3::new(Vector3::new(-r, -r, 0.0), Vector3::new(r, r, *height))
             }
             TopoShape::Torus { radius1, radius2 } => {
                 let outer = radius1 + radius2;
@@ -309,19 +310,19 @@ fn arc_segments(deflection: f64, radius: f64, span: f64, lo: usize, hi: usize) -
 
 /// Box: 8 shared vertices, 12 triangles, CCW from outside.
 ///
-/// Vertex layout: `v0..v3` bottom ring (z = 0) counter-clockwise in XY
-/// viewed from +Z, `v4..v7` the same points at z = height.
+/// Vertex layout — FreeCAD's corner-at-origin convention: `v0..v3` the
+/// bottom ring (z = 0) counter-clockwise in XY viewed from +Z, `v4..v7`
+/// the same points at z = height; the box spans `[0, l] x [0, w] x [0, h]`.
 fn tessellate_box(length: f64, width: f64, height: f64) -> Mesh {
-    let (hl, hw) = (length / 2.0, width / 2.0);
     let vertices = vec![
-        Vector3::new(-hl, -hw, 0.0),    // 0 bottom
-        Vector3::new(hl, -hw, 0.0),     // 1
-        Vector3::new(hl, hw, 0.0),      // 2
-        Vector3::new(-hl, hw, 0.0),     // 3
-        Vector3::new(-hl, -hw, height), // 4 top
-        Vector3::new(hl, -hw, height),  // 5
-        Vector3::new(hl, hw, height),   // 6
-        Vector3::new(-hl, hw, height),  // 7
+        Vector3::new(0.0, 0.0, 0.0),         // 0 bottom
+        Vector3::new(length, 0.0, 0.0),      // 1
+        Vector3::new(length, width, 0.0),    // 2
+        Vector3::new(0.0, width, 0.0),       // 3
+        Vector3::new(0.0, 0.0, height),      // 4 top
+        Vector3::new(length, 0.0, height),   // 5
+        Vector3::new(length, width, height), // 6
+        Vector3::new(0.0, width, height),    // 7
     ];
     let triangles = vec![
         // Bottom (outward -Z): (0,3,2), (0,2,1)
@@ -330,16 +331,16 @@ fn tessellate_box(length: f64, width: f64, height: f64) -> Mesh {
         // Top (outward +Z): (4,5,6), (4,6,7)
         [4, 5, 6],
         [4, 6, 7],
-        // Front y = -w/2 (outward -Y): (0,1,5), (0,5,4)
+        // Front y = 0 (outward -Y): (0,1,5), (0,5,4)
         [0, 1, 5],
         [0, 5, 4],
-        // Back y = +w/2 (outward +Y): (3,7,6), (3,6,2)
+        // Back y = w (outward +Y): (3,7,6), (3,6,2)
         [3, 7, 6],
         [3, 6, 2],
-        // Left x = -l/2 (outward -X): (0,4,7), (0,7,3)
+        // Left x = 0 (outward -X): (0,4,7), (0,7,3)
         [0, 4, 7],
         [0, 7, 3],
-        // Right x = +l/2 (outward +X): (1,2,6), (1,6,5)
+        // Right x = l (outward +X): (1,2,6), (1,6,5)
         [1, 2, 6],
         [1, 6, 5],
     ];
@@ -399,26 +400,27 @@ fn tessellate_sphere(radius: f64, deflection: f64) -> Mesh {
 }
 
 /// Cylinder: side quad grid + two triangle-fan caps, all sharing the ring
-/// vertices (watertight). `z ∈ [-h/2, h/2]`.
+/// vertices (watertight). `z ∈ [0, h]` — base on the XY plane, like
+/// FreeCAD's `Part::Cylinder`.
 fn tessellate_cylinder(radius: f64, height: f64, deflection: f64) -> Mesh {
     let tau = 2.0 * std::f64::consts::PI;
     // Same angular step as the sphere stacks, over a full turn.
     let n = arc_segments(deflection, radius, tau, 8, 256);
-    let half = height / 2.0;
+    let z_top = height;
 
     let mut vertices = Vec::with_capacity(2 * n + 2);
     for k in 0..n {
         let (s, c) = (tau * k as f64 / n as f64).sin_cos();
-        vertices.push(Vector3::new(radius * c, radius * s, -half)); // bottom ring
+        vertices.push(Vector3::new(radius * c, radius * s, 0.0)); // bottom ring
     }
     for k in 0..n {
         let (s, c) = (tau * k as f64 / n as f64).sin_cos();
-        vertices.push(Vector3::new(radius * c, radius * s, half)); // top ring
+        vertices.push(Vector3::new(radius * c, radius * s, z_top)); // top ring
     }
     let bottom_center = vertices.len() as u32;
-    vertices.push(Vector3::new(0.0, 0.0, -half));
+    vertices.push(Vector3::new(0.0, 0.0, 0.0));
     let top_center = vertices.len() as u32;
-    vertices.push(Vector3::new(0.0, 0.0, half));
+    vertices.push(Vector3::new(0.0, 0.0, z_top));
 
     let bot = |i: usize| -> u32 { (i % n) as u32 };
     let top = |i: usize| -> u32 { (n + i % n) as u32 };
@@ -437,38 +439,38 @@ fn tessellate_cylinder(radius: f64, height: f64, deflection: f64) -> Mesh {
     Mesh::new(vertices, triangles)
 }
 
-/// Cone frustum: base ring (`radius1` at `z = -h/2`), top ring (`radius2`
-/// at `z = +h/2`) when `radius2 > 0`, otherwise a single shared apex.
+/// Cone frustum: base ring (`radius1` at `z = 0`), top ring (`radius2`
+/// at `z = height`) when `radius2 > 0`, otherwise a single shared apex
+/// — FreeCAD's `Part::Cone` base-on-XY convention.
 /// Base fan always present (degenerate-but-harmless when `radius1 == 0`);
 /// top fan only when `radius2 > 0`.
 fn tessellate_cone(radius1: f64, radius2: f64, height: f64, deflection: f64) -> Mesh {
     let tau = 2.0 * std::f64::consts::PI;
     let n = arc_segments(deflection, radius1.max(radius2), tau, 8, 256);
-    let half = height / 2.0;
     let has_top = radius2 > 0.0;
 
     let mut vertices = Vec::with_capacity(2 * n + 2);
     for k in 0..n {
         let (s, c) = (tau * k as f64 / n as f64).sin_cos();
-        vertices.push(Vector3::new(radius1 * c, radius1 * s, -half)); // base ring
+        vertices.push(Vector3::new(radius1 * c, radius1 * s, 0.0)); // base ring
     }
     let top_ring_base = vertices.len();
     if has_top {
         for k in 0..n {
             let (s, c) = (tau * k as f64 / n as f64).sin_cos();
-            vertices.push(Vector3::new(radius2 * c, radius2 * s, half)); // top ring
+            vertices.push(Vector3::new(radius2 * c, radius2 * s, height)); // top ring
         }
     } else {
-        vertices.push(Vector3::new(0.0, 0.0, half)); // shared apex
+        vertices.push(Vector3::new(0.0, 0.0, height)); // shared apex
     }
     let base_center = vertices.len() as u32;
-    vertices.push(Vector3::new(0.0, 0.0, -half));
+    vertices.push(Vector3::new(0.0, 0.0, 0.0));
     // Only the truncated cone needs a top disc center; the plain cone
     // closes at the shared apex, so an extra `top_center` would be an
     // orphan no triangle references.
     let top_center = has_top.then(|| {
         let idx = vertices.len() as u32;
-        vertices.push(Vector3::new(0.0, 0.0, half));
+        vertices.push(Vector3::new(0.0, 0.0, height));
         idx
     });
 

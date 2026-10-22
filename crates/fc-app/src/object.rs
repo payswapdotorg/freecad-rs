@@ -235,8 +235,13 @@ pub(crate) fn link_targets(object: &dyn DocumentObject) -> Vec<String> {
     let mut targets = Vec::new();
     for property in object.properties().values() {
         match property {
-            Property::Link(target) => targets.push(target.clone()),
-            Property::LinkList(list) => targets.extend(list.iter().cloned()),
+            // An empty target is FreeCAD's "no link" (real files write
+            // `<Link value=""/>`, e.g. a `PartDesign::Body`'s unset
+            // `BaseFeature`) — not a dangling reference.
+            Property::Link(target) if !target.is_empty() => targets.push(target.clone()),
+            Property::LinkList(list) => {
+                targets.extend(list.iter().filter(|t| !t.is_empty()).cloned())
+            }
             _ => {}
         }
     }

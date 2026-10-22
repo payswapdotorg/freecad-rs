@@ -9,7 +9,7 @@ use fc_base::{Placement, Rotation, Vector3};
 use fc_part::brep::{self, BrpFormat};
 use fc_part::features::{
     BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature, MeshFeature,
-    SphereFeature, TorusFeature, TransformFeature,
+    MirroringFeature, MultiFuseFeature, SphereFeature, TorusFeature, TransformFeature,
 };
 use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
@@ -127,18 +127,21 @@ fn build_document_xml(
         2,
         "Label",
         &Property::String(doc.label().to_string()),
+        "App::Document",
     );
     push_property(
         &mut xml,
         2,
         "Creator",
         &Property::String(doc.creator().to_string()),
+        "App::Document",
     );
     push_property(
         &mut xml,
         2,
         "CreationDate",
         &Property::String(doc.created().to_string()),
+        "App::Document",
     );
     xml.push_str(" </Properties>\n");
 
@@ -150,15 +153,27 @@ fn build_document_xml(
         objects.len()
     ));
     for o in &objects {
+        let Some(obj) = doc.get(o.id) else { continue };
         xml.push_str(&format!(
             "  <Object type=\"{}\" name=\"{}\" id=\"{}\"",
             escape_attr(&o.type_name),
             escape_attr(&o.name),
             o.id.0
         ));
-        match o.status {
+        // A parametric feature whose geometry is not in the file
+        // (everything but imported meshes and the last-good shapes of
+        // errored features) saves as Touched, not Valid: the status is
+        // the file's promise about its geometry, and a reader without
+        // OCCT — a real FreeCAD restoring our file — must recompute
+        // before the shapes exist. Our own reader agrees.
+        let persisted = obj.as_any().downcast_ref::<MeshFeature>().is_some()
+            || matches!(obj.status(), ObjectStatus::Error(_));
+        match obj.status() {
             ObjectStatus::Touched => xml.push_str(" status=\"Touched\""),
-            ObjectStatus::Valid => xml.push_str(" status=\"Valid\""),
+            ObjectStatus::Valid if persisted || !expects_geometry(&o.type_name) => {
+                xml.push_str(" status=\"Valid\"")
+            }
+            ObjectStatus::Valid => xml.push_str(" status=\"Touched\""),
             ObjectStatus::Error(ref reason) => {
                 xml.push_str(&format!(
                     " status=\"Error\" Error=\"{}\"",
@@ -180,13 +195,27 @@ fn build_document_xml(
             ))
         })?;
         let props = obj.properties();
-        let shape = computed_shape(obj);
+        // Shape payloads go to exactly the objects FreeCAD's own files
+        // give them: imported data (`Part::Feature` meshes) and the
+        // **last-good geometry of an errored feature** (FreeCAD keeps
+        // the old shape in the file when a recompute fails — loading
+        // shows it, flagged). Every healthy parametric feature rebuilds
+        // from its parameters on recompute — ours in this kernel,
+        // FreeCAD's own engine in a real FreeCAD, which restores only
+        // OCCT BRep and would reject our FCBREP bytes as
+        // "shape is invalid".
+        let last_good = matches!(obj.status(), ObjectStatus::Error(_));
+        let shape = if last_good || obj.as_any().downcast_ref::<MeshFeature>().is_some() {
+            computed_shape(obj)
+        } else {
+            None
+        };
         let count = props.len() + usize::from(shape.is_some());
 
         xml.push_str(&format!("  <Object name=\"{}\">\n", escape_attr(&o.name)));
         xml.push_str(&format!("   <Properties Count=\"{}\">\n", count));
         for (key, value) in props {
-            push_property(&mut xml, 4, key, value);
+            push_property(&mut xml, 4, key, value, &o.type_name);
         }
         // Computed geometry goes last, as one referenced FCBREP side file.
         if let Some(shape) = shape {
@@ -228,15 +257,39 @@ fn build_document_xml(
 }
 
 /// Append one `<Property>` (with its value element) at `indent` spaces.
-fn push_property(xml: &mut String, indent: usize, name: &str, value: &Property) {
+fn push_property(xml: &mut String, indent: usize, name: &str, value: &Property, owner_type: &str) {
     let ind = " ".repeat(indent);
-    let (ty, body) = property_xml(value);
+    let (default_ty, body) = property_xml(value);
+    // FreeCAD's reader finds a property by name and then restores it
+    // through its registered C++ type — a `type` attribute that
+    // disagrees is silently skipped. The Part primitives' dimensions
+    // are `App::PropertyLength` in FreeCAD 1.0 (verified against its
+    // own files), so that is what our files must say.
+    let ty = if default_ty == "App::PropertyFloat" && is_primitive_dimension(owner_type, name) {
+        "App::PropertyLength"
+    } else {
+        default_ty
+    };
     xml.push_str(&format!(
         "{ind}<Property name=\"{}\" type=\"{ty}\">\n",
         escape_attr(name)
     ));
     xml.push_str(&format!("{ind} {body}\n"));
     xml.push_str(&format!("{ind}</Property>\n"));
+}
+
+/// The dimension properties FreeCAD types `App::PropertyLength`
+/// (checked against FreeCAD 1.0's own serialization of the Part
+/// primitives; `PartDesign` lengths stay `App::PropertyFloat`).
+fn is_primitive_dimension(owner_type: &str, name: &str) -> bool {
+    match owner_type {
+        "Part::Box" => matches!(name, "Length" | "Width" | "Height"),
+        "Part::Sphere" => name == "Radius",
+        "Part::Cylinder" => matches!(name, "Radius" | "Height"),
+        "Part::Cone" => matches!(name, "Radius1" | "Radius2" | "Height"),
+        "Part::Torus" => matches!(name, "Radius1" | "Radius2"),
+        _ => false,
+    }
 }
 
 /// The FreeCAD value element for a property, per the crate's element table.
@@ -285,10 +338,18 @@ fn property_xml(value: &Property) -> (&'static str, String) {
             "App::PropertyLink",
             format!("<Link value=\"{}\"/>", escape_attr(v)),
         ),
-        Property::LinkList(v) => (
-            "App::PropertyLinkList",
-            format!("<LinkList value=\"{}\"/>", escape_attr(&v.join(","))),
-        ),
+        Property::LinkList(v) => {
+            // FreeCAD's `PropertyLinkList::Restore` reads a `count`
+            // attribute and then exactly that many nested `<Link>`
+            // elements (App/PropertyLinks.cpp) — the attribute form it
+            // never accepts. Mirror FreeCAD's own serialization.
+            let mut body = format!("<LinkList count=\"{}\">", v.len());
+            for name in v {
+                body.push_str(&format!("<Link value=\"{}\"/>", escape_attr(name)));
+            }
+            body.push_str("</LinkList>");
+            ("App::PropertyLinkList", body)
+        }
     }
 }
 
@@ -339,6 +400,10 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
     } else if let Some(f) = any.downcast_ref::<TransformFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<BooleanFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<MultiFuseFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<MirroringFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<PadFeature>() {
         f.result.clone().map(TopoShape::Mesh)
@@ -406,7 +471,32 @@ pub fn load_document_with_hook(
     let mut report = LoadReport::default();
     let mut doc = Document::new("untitled");
     parse_document(&xml_bytes, &mut zip, &mut doc, &mut report, mutate)?;
+
     Ok((doc, report))
+}
+
+/// Does this FreeCAD type carry geometry its own parameters (or the
+/// features linking into it) rebuild on recompute? The parametric
+/// feature families of this kernel; containers and data carriers are
+/// excluded — their geometry, when present, is file-restored only.
+fn expects_geometry(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "Part::Box"
+            | "Part::Sphere"
+            | "Part::Cylinder"
+            | "Part::Cone"
+            | "Part::Torus"
+            | "Part::Cut"
+            | "Part::Fuse"
+            | "Part::Common"
+            | "Part::MultiFuse"
+            | "Part::Mirroring"
+            | "Part::Transform"
+            | "PartDesign::Pad"
+            | "PartDesign::Pocket"
+            | "PartDesign::Revolution"
+    )
 }
 
 /// One `<Part>` payload reference found while parsing.
@@ -421,6 +511,11 @@ struct ShapeRef {
 enum PropValue {
     Value(Property),
     Shape(ShapeRef),
+    /// A sketch translated from FreeCAD 1.0's `Geometry` property
+    /// (`Part::PropertyGeometryList`) into our `<Sketch>` fragment
+    /// form — applied via `store_sketch_fragment`, like the writer's
+    /// own `<Sketch>` object data.
+    Sketch(String),
 }
 
 /// The pull-parser state we need between helper calls.
@@ -557,7 +652,9 @@ fn parse_document(
     loop {
         match next_event(&mut reader, &mut buf)? {
             Event::Start(e) => match e.name().as_ref() {
-                b"Properties" => parse_document_properties(&mut reader, &mut buf, doc, report)?,
+                b"Properties" => {
+                    parse_document_properties(&mut reader, &mut buf, xml, doc, report)?
+                }
                 b"Objects" => parse_objects_section(&mut reader, &mut buf, &mut built, report)?,
                 b"ObjectData" => {
                     parse_object_data_section(&mut reader, &mut buf, xml, &mut built, zip, report)?
@@ -585,6 +682,24 @@ fn parse_document(
             // status, sketch content) before the document takes ownership.
             if let Some(mutate) = mutate.as_deref_mut() {
                 mutate(&file_name, object.as_mut());
+            }
+            // A parametric feature whose geometry did not come from the
+            // file (no Shape payload — our writer omits it for everything
+            // except imported `Part::Feature` meshes) loads as Touched,
+            // so the first recompute rebuilds it — the state FreeCAD
+            // leaves a touched feature in. Data carriers keep their
+            // restored status: the file's word is final for imported
+            // geometry.
+            if object.as_any().downcast_ref::<MeshFeature>().is_none()
+                && computed_shape(object.as_ref()).is_none()
+                && expects_geometry(object.type_name())
+                // A persisted Error is the file's honest verdict (the
+                // recompute that failed and its message); it survives
+                // the restore — only a clean Valid flips to Touched
+                // for the geometry rebuild.
+                && matches!(object.status(), ObjectStatus::Valid)
+            {
+                object.set_status(ObjectStatus::Touched);
             }
             let id = doc.add(object);
             let final_name = doc.get(id).map(DocumentObject::name).unwrap_or_default();
@@ -626,6 +741,7 @@ fn parse_document(
 fn parse_document_properties(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
+    xml: &[u8],
     doc: &mut Document,
     report: &mut LoadReport,
 ) -> Result<(), FcstdError> {
@@ -634,7 +750,8 @@ fn parse_document_properties(
             Event::Start(e) if e.name().as_ref() == b"Property" => {
                 let map = attrs_of(&e);
                 let name = map.get("name").cloned().unwrap_or_default();
-                let value = parse_property_value(reader, buf, "document", &name, &map, report)?;
+                let value =
+                    parse_property_value(reader, buf, xml, "document", &name, &map, report)?;
                 match (name.as_str(), value) {
                     ("Label", Some(PropValue::Value(Property::String(s)))) => doc.set_label(&s),
                     ("Creator", Some(PropValue::Value(Property::String(s)))) => doc.set_creator(&s),
@@ -801,10 +918,15 @@ fn parse_object_properties(
             Event::Start(e) if e.name().as_ref() == b"Property" => {
                 let map = attrs_of(&e);
                 let name = map.get("name").cloned().unwrap_or_default();
-                let value = parse_property_value(reader, buf, owner, &name, &map, report)?;
+                let value = parse_property_value(reader, buf, xml, owner, &name, &map, report)?;
                 match (name.is_empty(), value) {
                     (false, Some(PropValue::Value(v))) => {
                         object.properties_mut().insert(name, v);
+                    }
+                    (false, Some(PropValue::Sketch(fragment))) => {
+                        // FreeCAD 1.0's `Geometry` property, already
+                        // translated into our `<Sketch>` fragment form.
+                        store_sketch_fragment(object, &fragment, owner, report);
                     }
                     (false, Some(PropValue::Shape(shape_ref))) => {
                         match load_shape_payload(zip, &shape_ref, owner, report)? {
@@ -867,6 +989,144 @@ fn parse_object_properties(
             _ => continue,
         }
     }
+}
+
+/// Translate FreeCAD 1.0's `Part::PropertyGeometryList` payload (the
+/// raw inner XML of a `<GeometryList>` element) into our `<Sketch>`
+/// fragment form, so the existing parser + `SketchObject` restore path
+/// applies it.
+///
+/// FreeCAD's per-geometry blocks:
+///
+/// ```xml
+/// <Geometry type="Part::GeomLineSegment" id="0" migrated="1">
+///     <GeoExtensions count="…">…</GeoExtensions>   (ignored)
+///     <LineSegment StartX="…" StartY="…" StartZ="…"
+///                  EndX="…" EndY="…" EndZ="…"/>
+///     <Construction value="0"/>
+/// </Geometry>
+/// ```
+///
+/// `Circle` and `ArcOfCircle` carry `CenterX/Y/Z`, `NormalX/Y/Z`,
+/// `Radius` (and `StartAngle`/`EndAngle` for arcs, CCW about the
+/// normal). Only XY-plane geometry (`z ≈ 0`, normal `≈ +Z`) maps into
+/// this kernel's 2D sketcher; construction geometry and other curve
+/// types are skipped with per-element warnings — the honest-policy
+/// record of what did not survive the trip.
+fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadReport) -> String {
+    let mut fragment = String::from("<Sketch>\n");
+    let mut i = 0usize;
+    let mut index = 0usize;
+    while let Some(start) = inner[i..].find("<Geometry ") {
+        let start = i + start;
+        let Some(len) = inner[start..].find("</Geometry>") else {
+            break;
+        };
+        let block = &inner[start..start + len];
+        i = start + len;
+
+        let kind = attr_of_str(block, "type").unwrap_or_default();
+        if block.contains("<Construction value=\"1\"/>") {
+            report.warnings.push(format!(
+                "{owner}: geometry #{index} ({kind}) is construction — skipped"
+            ));
+            index += 1;
+            continue;
+        }
+        match kind {
+            "Part::GeomLineSegment" => {
+                match (
+                    attr_of_f64(block, "StartX"),
+                    attr_of_f64(block, "StartY"),
+                    attr_of_f64(block, "StartZ"),
+                    attr_of_f64(block, "EndX"),
+                    attr_of_f64(block, "EndY"),
+                    attr_of_f64(block, "EndZ"),
+                ) {
+                    (Some(sx), Some(sy), Some(sz), Some(ex), Some(ey), Some(ez))
+                        if sz.abs() < 1e-9 && ez.abs() < 1e-9 =>
+                    {
+                        fragment.push_str(&format!(
+                            "  <Geometry type=\"1\" startx=\"{sx:?}\" starty=\"{sy:?}\" endx=\"{ex:?}\" endy=\"{ey:?}\"/>\n"
+                        ));
+                    }
+                    _ => report.warnings.push(format!(
+                        "{owner}: geometry #{index} (line) off the XY plane or malformed — skipped"
+                    )),
+                }
+            }
+            "Part::GeomCircle" | "Part::GeomArcOfCircle" => {
+                let center_ok = matches!(
+                    (
+                        attr_of_f64(block, "CenterX"),
+                        attr_of_f64(block, "CenterY"),
+                        attr_of_f64(block, "CenterZ")
+                    ),
+                    (Some(_), Some(_), Some(cz)) if cz.abs() < 1e-9
+                );
+                let normal_ok = matches!(
+                    (
+                        attr_of_f64(block, "NormalX"),
+                        attr_of_f64(block, "NormalY"),
+                        attr_of_f64(block, "NormalZ")
+                    ),
+                    (Some(nx), Some(ny), Some(nz))
+                        if nx.abs() < 1e-9 && ny.abs() < 1e-9 && (nz - 1.0).abs() < 1e-9
+                );
+                match (center_ok && normal_ok, attr_of_f64(block, "Radius"), kind) {
+                    (true, Some(radius), "Part::GeomCircle") => {
+                        let (cx, cy) = (
+                            attr_of_f64(block, "CenterX").unwrap(),
+                            attr_of_f64(block, "CenterY").unwrap(),
+                        );
+                        fragment.push_str(&format!(
+                            "  <Geometry type=\"2\" centerx=\"{cx:?}\" centery=\"{cy:?}\" radius=\"{radius:?}\"/>\n"
+                        ));
+                    }
+                    (true, Some(radius), _) => match (
+                        attr_of_f64(block, "StartAngle"),
+                        attr_of_f64(block, "EndAngle"),
+                    ) {
+                        (Some(start_angle), Some(end_angle)) => {
+                            let (cx, cy) = (
+                                attr_of_f64(block, "CenterX").unwrap(),
+                                attr_of_f64(block, "CenterY").unwrap(),
+                            );
+                            fragment.push_str(&format!(
+                                "  <Geometry type=\"3\" centerx=\"{cx:?}\" centery=\"{cy:?}\" radius=\"{radius:?}\" startangle=\"{start_angle:?}\" endangle=\"{end_angle:?}\"/>\n"
+                            ));
+                        }
+                        _ => report.warnings.push(format!(
+                            "{owner}: geometry #{index} (arc) malformed angles — skipped"
+                        )),
+                    },
+                    _ => report.warnings.push(format!(
+                        "{owner}: geometry #{index} ({kind}) off the XY plane or malformed — skipped"
+                    )),
+                }
+            }
+            other => {
+                report.warnings.push(format!(
+                    "{owner}: geometry #{index} type '{other}' not modeled — skipped"
+                ));
+            }
+        }
+        index += 1;
+    }
+    fragment.push_str("</Sketch>");
+    fragment
+}
+
+/// `key="value"` extraction on a raw XML block (first match, exact case).
+fn attr_of_str<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("{key}=\"");
+    let start = block.find(&needle)? + needle.len();
+    let end = block[start..].find('"')? + start;
+    Some(&block[start..end])
+}
+
+fn attr_of_f64(block: &str, key: &str) -> Option<f64> {
+    attr_of_str(block, key).and_then(|v| v.trim().parse::<f64>().ok())
 }
 
 /// Called right after a `<name>` Start event: consumes events up to the
@@ -951,6 +1211,7 @@ fn store_sketch_fragment(
 fn parse_property_value(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
+    xml: &[u8],
     owner: &str,
     prop: &str,
     prop_attrs: &BTreeMap<String, String>,
@@ -971,6 +1232,27 @@ fn parse_property_value(
             // parser can accept element forms (see `parse_value_element`).
             Event::Start(e) => {
                 let element_name = e.name().as_ref().to_vec();
+                // FreeCAD 1.0's sketch geometry: `Part::PropertyGeometryList`
+                // serializes as a `<GeometryList>` element whose
+                // `<Geometry type="Part::Geom…">` children each carry one
+                // curve element two levels deep — the generic child
+                // collector only sees names+attributes one level down, so
+                // the raw XML is captured and translated instead.
+                if element_name == b"GeometryList" && prop == "Geometry" {
+                    let inner = raw_inner_xml(xml, reader, buf, b"GeometryList")?;
+                    let fragment = freecad_geometrylist_to_fragment(&inner, owner, report);
+                    return finish_property(reader, buf, Some(PropValue::Sketch(fragment)));
+                }
+                if element_name == b"GeometryList" {
+                    // `ExternalGeo` (the sketch's datum axes): the generic
+                    // path would warn per-element; one honest note.
+                    let _ = raw_inner_xml(xml, reader, buf, b"GeometryList")?;
+                    report.warnings.push(format!(
+                        "{owner}: property '{prop}': external geometry not modeled — skipped"
+                    ));
+                    report.skipped_properties.push(format!("{owner}.{prop}"));
+                    return finish_property(reader, buf, None);
+                }
                 let mut text = Vec::new();
                 let mut children: Vec<(String, BTreeMap<String, String>)> = Vec::new();
                 loop {
@@ -1159,17 +1441,48 @@ fn parse_value_element(
             };
             Ok(Some(PropValue::Value(property)))
         }
+        // `App::PropertyLinkSub` — an object link plus a list of
+        // subelement names (faces/edges). FreeCAD writes it for
+        // `PartDesign` profiles (`<LinkSub value="Sketch" count="0"/>`)
+        // and every "link to a feature of an object" property. The
+        // subelements carry no geometry semantics in this kernel, so
+        // the link is read as a plain `Link` and subelement names are
+        // recorded as a warning when present.
+        "LinkSub" => {
+            let value = map.get("value").cloned().unwrap_or_default();
+            let count = map
+                .get("count")
+                .and_then(|c| c.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if count > 0 {
+                report.warnings.push(format!(
+                    "{owner}: property '{prop}': LinkSub subelements dropped ({count})"
+                ));
+            }
+            Ok(Some(PropValue::Value(Property::Link(value))))
+        }
         "LinkList" => {
-            let list = map
-                .get("value")
-                .map(|v| {
-                    v.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            // FreeCAD's form: `<LinkList count="N"><Link value="…"/>…
+            // </LinkList>` (nested child elements); ours (legacy) is a
+            // `value="a,b"` attribute. Read both, children first.
+            let mut list: Vec<String> = children
+                .iter()
+                .filter(|(name, _)| name == "Link")
+                .filter_map(|(_, attrs)| attrs.get("value").cloned())
+                .filter(|v| !v.is_empty())
+                .collect();
+            if list.is_empty() {
+                list = map
+                    .get("value")
+                    .map(|v| {
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+            }
             Ok(Some(PropValue::Value(Property::LinkList(list))))
         }
         // Packed-uint color (the work order form: `value="16711680"` is
@@ -1484,6 +1797,18 @@ fn attach_shape(
             TopoShape::Mesh(mesh) => Some(mesh),
             other => Some(other.tessellate(DEFAULT_DEFLECTION)),
         };
+    } else if let Some(f) = any.downcast_mut::<MultiFuseFeature>() {
+        // Multi-fuse features persist their computed mesh.
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
+    } else if let Some(f) = any.downcast_mut::<MirroringFeature>() {
+        // Mirror features persist their computed mesh.
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
     } else if let Some(f) = any.downcast_mut::<PadFeature>() {
         // PartDesign features persist their computed mesh.
         f.result = match shape {
@@ -1530,6 +1855,8 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "Part::Transform" => Some(Box::new(TransformFeature::new(name))),
         "Part::Cut" | "Part::Fuse" | "Part::Common" => BooleanKind::from_type_name(type_id)
             .map(|kind| Box::new(BooleanFeature::new(name, kind)) as _),
+        "Part::MultiFuse" => Some(Box::new(MultiFuseFeature::new(name))),
+        "Part::Mirroring" => Some(Box::new(MirroringFeature::new(name))),
         "PartDesign::Pad" => Some(Box::new(PadFeature::new(name))),
         "PartDesign::Pocket" => Some(Box::new(PocketFeature::new(name))),
         "PartDesign::Revolution" => Some(Box::new(RevolutionFeature::new(name))),
@@ -1831,7 +2158,11 @@ mod sketch_persistence_tests {
             object.properties().get("Length"),
             Some(&Property::Float(10.0))
         );
-        assert_eq!(*object.status(), ObjectStatus::Valid);
+        // The writer omits Shape payloads for parametric features (real
+        // FreeCAD can only restore OCCT BRep); the box reloads Touched
+        // and the first recompute rebuilds it — FreeCAD's own state
+        // for a touched feature.
+        assert_eq!(*object.status(), ObjectStatus::Touched);
 
         let object = loaded.get_by_name("Sketch").unwrap();
         let sketch_object = object.as_any().downcast_ref::<SketchObject>().unwrap();
