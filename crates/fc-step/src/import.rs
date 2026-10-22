@@ -264,12 +264,12 @@ fn face_bound_loop(
         ));
     }
     let loop_id = bound.params[1].as_ref_id()?;
-    let orientation = bound
-        .params
-        .get(2)
-        .and_then(|p| p.as_str().ok())
-        .map(|s| s == "T" || s == ".T.")
-        .unwrap_or(true);
+    // The bound's orientation flag is an enumeration token too.
+    let orientation = match bound.params.get(2) {
+        Some(Param::Enum(e)) => e == "T" || e == ".T.",
+        Some(Param::Str(s)) => s == "T" || s == ".T.",
+        _ => true,
+    };
     let loop_entity = set.get(loop_id)?;
     let mut points = match loop_entity.name.as_str() {
         "POLY_LOOP" => {
@@ -299,12 +299,12 @@ fn face_bound_loop(
                         oriented.name
                     ));
                 }
-                let forward = oriented
-                    .params
-                    .last()
-                    .and_then(|p| p.as_str().ok())
-                    .map(|s| s == ".T.")
-                    .unwrap_or(true);
+                // `.T.` / `.F.` are enumeration tokens, not strings.
+                let forward = match oriented.params.last() {
+                    Some(Param::Enum(e)) => e == "T" || e == ".T.",
+                    Some(Param::Str(s)) => s == "T" || s == ".T.",
+                    _ => true,
+                };
                 let edge_id = oriented.params[3].as_ref_id()?;
                 let mut segment = sample_edge(set, edge_id, deflection)?;
                 if !forward {

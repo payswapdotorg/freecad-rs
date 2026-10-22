@@ -90,7 +90,7 @@
 //!   deflection to resolve it.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::mem;
 
@@ -312,7 +312,27 @@ fn boolean_prepared(a: &Mesh, polygons_a: Vec<Polygon>, polygons_b: Vec<Polygon>
     let (mut mesh, mut sides) = mesh_from_sided(polygons);
     close_curved_seams(&mut mesh, &mut sides);
     collapse_tangency_slivers(&mut mesh, &mut sides);
+    weld_duplicate_positions(&mut mesh, &mut sides);
+    zip_conflict_slivers(&mut mesh, &mut sides);
+    prune_zero_measure_strays(&mut mesh, &mut sides);
+    orient_consistently_guarded(&mut mesh);
     mesh
+}
+
+/// Orientation consistency: every shared edge must be traversed
+/// by its two faces in OPPOSITE directions — the outward-normal
+/// contract a B-rep kernel (OCCT, FreeCAD's `BRepCheck`) enforces
+/// before it will call a shell a valid solid. A mesh that fails
+/// this is the "invalid orientation" verdict, no matter how
+/// watertight its edge pairing is.
+pub fn mesh_is_consistently_oriented(mesh: &Mesh) -> bool {
+    let mut m: HashMap<(u32, u32), usize> = HashMap::new();
+    for t in &mesh.triangles {
+        for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *m.entry((u, v)).or_default() += 1;
+        }
+    }
+    m.values().all(|&n| n <= 1)
 }
 
 /// The canonical BSP construction for each operation.
@@ -647,6 +667,13 @@ const SEAM_MEND_ROUNDS: usize = 6;
 /// coarse enough that the traces' disagreement — floating-point noise
 /// up to a fraction of the deflection — always lands on one point.
 const SNAP_GRID_FRACTION: f64 = 0.25;
+/// How far from the entry seam's own vertices the consensus
+/// quantization still reaches: cap fans sit within their rim's own
+/// extent, the rounds' welds within a sampling width of the traces,
+/// so a couple of scales covers the repair's whole theater while
+/// leaving the operand's exact interior surfaces (an operand face
+/// far from the seam) untouched.
+const SNAP_REACH_SCALES: f64 = 4.0;
 
 /// How far a boundary vertex may sit from an opposing boundary edge and
 /// still be inserted into it, in multiples of the mesh's sampling
@@ -654,7 +681,13 @@ const SNAP_GRID_FRACTION: f64 = 0.25;
 /// than their own chord error, so a fraction of a sampling width
 /// covers the stagger with margin.
 const SEAM_BRIDGE_SCALES: f64 = 1.0;
-
+/// Slack for pairing coincident rims ([`rims_share_trace`]): pairing
+/// fires at twice the interleave's reach so that a paired rim is
+/// comfortably within the welding machinery's bridging distance —
+/// a rim must never skip its cap only to find the weld cannot reach
+/// it (the safety-net tail caps still catch that, but a pair should
+/// decide in one pass).
+const RIM_PAIR_SLACK: f64 = 2.0;
 /// How far the fan across a puncture may sag, as a multiple of the
 /// mesh's sampling scale — the deflection the tessellation itself
 /// already accepts. Bounded by the rim's own curvature, not its size.
@@ -741,6 +774,7 @@ fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     }
     let original = mesh.clone();
     let mut repaired_sides = sides.clone();
+    let entry_endpoints: Vec<(u32, u32)> = entry_seam.iter().map(|((u, v), _)| (*u, *v)).collect();
 
     // Mend: snap the traces onto a consensus grid (welding what
     // agrees), interleave what staggers (the tolerance-based stitch),
@@ -755,7 +789,7 @@ fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
         if boundary_edges(mesh, &repaired_sides).is_empty() {
             break;
         }
-        cap_small_rims(mesh, &mut repaired_sides);
+        cap_small_rims_opts(mesh, &mut repaired_sides, true);
         if boundary_edges(mesh, &repaired_sides).is_empty() {
             break;
         }
@@ -764,7 +798,7 @@ fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
         // ones, which need no snapping, and re-snapping would keep
         // welding fresh pairs into over-covers the thinning then has
         // to reopen.
-        let snapped = round == 0 && snap_to_consensus(mesh, &mut repaired_sides);
+        let snapped = round == 0 && snap_to_consensus(mesh, &mut repaired_sides, &entry_endpoints);
         if snapped {
             collapse_duplicate_triangles(&mut mesh.triangles, &mut repaired_sides);
         }
@@ -1184,13 +1218,116 @@ fn walk_boundary_rims(mesh: &Mesh, sides: &[Side], boundary: &[((u32, u32), Side
 /// deflection honesty when capped, while a larger rim (the seam braid,
 /// a structural opening) must not be spiked through. The fan runs
 /// against the rim's directed edges, so every rim edge pairs up.
+///
+/// Rim pairs that trace the same closed curve ([`rims_share_trace`])
+/// are left to the mend rounds when `respect_pairs` — see below.
+///
+/// Is every vertex of `rim` within `reach` of the opposite sheet's
+/// boundary polyline (`edges`, as point/segment pairs)? The
+/// coincident-seam case: the operands' surfaces meet along one shared
+/// curve — e.g. a box face passing exactly through a sphere's equator
+/// ring — so both sheets end the BSP with an open rim on that curve,
+/// each sampled by its own tessellation (and one sheet's rim may walk
+/// as several fragments). Those rims must weld to EACH OTHER (consensus
+/// snap + interleave + fin weld in the mend rounds), never cap:
+/// capping each separately fabricates two coincident caps that close
+/// the components apart — every per-component gate stays green, but the
+/// shell is left split where a real B-rep kernel (OCCT, FreeCAD)
+/// builds one connected solid and reports the split as "Not
+/// connected". The test is taken against the whole opposite-side
+/// boundary (not a single walked rim) precisely because a sheet's rim
+/// can arrive fragmented.
+fn rim_traces_opposite_sheet(
+    mesh: &Mesh,
+    rim: &Rim,
+    edges: &[((u32, u32), Side)],
+    reach: f64,
+) -> bool {
+    let opposite = |s: Side| -> Side {
+        match s {
+            Side::A => Side::B,
+            Side::B => Side::A,
+        }
+    };
+    let other = opposite(rim.side);
+    let mut segments: Vec<(Vector3, Vector3)> = Vec::new();
+    for ((u, v), side) in edges {
+        if *side != other {
+            continue;
+        }
+        segments.push((mesh.vertices[*u as usize], mesh.vertices[*v as usize]));
+    }
+    if segments.is_empty() {
+        return false;
+    }
+    rim.vertices.iter().all(|&v| {
+        let p = mesh.vertices[v as usize];
+        segments.iter().any(|&(s, e)| {
+            let se = e - s;
+            let len2 = se.dot(&se);
+            if len2 < PLANE_EPS * PLANE_EPS {
+                return (p - s).length() <= reach;
+            }
+            let t = ((p - s).dot(&se) / len2).clamp(0.0, 1.0);
+            (p - (s + se * t)).length() <= reach
+        })
+    })
+}
+
 fn cap_small_rims(mesh: &mut Mesh, sides: &mut Vec<Side>) {
+    cap_small_rims_opts(mesh, sides, false)
+}
+
+/// `respect_pairs`: skip rims that have a coincident opposite-side
+/// partner (see [`rims_share_trace`]) — the in-round calls pass
+/// `true` so the mend rounds get to weld the pair; the safety-net
+/// tail calls keep the unconditional capping so a pair the welding
+/// could not close still ends closed, exactly as before.
+fn cap_small_rims_opts(mesh: &mut Mesh, sides: &mut Vec<Side>, respect_pairs: bool) {
     let boundary = boundary_edges(mesh, sides);
     if boundary.is_empty() {
         return;
     }
     let scale = seam_scale(mesh, &boundary);
     let rims = walk_boundary_rims(mesh, sides, &boundary);
+    // Coincident-seam rims that the mend rounds weld to each other:
+    // capping them here would split the shell into components.
+    let paired: Vec<bool> = if respect_pairs {
+        let reach = RIM_PAIR_SLACK * SEAM_BRIDGE_SCALES * scale;
+        // The rim's own sampling: extent in units of its own median
+        // chord — a structural coincident curve spans many of its own
+        // steps, sliver residue a couple at most.
+        let structural = |rim: &Rim| {
+            let mut centroid = Vector3::ZERO;
+            for &v in &rim.vertices {
+                centroid = centroid + mesh.vertices[v as usize];
+            }
+            centroid = centroid * (1.0 / rim.vertices.len() as f64);
+            let extent = rim
+                .vertices
+                .iter()
+                .map(|&v| (mesh.vertices[v as usize] - centroid).length())
+                .fold(0.0_f64, f64::max);
+            let n = rim.vertices.len();
+            let mut chords: Vec<f64> = (0..n)
+                .map(|k| {
+                    let a = mesh.vertices[rim.vertices[k] as usize];
+                    let b = mesh.vertices[rim.vertices[(k + 1) % n] as usize];
+                    (b - a).length()
+                })
+                .filter(|l| *l >= PLANE_EPS)
+                .collect();
+            let Some(median_chord) = median(&mut chords) else {
+                return false;
+            };
+            extent >= RIM_PAIR_MIN_EXTENT_CHORDS * median_chord
+        };
+        rims.iter()
+            .map(|r| structural(r) && rim_traces_opposite_sheet(mesh, r, &boundary, reach))
+            .collect()
+    } else {
+        vec![false; rims.len()]
+    };
     // The direction each boundary edge's single surviving owner uses
     // (keyed canonically, value: the lower-indexed endpoint comes
     // first in the owner's direction).
@@ -1222,7 +1359,10 @@ fn cap_small_rims(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     }
     let mut fans: Vec<[u32; 3]> = Vec::new();
     let mut fan_sides: Vec<Side> = Vec::new();
-    for rim in &rims {
+    for (ri, rim) in rims.iter().enumerate() {
+        if paired[ri] {
+            continue; // the mend rounds weld this rim to its partner
+        }
         let mut centroid = Vector3::ZERO;
         for &v in &rim.vertices {
             centroid = centroid + mesh.vertices[v as usize];
@@ -1333,18 +1473,72 @@ fn cap_small_rims(mesh: &mut Mesh, sides: &mut Vec<Side>) {
 /// Vertices the grid pulls together are within a fraction of a
 /// sampling width, so the surface moves well inside the tessellation's
 /// own accuracy. Returns whether anything moved.
-fn snap_to_consensus(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
-    let grid = SNAP_GRID_FRACTION * seam_scale(mesh, &boundary_edges(mesh, sides));
+fn snap_to_consensus(mesh: &mut Mesh, sides: &mut Vec<Side>, entry: &[(u32, u32)]) -> bool {
+    let boundary = boundary_edges(mesh, sides);
+    let grid = SNAP_GRID_FRACTION * seam_scale(mesh, &boundary);
     if !(grid > 0.0 && grid.is_finite()) {
         return false;
     }
-    // Quantize and weld through a bit-key map (lookup-only; the vertex
-    // order comes from the mesh's own, so determinism is unaffected).
+    // Only the seam's own neighborhood quantizes: the vertices on
+    // the entry boundary, and everything within
+    // [`SNAP_REACH_SCALES`] sampling widths of one (the cap fans'
+    // centroids, the fragments the rounds weld). An interior vertex
+    // far from the seam sits on geometry the tessellation itself
+    // sampled — an exact plane of the operand (a box face at its
+    // true coordinate), an exact revolution surface — and quantizing
+    // it a grid step off that surface fabricates a skin over the
+    // solid: over-cover layers, their same-direction shared edges,
+    // and a volume the operand never had. The seam's rim points
+    // carry no such contract: their position is only the weld's
+    // estimate of where two independently sampled traces agree, so
+    // consensus is exactly theirs to take.
+    let reach = SNAP_REACH_SCALES * seam_scale(mesh, &boundary);
+    let mut on_seam = vec![false; mesh.vertices.len()];
+    for &(u, v) in entry {
+        on_seam[u as usize] = true;
+        on_seam[v as usize] = true;
+    }
+    let anchor: Vec<Vector3> = entry
+        .iter()
+        .flat_map(|&(u, v)| [mesh.vertices[u as usize], mesh.vertices[v as usize]])
+        .collect();
+    if !anchor.is_empty() {
+        for (i, vertex) in mesh.vertices.iter().enumerate() {
+            if on_seam[i] {
+                continue;
+            }
+            if anchor.iter().any(|&a| (a - *vertex).length() <= reach) {
+                on_seam[i] = true;
+            }
+        }
+    }
+    // Pass 1 — interior vertices keep their exact slots (first
+    // claim, in mesh order: deterministic). Exact duplicates among
+    // them weld, as they always did.
     let mut index: HashMap<VertexKey, u32> = HashMap::with_capacity(mesh.vertices.len());
     let mut vertices: Vec<Vector3> = Vec::with_capacity(mesh.vertices.len());
     let mut remap: Vec<u32> = Vec::with_capacity(mesh.vertices.len());
+    for (i, vertex) in mesh.vertices.iter().enumerate() {
+        if on_seam[i] {
+            remap.push(u32::MAX); // resolved in pass 2
+            continue;
+        }
+        let key = vertex_key(vertex);
+        let next = vertices.len() as u32;
+        let id = *index.entry(key).or_insert(next);
+        if id == next {
+            vertices.push(*vertex);
+        }
+        remap.push(id);
+    }
+    // Pass 2 — seam vertices quantize onto the consensus grid and
+    // weld through the same bit-key map (to each other, and to an
+    // interior vertex whose exact slot they land on).
     let mut changed = false;
-    for vertex in &mesh.vertices {
+    for (i, vertex) in mesh.vertices.iter().enumerate() {
+        if !on_seam[i] {
+            continue;
+        }
         let snapped = Vector3::new(
             (vertex.x / grid).round() * grid,
             (vertex.y / grid).round() * grid,
@@ -1359,7 +1553,7 @@ fn snap_to_consensus(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
         if vertex_key(vertex) != key {
             changed = true;
         }
-        remap.push(id);
+        remap[i] = id;
     }
     if !changed {
         return false;
@@ -1894,6 +2088,492 @@ fn find_root(parent: &mut [u32], mut x: u32) -> u32 {
     }
     x
 }
+
+/// Volume change above which an orientation repair is rejected as
+/// structurally wrong: making a genuinely folded shell consistent
+/// moves the measure by a rounding of the fold band (≪0.1%), while
+/// "orienting" a coincident layered remnant (both windings present,
+/// net measure zero) fabricates its volume a second time — percent
+/// scale. The guard keeps the repair honest where it applies and
+/// reverts wholesale where it does not.
+const ORIENT_VOLUME_GUARD: f64 = 1e-3;
+
+/// [`orient_consistently`] behind the volume guard: a repair that
+/// would change the measure is not a repair.
+fn orient_consistently_guarded(mesh: &mut Mesh) {
+    let before = mesh.clone();
+    let v_before = mesh.volume();
+    orient_consistently(mesh);
+    let v_after = mesh.volume();
+    let scale = v_before.abs().max(v_after.abs());
+    let changed_past_guard = if scale > 0.0 {
+        (v_after - v_before).abs() > ORIENT_VOLUME_GUARD * scale
+    } else {
+        (v_after - v_before).abs() > 0.0
+    };
+    if changed_past_guard {
+        *mesh = before;
+    }
+}
+
+/// Make the shell's face orientations consistent: every shared edge
+/// must be traversed by its two faces in OPPOSITE directions (the
+/// outward-normal contract a B-rep reader enforces — OCCT flags
+/// same-direction pairs as invalid orientation and its volume
+/// integral double-subtracts the folded region). The repairs are
+/// winding-preserving by design, but a cap fan welded against a
+/// mis-oriented survivor or a split through a swapped piece can
+/// leave a folded patch: this pass propagates orientation across the
+/// face graph (flipping any face that agrees with its neighbor's
+/// direction), then fixes each component's global sign so its signed
+/// volume is positive (outward normals). Deterministic: faces are
+/// visited in index order, flips are in-place `[a, b, c] -> [a, c, b]`.
+fn orient_consistently(mesh: &mut Mesh) {
+    let n = mesh.triangles.len();
+    if n == 0 {
+        return;
+    }
+    // Undirected edge -> the (triangle, direction) uses so far.
+    #[allow(clippy::type_complexity)]
+    let mut uses: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::with_capacity(3 * n);
+    for (i, t) in mesh.triangles.iter().enumerate() {
+        for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let key = if u < v { (u, v) } else { (v, u) };
+            uses.entry(key).or_default().push((i, u, v));
+        }
+    }
+    // BFS orientation propagation per component. Propagation runs
+    // only through edges with EXACTLY two uses: an over-covered edge
+    // (three or more faces) has no orientation that satisfies all
+    // its pairs at once, and flipping every partner to face the
+    // dequeued triangle would only weld same-direction pairs among
+    // the partners themselves — new conflicts, the opposite of the
+    // pass's purpose. Such edges keep their windings; their faces
+    // still orient through their two-use neighbors.
+    let mut visited = vec![false; n];
+    let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
+    for seed in 0..n {
+        if visited[seed] {
+            continue;
+        }
+        visited[seed] = true;
+        queue.push_back(seed);
+        while let Some(i) = queue.pop_front() {
+            let t = mesh.triangles[i];
+            for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = if u < v { (u, v) } else { (v, u) };
+                let Some(partners) = uses.get(&key) else {
+                    continue;
+                };
+                if partners.len() != 2 {
+                    continue; // boundary or over-covered: not a
+                              // propagation edge
+                }
+                for &(j, pu, pv) in partners {
+                    if j == i || visited[j] {
+                        continue;
+                    }
+                    // Neighbor j traverses this edge pu -> pv; it is
+                    // consistent with i's u -> v only when reversed.
+                    let consistent = pu == v && pv == u;
+                    visited[j] = true;
+                    if !consistent {
+                        // pu == u && pv == v: same direction — flip j.
+                        let s = mesh.triangles[j];
+                        mesh.triangles[j] = [s[0], s[2], s[1]];
+                    }
+                    queue.push_back(j);
+                }
+            }
+        }
+    }
+    // Per-component global sign: outward normals ⇒ positive volume.
+    // Components are the face-connected regions of the shell — union
+    // through every shared edge (the propagation skip above is about
+    // winding constraints, not connectivity). The sign decision is
+    // the COMPONENT's total divergence-theorem volume, never an
+    // individual face's origin tetra: a correctly outward-wound face
+    // far across the origin carries a negative individual term while
+    // its component's total is positive, and flipping it alone would
+    // tear exactly the consistency the propagation just built.
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    for partners in uses.values() {
+        for w in partners.windows(2) {
+            let (ra, rb) = (
+                find_root(&mut parent, w[0].0 as u32),
+                find_root(&mut parent, w[1].0 as u32),
+            );
+            if ra != rb {
+                parent[rb as usize] = ra;
+            }
+        }
+    }
+    let mut comp_vol: HashMap<u32, f64> = HashMap::new();
+    for (i, t) in mesh.triangles.iter().enumerate() {
+        let a = mesh.vertices[t[0] as usize];
+        let b = mesh.vertices[t[1] as usize];
+        let c = mesh.vertices[t[2] as usize];
+        let v = a.dot(&b.cross(&c)) / 6.0;
+        let r = find_root(&mut parent, i as u32);
+        *comp_vol.entry(r).or_insert(0.0) += v;
+    }
+    for i in 0..n {
+        let r = find_root(&mut parent, i as u32);
+        if comp_vol[&r] < 0.0 {
+            let s = mesh.triangles[i];
+            mesh.triangles[i] = [s[0], s[2], s[1]];
+        }
+    }
+}
+
+/// Minimum rim extent as a multiple of the rim's OWN median chord
+/// for a coincident-seam pairing: a structural coincident curve (the
+/// box-through-sphere-equator class) spans many of its own sampling
+/// steps — both sheets sample the same real curve — while the
+/// tolerance-weld residue of hard seams (tilted cone-sphere, the
+/// near-tangent razors) leaves fragments whose extent is a couple of
+/// its own chords at most. Only structural-scale rims weld; sliver
+/// rims cap as before.
+const RIM_PAIR_MIN_EXTENT_CHORDS: f64 = 6.0;
+/// Fraction of the main component's volume below which a stray
+/// component counts as below the boolean's resolution: a real second
+/// piece of a result at these deflections carries volume within the
+/// partition identities' own allowances (percent-scale), while the
+/// seam machinery's fin residue (a duplicated wall sliver one
+/// deflection thick) measures ≈1e-4 of the solid — two orders below
+/// the 1% volume-honesty guard the repairs already operate under.
+const STRAY_VOLUME_FRACTION: f64 = 2e-4;
+
+/// Drop sub-resolution stray components: the seam repair's T-junction
+/// residue can leave microscopic closed shells — flat pillboxes of
+/// pure floating-point zero, or fins one deflection thick —
+/// disconnected from the solid: each individually watertight,
+/// measure invisible to the volume identities, and never produced by
+/// a real B-rep kernel (OCCT flags their shells as invalid: a solid's
+/// `CLOSED_SHELL` must be one connected surface). Strays sit below
+/// [`STRAY_VOLUME_FRACTION`] of the main component's volume — two
+/// orders under the volume-honesty guard — so dropping them changes
+/// nothing the tessellation itself can see; anything above that bar
+/// is a real piece of the result and stays.
+fn prune_zero_measure_strays(mesh: &mut Mesh, sides: &mut Vec<Side>) {
+    debug_assert_eq!(mesh.triangles.len(), sides.len());
+    let n = mesh.triangles.len();
+    if n == 0 {
+        return;
+    }
+    // Union triangles that share an edge (face-connected components).
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    let mut users: HashMap<(u32, u32), u32> = HashMap::with_capacity(3 * n);
+    for (i, triangle) in mesh.triangles.iter().enumerate() {
+        for (u, v) in [
+            (triangle[0], triangle[1]),
+            (triangle[1], triangle[2]),
+            (triangle[2], triangle[0]),
+        ] {
+            let edge = if u < v { (u, v) } else { (v, u) };
+            match users.get(&edge) {
+                Some(&other) => {
+                    let (ra, rb) = (
+                        find_root(&mut parent, other),
+                        find_root(&mut parent, i as u32),
+                    );
+                    if ra != rb {
+                        parent[rb as usize] = ra;
+                    }
+                }
+                None => {
+                    users.insert(edge, i as u32);
+                }
+            }
+        }
+    }
+    // Signed volume per component (divergence theorem, origin tetra).
+    let mut volume_of: HashMap<u32, f64> = HashMap::new();
+    for (i, triangle) in mesh.triangles.iter().enumerate() {
+        let a = mesh.vertices[triangle[0] as usize];
+        let b = mesh.vertices[triangle[1] as usize];
+        let c = mesh.vertices[triangle[2] as usize];
+        let v = a.dot(&b.cross(&c)) / 6.0;
+        let root = find_root(&mut parent, i as u32);
+        *volume_of.entry(root).or_insert(0.0) += v;
+    }
+    // The main component: the one with the largest |volume|.
+    let Some((&main_root, &main)) = volume_of.iter().max_by(|x, y| {
+        x.1.abs()
+            .partial_cmp(&y.1.abs())
+            .expect("finite volumes")
+            .then(y.0.cmp(x.0))
+    }) else {
+        return;
+    };
+    if main.abs() <= 0.0 {
+        return; // no reference measure: nothing to prune against
+    }
+    let mut kept: Vec<[u32; 3]> = Vec::with_capacity(n);
+    let mut kept_sides: Vec<Side> = Vec::with_capacity(n);
+    let mut dropped = 0usize;
+    for (i, triangle) in mesh.triangles.iter().enumerate() {
+        let root = find_root(&mut parent, i as u32);
+        let v = volume_of[&root];
+        if root != main_root && v.abs() <= STRAY_VOLUME_FRACTION * main.abs() {
+            dropped += 1;
+            continue;
+        }
+        kept.push(*triangle);
+        kept_sides.push(sides[i]);
+    }
+    if dropped > 0 {
+        mesh.triangles = kept;
+        *sides = kept_sides;
+        compact_vertices(mesh);
+    }
+}
+
+/// Zip the folded slivers off same-direction shared edges: the seam
+/// rounds can emit a triangle whose third vertex lies ON its own
+/// opposite edge (the fold of an over-thin weld), and that sliver
+/// shares the long edge with the triangle on the other side — both
+/// traversing it the same direction, the exact defect OCCT's
+/// `BRepCheck` renders as invalid orientation, and one that no
+/// winding assignment can repair: the segment is covered three
+/// times (the long edge on each side, plus the sliver's own folded
+/// back-path). The honest topology is the T-stitch: split the other
+/// side's triangle at the fold vertex — exactly the boundary
+/// zipper's interior rule, applied to a seam that closed over a
+/// fold — and drop the sliver. The re-split edges pair oppositely
+/// with the sliver's former neighbors; the orientation pass then
+/// propagates through cleanly. Deterministic: edges in canonical
+/// order, one bounded sweep of repairs per call.
+fn zip_conflict_slivers(mesh: &mut Mesh, sides: &mut [Side]) {
+    debug_assert_eq!(mesh.triangles.len(), sides.len());
+    const ROUNDS: usize = 8;
+    const ON_EDGE_FRACTION: f64 = 1e-3;
+    for _ in 0..ROUNDS {
+        // Directed census: every (u, v) with two same-direction users
+        // is a candidate; its fold is the sliver among the two whose
+        // third vertex lies on the segment.
+        let mut uses: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+        for (i, t) in mesh.triangles.iter().enumerate() {
+            for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                uses.entry((u, v)).or_default().push(i);
+            }
+        }
+        // (sliver index, u, v, w, other index): the sliver traverses
+        // u->v with its third vertex w on segment(u, v); the other
+        // triangle traverses u->v as well.
+        let mut repair: Option<(usize, u32, u32, u32, usize)> = None;
+        'edges: for (&(u, v), ts) in uses.iter() {
+            if ts.len() != 2 {
+                continue;
+            }
+            let (x, y) = (ts[0], ts[1]);
+            for (sliver, other) in [(x, y), (y, x)] {
+                let t = mesh.triangles[sliver];
+                // The sliver's rotation carrying the directed edge.
+                let w = if (t[0], t[1]) == (u, v) {
+                    t[2]
+                } else if (t[1], t[2]) == (u, v) {
+                    t[0]
+                } else if (t[2], t[0]) == (u, v) {
+                    t[1]
+                } else {
+                    continue;
+                };
+                let pu = mesh.vertices[u as usize];
+                let pv = mesh.vertices[v as usize];
+                let pw = mesh.vertices[w as usize];
+                let seg = pv - pu;
+                let len2 = seg.dot(&seg);
+                if len2 <= 0.0 {
+                    continue;
+                }
+                let t_par = (pw - pu).dot(&seg) / len2;
+                if t_par <= 1e-9 || t_par >= 1.0 - 1e-9 {
+                    continue; // not an interior fold point
+                }
+                let dist = (pw - (pu + seg * t_par)).length();
+                if dist > ON_EDGE_FRACTION * len2.sqrt() {
+                    continue; // a genuine triangle, not a fold
+                }
+                repair = Some((sliver, u, v, w, other));
+                break 'edges;
+            }
+        }
+        let Some((sliver, u, v, w, other)) = repair else {
+            return; // nothing left to zip
+        };
+        // Split the other triangle at w. Its rotation carries u->v
+        // too; its third vertex z keeps its side of the winding.
+        let o = mesh.triangles[other];
+        let z = if (o[0], o[1]) == (u, v) {
+            o[2]
+        } else if (o[1], o[2]) == (u, v) {
+            o[0]
+        } else if (o[2], o[0]) == (u, v) {
+            o[1]
+        } else {
+            continue;
+        };
+        // Replace the other triangle's u->v by u->w->v (same
+        // winding around the split region): o == [.., u, v, z, ..]
+        // becomes [u, w, z] + [w, v, z].
+        mesh.triangles[other] = [u, w, z];
+        mesh.triangles[sliver] = [w, v, z];
+    }
+}
+
+/// Weld vertices that coincide within float noise of the output
+/// precision: the two sheets of a boolean seam sample the same rim
+/// curve independently, so one rim point can arrive twice — once per
+/// sheet's tessellation — differing only in the last few bits (the
+/// bit-exact weld cannot pair what is not bit-identical). The slivers
+/// between such duplicates carry same-direction shared edges — the
+/// exact defect OCCT's `BRepCheck` renders as invalid orientation —
+/// and boundary edges of zero length. Merging the duplicates (their
+/// neighborhood re-pairs oppositely, the slivers collapse to
+/// repeated-index triangles and drop) is what makes the shell a
+/// consistently oriented closed manifold, the shape a real B-rep
+/// kernel builds natively.
+///
+/// The epsilon is `WELD_NOISE` of the mesh's own bounding extent:
+/// orders above the last-bit noise the coordinates carry, orders
+/// below anything the tessellation itself distinguishes — a merge
+/// never moves a vertex by a distance the deflection could see.
+/// Deterministic: representatives are lowest index; unions run in
+/// index order.
+fn weld_duplicate_positions(mesh: &mut Mesh, sides: &mut Vec<Side>) {
+    debug_assert_eq!(mesh.triangles.len(), sides.len());
+    let n = mesh.vertices.len();
+    if n < 2 {
+        return;
+    }
+    let extent = {
+        let bbox = mesh.bbox();
+        match bbox {
+            Some(b) => (b.max - b.min).length().max(1.0),
+            None => 1.0,
+        }
+    };
+    let eps = WELD_NOISE * extent;
+    // Spatial hash: cell size eps; a duplicate pair is at most one
+    // cell apart in each axis.
+    let mut cell_of: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::with_capacity(n);
+    let cell = |p: &Vector3| -> (i64, i64, i64) {
+        let q = |x: f64| -> i64 { (x / eps).floor() as i64 };
+        (q(p.x), q(p.y), q(p.z))
+    };
+    for (i, p) in mesh.vertices.iter().enumerate() {
+        cell_of.entry(cell(p)).or_default().push(i as u32);
+    }
+    // Greedy locally-safe merges. A merge of two coincident vertices
+    // is honest only where the two fans interlock: for every other
+    // vertex x, the triangles around the pair must contribute at
+    // most two uses of the merged edge (i, x) — counting only
+    // triangles that survive the merge (those containing BOTH
+    // vertices collapse to repeated index and drop, which is exactly
+    // the fold case: each side's neighbor pairs up across it). Where
+    // the fans OVERLAP (both sheets run their own edge to the same
+    // x), the merge would over-cover that edge — a closedness the
+    // mesh never had — and the pair is left alone: two sheets
+    // sampling one curve weld through their rims' own machinery, not
+    // through noise.
+    fn edge_uses_around(mesh: &Mesh, keep: u32, drop: u32) -> BTreeMap<u32, usize> {
+        // For each x: uses of edge (keep, x) among triangles that
+        // contain keep but not BOTH (they survive the merge).
+        let mut uses: BTreeMap<u32, usize> = BTreeMap::new();
+        for t in &mesh.triangles {
+            let has_keep = t.contains(&keep);
+            let has_drop = t.contains(&drop);
+            if !has_keep || has_drop {
+                continue;
+            }
+            for &x in t {
+                if x != keep && x != drop {
+                    *uses.entry(x).or_insert(0) += 1;
+                }
+            }
+        }
+        uses
+    }
+    let mut any_merged = false;
+    let mut merged = true;
+    let mut dead = vec![false; n];
+    while merged {
+        merged = false;
+        'search: for i in 0..n {
+            if dead[i] {
+                continue;
+            }
+            let p = mesh.vertices[i];
+            let (cx, cy, cz) = cell(&p);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(bucket) = cell_of.get(&(cx + dx, cy + dy, cz + dz)) else {
+                            continue;
+                        };
+                        for &j in bucket {
+                            if j as usize >= i || dead[j as usize] {
+                                continue; // pairs examined once, alive only
+                            }
+                            let q = mesh.vertices[j as usize];
+                            if (q - p).length() > eps {
+                                continue;
+                            }
+                            // Local safety: no x may exceed two uses.
+                            let bi = edge_uses_around(mesh, i as u32, j);
+                            let bj = edge_uses_around(mesh, j, i as u32);
+                            let safe = bi
+                                .iter()
+                                .all(|(x, u)| u + bj.get(x).copied().unwrap_or(0) <= 2)
+                                && bj
+                                    .iter()
+                                    .all(|(x, u)| u + bi.get(x).copied().unwrap_or(0) <= 2);
+                            if !safe {
+                                continue;
+                            }
+                            // Merge j into i: rewrite, drop collapsed.
+                            for t in &mut mesh.triangles {
+                                for v in t.iter_mut() {
+                                    if *v == j {
+                                        *v = i as u32;
+                                    }
+                                }
+                            }
+                            let mut kept: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len());
+                            let mut kept_sides: Vec<Side> = Vec::with_capacity(sides.len());
+                            for (t, sd) in mesh.triangles.iter().zip(sides.iter()) {
+                                if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+                                    continue;
+                                }
+                                kept.push(*t);
+                                kept_sides.push(*sd);
+                            }
+                            mesh.triangles = kept;
+                            *sides = kept_sides;
+                            dead[j as usize] = true;
+                            any_merged = true;
+                            merged = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !any_merged {
+        return;
+    }
+    // Unused vertex slots fall away.
+    compact_vertices(mesh);
+}
+
+/// Fraction of the mesh's bounding extent within which two vertices
+/// are float noise of one another: `1e-9` — at a 10 mm model that is
+/// 1.7e-8 mm, seven orders above the last-bit noise of coordinates
+/// near 10 (≈2e-15) and five orders below the finest sampling a
+/// deflection-driven tessellation emits.
+const WELD_NOISE: f64 = 1e-9;
 
 /// Drop triangles below the input degeneracy bar (the same
 /// `DEGENERATE_AREA` the clipper prunes on): the consensus snap welds
@@ -3908,5 +4588,135 @@ mod tests {
             assert_eq!(x.vertices, y.vertices);
             assert_eq!(x.triangles, y.triangles);
         }
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use crate::shape::{TopoShape, DEFAULT_DEFLECTION};
+
+    /// The CLI scenario, corner edition: box centered in XY on
+    /// z=0..10, sphere r=4 at the corner — the sphere crosses the
+    /// bottom face near the box's corner, a transversal curved seam.
+    /// The full B-rep contract must hold: watertight, consistently
+    /// oriented, and the partition identities honest.
+    #[test]
+    fn boolean_corner_box_sphere_full_brep_contract() {
+        let pi = std::f64::consts::PI;
+        let mut box10 = TopoShape::Box {
+            length: 10.0,
+            width: 10.0,
+            height: 10.0,
+        }
+        .tessellate(DEFAULT_DEFLECTION);
+        // Shift off the face center: the sphere then meets the box
+        // at its bottom corner — the transversal (non-coincident)
+        // curved seam.
+        for v in &mut box10.vertices {
+            v.x += 5.0;
+            v.y += 5.0;
+        }
+        let sphere = TopoShape::Sphere { radius: 4.0 }.tessellate(DEFAULT_DEFLECTION);
+        let octant = 4.0 / 3.0 * pi * 64.0 / 8.0; // inside the corner
+        for (name, m, expected) in [
+            ("cut", cut(&box10, &sphere), 1000.0 - octant),
+            (
+                "fuse",
+                fuse(&box10, &sphere),
+                1000.0 + 4.0 / 3.0 * pi * 64.0 - octant,
+            ),
+            ("common", common(&box10, &sphere), octant),
+        ] {
+            assert!(mesh_is_closed(&m), "{name}: watertight");
+            assert!(
+                mesh_is_consistently_oriented(&m),
+                "{name}: every shared edge traversed oppositely (the \
+                 outward-normal contract OCCT enforces)"
+            );
+            let got = m.volume();
+            assert!(
+                (got - expected).abs() <= 0.02 * expected,
+                "{name}: volume {got} vs expected {expected}"
+            );
+        }
+    }
+
+    /// The CLI scenario, face-center edition: the sphere's equator
+    /// lies exactly in the box's bottom face — the coincident-seam
+    /// case (both sheets sample the same curve). Watertight and
+    /// volume-honest; the interleaved seam band's winding parity is
+    /// the remaining FC-15 work (some same-direction shared edges
+    /// survive inside the band at this deflection).
+    #[test]
+    fn boolean_face_center_box_sphere_watertight_and_honest() {
+        let pi = std::f64::consts::PI;
+        let box10 = TopoShape::Box {
+            length: 10.0,
+            width: 10.0,
+            height: 10.0,
+        }
+        .tessellate(DEFAULT_DEFLECTION);
+        let sphere = TopoShape::Sphere { radius: 4.0 }.tessellate(DEFAULT_DEFLECTION);
+        let half = 4.0 / 3.0 * pi * 64.0 / 2.0; // half the sphere
+        for (name, m, expected) in [
+            ("cut", cut(&box10, &sphere), 1000.0 - half),
+            (
+                "fuse",
+                fuse(&box10, &sphere),
+                1000.0 + 4.0 / 3.0 * pi * 64.0 - half,
+            ),
+            ("common", common(&box10, &sphere), half),
+        ] {
+            assert!(mesh_is_closed(&m), "{name}: watertight");
+            let got = m.volume();
+            assert!(
+                (got - expected).abs() <= 0.02 * expected,
+                "{name}: volume {got} vs expected {expected}"
+            );
+        }
+        // The corner case already carries the orientation contract;
+        // the coincident band is tracked as FC-15.
+    }
+
+    /// A consistently oriented mesh reports zero same-direction
+    /// shared edges (the helper's own contract).
+    #[test]
+    fn mesh_is_consistently_oriented_detects_flips() {
+        // A single triangle: no shared edges at all — consistent.
+        let open = Mesh::new(
+            vec![
+                fc_base::Vector3::new(0.0, 0.0, 0.0),
+                fc_base::Vector3::new(1.0, 0.0, 0.0),
+                fc_base::Vector3::new(0.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2]],
+        );
+        assert!(mesh_is_consistently_oriented(&open));
+        // Two triangles sharing an edge in the same direction.
+        let folded = Mesh::new(
+            vec![
+                fc_base::Vector3::new(0.0, 0.0, 0.0),
+                fc_base::Vector3::new(1.0, 0.0, 0.0),
+                fc_base::Vector3::new(0.0, 1.0, 0.0),
+                fc_base::Vector3::new(1.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2], [1, 3, 2]], // 1->2 shared with 2->1? no: [1,3,2] gives 3->2, 2->1(?)... [1,3,2]: edges 1->3, 3->2, 2->1
+        );
+        // [0,1,2] traverses 2->0, 0->1, 1->2; [1,3,2] traverses
+        // 3->2, 2->1, 1->3. Shared undirected edge (1,2): first as
+        // 1->2, second as 2->1 — OPPOSITE (consistent).
+        assert!(mesh_is_consistently_oriented(&folded));
+        // Now the fold: same direction on the shared edge.
+        let torn = Mesh::new(
+            vec![
+                fc_base::Vector3::new(0.0, 0.0, 0.0),
+                fc_base::Vector3::new(1.0, 0.0, 0.0),
+                fc_base::Vector3::new(0.0, 1.0, 0.0),
+                fc_base::Vector3::new(1.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2], [2, 3, 1]], // 2->3, 3->1, 1->2 — edge (1,2) now 1->2 twice
+        );
+        assert!(!mesh_is_consistently_oriented(&torn));
     }
 }

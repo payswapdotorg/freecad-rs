@@ -1,12 +1,18 @@
 //! STEP export — a deterministic faceted-B-rep AP203 writer.
 //!
 //! Each mesh-bearing object becomes a `MANIFOLD_SOLID_BREP` of
-//! `CLOSED_SHELL` of triangle `ADVANCED_FACE`s (a `POLY_LOOP` per
-//! triangle on its own `PLANE`): legal STEP that honestly carries a
-//! *tessellation*, not exact B-rep. The product name carries the
+//! `CLOSED_SHELL` of triangle `ADVANCED_FACE`s with **shared edge
+//! topology**: one `VERTEX_POINT` per unique position and one
+//! `EDGE_CURVE` per mesh edge, referenced by its two adjacent faces
+//! through `ORIENTED_EDGE`s in an `EDGE_LOOP`. That is the topology
+//! real B-rep readers (OCCT, FreeCAD) need to stitch the shell into
+//! a solid without sewing heuristics — verified against FreeCAD
+//! 1.0's OCCT importer. The geometry honestly carries a
+//! *tessellation*, not exact B-rep: the product name carries the
 //! faceted marker (`freecad-rs faceted export`), asserted by tests —
 //! the nature is stated in the file itself, per ADR-0002 §3.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use fc_base::Vector3;
@@ -71,6 +77,18 @@ impl Writer {
         let r = self.direction(ref_dir);
         let id = self.id();
         self.raw(id, &format!("AXIS2_PLACEMENT_3D('',#{p},#{a},#{r})"));
+        id
+    }
+
+    /// `LINE` through the segment start with a `VECTOR` of the segment
+    /// length: the parametrized curve geometry of an `EDGE_CURVE`.
+    fn segment_line(&mut self, start_cp: u64, delta: &Vector3) -> u64 {
+        let len = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+        let dir = self.direction(delta);
+        let vec = self.id();
+        self.raw(vec, &format!("VECTOR('',#{dir},{len:.10E})"));
+        let id = self.id();
+        self.raw(id, &format!("LINE('',#{start_cp},#{vec})"));
         id
     }
 }
@@ -180,10 +198,45 @@ fn export_solid(
     product_context: u64,
     geom_context: u64,
 ) {
-    // --- Faces (triangles) ---------------------------------------------
+    // --- Vertex dedup: one CARTESIAN_POINT + VERTEX_POINT per unique
+    //     position (bit-exact key — tessellation reuses exact values).
+    let mut canon: Vec<usize> = vec![usize::MAX; mesh.vertices.len()];
+    let mut seen: HashMap<(u64, u64, u64), usize> = HashMap::new();
+    let mut cp_of: Vec<u64> = Vec::new(); // CARTESIAN_POINT id per canonical vertex
+    let mut vp_of: Vec<u64> = Vec::new(); // VERTEX_POINT id per canonical vertex
+    let mut pos_of: Vec<Vector3> = Vec::new(); // position per canonical vertex
+    for (i, p) in mesh.vertices.iter().enumerate() {
+        let key = (p.x.to_bits(), p.y.to_bits(), p.z.to_bits());
+        let rep = match seen.get(&key) {
+            Some(&r) => r,
+            None => {
+                let r = cp_of.len();
+                seen.insert(key, r);
+                let cp = w.point(p);
+                cp_of.push(cp);
+                let vp = w.id();
+                w.raw(vp, &format!("VERTEX_POINT('',#{cp})"));
+                vp_of.push(vp);
+                pos_of.push(*p);
+                r
+            }
+        };
+        canon[i] = rep;
+    }
+
+    // --- Shared undirected edges: one EDGE_CURVE per (min, max)
+    //     canonical-vertex pair, emitted on first use. The stored
+    //     direction is min→max; a face traversing the other way uses
+    //     ORIENTED_EDGE(...,.F.).
+    let mut edge_of: HashMap<(usize, usize), u64> = HashMap::new();
+
     let mut face_ids = Vec::with_capacity(mesh.triangles.len());
     for t in &mesh.triangles {
         let (ia, ib, ic) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        let (ra, rb, rc) = (canon[ia], canon[ib], canon[ic]);
+        if ra == rb || rb == rc || ra == rc {
+            continue; // collapsed to a vertex or an edge: not a face
+        }
         let a = mesh.vertices[ia];
         let b = mesh.vertices[ib];
         let c = mesh.vertices[ic];
@@ -213,11 +266,39 @@ fn export_solid(
         let u_len = (u.x * u.x + u.y * u.y + u.z * u.z).sqrt();
         let u = Vector3::new(u.x / u_len, u.y / u_len, u.z / u_len);
 
-        let pa = w.point(&a);
-        let pb = w.point(&b);
-        let pc = w.point(&c);
+        // ORIENTED_EDGEs around (a→b→c→a), sharing EDGE_CURVEs.
+        let mut oes = Vec::with_capacity(3);
+        for (from, to) in [(ra, rb), (rb, rc), (rc, ra)] {
+            let (lo, hi) = if from < to { (from, to) } else { (to, from) };
+            let e = *edge_of.entry((lo, hi)).or_insert_with(|| {
+                // first use: emit VECTOR + LINE + EDGE_CURVE
+                let start = pos_of[lo];
+                let end = pos_of[hi];
+                let delta = Vector3::new(end.x - start.x, end.y - start.y, end.z - start.z);
+                let line = w.segment_line(cp_of[lo], &delta);
+                let e = w.id();
+                w.raw(
+                    e,
+                    &format!("EDGE_CURVE('',#{},#{},#{},.T.)", vp_of[lo], vp_of[hi], line),
+                );
+                e
+            });
+            let oe = w.id();
+            let forward = from < to; // stored direction is min→max
+            w.raw(
+                oe,
+                &format!(
+                    "ORIENTED_EDGE('',*,*,#{e},{})",
+                    if forward { ".T." } else { ".F." }
+                ),
+            );
+            oes.push(oe);
+        }
         let loop_id = w.id();
-        w.raw(loop_id, &format!("POLY_LOOP('',(#{pa},#{pb},#{pc}))"));
+        w.raw(
+            loop_id,
+            &format!("EDGE_LOOP('',(#{},#{},#{}))", oes[0], oes[1], oes[2]),
+        );
         let bound = w.id();
         w.raw(bound, &format!("FACE_OUTER_BOUND('',#{loop_id},.T.)"));
         let axis = w.axis2(&a, &n, &u);

@@ -315,8 +315,10 @@ committed to the repo.
 
 `Part::Cut`, `Part::Fuse` and `Part::Common` link to a `Base` and a
 `Tool` object and combine their tessellated geometry at recompute time
-(a BSP-tree mesh boolean; watertight for watertight box/cylinder
-operands — curved-seam sphere booleans are on the roadmap):
+(a BSP-tree mesh boolean; watertight for watertight operands, curved
+seams included — the seam's weld keeps the operands' own surfaces
+exact, and the output shell is consistently oriented, the shape
+contract a B-rep kernel like OCCT enforces):
 
 ```sh
 freecad-rs add demo.fcstd --name Notch cut --base Base --tool Stem
