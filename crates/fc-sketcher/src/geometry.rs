@@ -141,7 +141,7 @@ impl Geometry {
     ///
     /// | kind       | Start              | End                | Center |
     /// |------------|--------------------|--------------------|--------|
-    /// | Point      | the point itself   | —                  | —      |
+    /// | Point      | the point itself   | the point itself (FreeCAD's GeomPoint resolves every slot to the same GCS point) | same |
     /// | Line       | segment start      | segment end        | —      |
     /// | Circle     | —                  | —                  | center |
     /// | Arc        | `center + r*(cos a_start, sin a_start)` | `... a_end ...` | center |
@@ -150,7 +150,7 @@ impl Geometry {
     /// so they move when the arc's center/radius/angles move.
     pub fn point_at(&self, pos: PointPos) -> Option<Point> {
         match (self, pos) {
-            (Geometry::Point { x, y }, PointPos::Start) => Some(Point { x: *x, y: *y }),
+            (Geometry::Point { x, y }, _) => Some(Point { x: *x, y: *y }),
             (Geometry::LineSegment { start, .. }, PointPos::Start) => Some(*start),
             (Geometry::LineSegment { end, .. }, PointPos::End) => Some(*end),
             (Geometry::Circle { center, .. }, PointPos::Center) => Some(*center),
@@ -386,8 +386,11 @@ mod tests {
     fn point_at_resolves_every_valid_slot() {
         let pt = Geometry::Point { x: 1.0, y: 2.0 };
         assert_eq!(pt.point_at(PointPos::Start), Some(Point::new(1.0, 2.0)));
-        assert_eq!(pt.point_at(PointPos::End), None);
-        assert_eq!(pt.point_at(PointPos::Center), None);
+        // A standalone point carries every slot — FreeCAD's GeomPoint
+        // resolves all of them to the same GCS point (its writer can
+        // reference a point as Third/ThirdPos="3", e.g. for Symmetric).
+        assert_eq!(pt.point_at(PointPos::End), Some(Point::new(1.0, 2.0)));
+        assert_eq!(pt.point_at(PointPos::Center), Some(Point::new(1.0, 2.0)));
 
         let line = Geometry::LineSegment {
             start: Point::new(0.0, 0.0),

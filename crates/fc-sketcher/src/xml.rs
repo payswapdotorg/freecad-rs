@@ -34,6 +34,9 @@
 //! | 10   | `Equal`         | `first`, `second` |
 //! | 11   | `Angle`         | `first`, `second`, `value` |
 //! | 12   | `PointOnObject` | `first`, `firstpos`, `second` |
+//! | 13   | `Tangent`       | `first`, `second` |
+//! | 14   | `Symmetric`     | `first`, `firstpos`, `second`, `secondpos`, `third` (+ `thirdpos` only when symmetric about a point) |
+//! | 15   | `Block`         | `first` |
 //!
 //! `first`/`second` are geometry indices ([`GeoId`] values, i.e. positions
 //! in the geometry list); `firstpos`/`secondpos` are [`PointPos`] ordinals
@@ -193,6 +196,33 @@ impl Sketch {
                     attrs.push(format!("first=\"{}\"", g1.0));
                     attrs.push(format!("firstpos=\"{}\"", pos1.ordinal()));
                     attrs.push(format!("second=\"{}\"", g2.0));
+                }
+                Constraint::Tangent { g1, g2 } => {
+                    attrs.push("type=\"13\"".to_string());
+                    attrs.push(format!("first=\"{}\"", g1.0));
+                    attrs.push(format!("second=\"{}\"", g2.0));
+                }
+                Constraint::Symmetric {
+                    g1,
+                    pos1,
+                    g2,
+                    pos2,
+                    g3,
+                    pos3,
+                } => {
+                    attrs.push("type=\"14\"".to_string());
+                    attrs.push(format!("first=\"{}\"", g1.0));
+                    attrs.push(format!("firstpos=\"{}\"", pos1.ordinal()));
+                    attrs.push(format!("second=\"{}\"", g2.0));
+                    attrs.push(format!("secondpos=\"{}\"", pos2.ordinal()));
+                    attrs.push(format!("third=\"{}\"", g3.0));
+                    if let Some(slot) = pos3 {
+                        attrs.push(format!("thirdpos=\"{}\"", slot.ordinal()));
+                    }
+                }
+                Constraint::Block { g } => {
+                    attrs.push("type=\"15\"".to_string());
+                    attrs.push(format!("first=\"{}\"", g.0));
                 }
             }
             out.push_str(&format!("  <Constraint {}/>\n", attrs.join(" ")));
@@ -466,8 +496,59 @@ fn constraint_from_attrs(attrs: &[(String, String)]) -> Result<Constraint, Sketc
                 g2: second()?,
             })
         }
+        13 => {
+            require_only(attrs, &["type", "first", "second"], "Constraint")?;
+            Ok(Constraint::Tangent {
+                g1: first()?,
+                g2: second()?,
+            })
+        }
+        14 => {
+            // `thirdpos` is present only in the about-a-point form.
+            let thirdpos = attrs
+                .iter()
+                .find(|(k, _)| k == "thirdpos")
+                .map(|(_, v)| v.as_str());
+            if thirdpos.is_some() {
+                require_only(
+                    attrs,
+                    &[
+                        "type",
+                        "first",
+                        "firstpos",
+                        "second",
+                        "secondpos",
+                        "third",
+                        "thirdpos",
+                    ],
+                    "Constraint",
+                )?;
+            } else {
+                require_only(
+                    attrs,
+                    &["type", "first", "firstpos", "second", "secondpos", "third"],
+                    "Constraint",
+                )?;
+            }
+            let pos3 = match thirdpos {
+                Some(v) => Some(parse_pos(v, "Constraint/@thirdpos")?),
+                None => None,
+            };
+            Ok(Constraint::Symmetric {
+                g1: first()?,
+                pos1: firstpos()?,
+                g2: second()?,
+                pos2: secondpos()?,
+                g3: parse_geo(attr(attrs, "third")?, "Constraint/@third")?,
+                pos3,
+            })
+        }
+        15 => {
+            require_only(attrs, &["type", "first"], "Constraint")?;
+            Ok(Constraint::Block { g: first()? })
+        }
         other => Err(SketchError::Xml(format!(
-            "unknown Constraint type {other} (expected 0..=12)"
+            "unknown Constraint type {other} (expected 0..=15)"
         ))),
     }
 }
@@ -1044,5 +1125,106 @@ mod tests {
             crate::SolveResult::Solved { iterations, .. } => assert_eq!(iterations, 0),
             other => panic!("expected Solved, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tangent_symmetric_block_tests {
+    use super::*;
+    use crate::geometry::{Geometry, Point};
+
+    /// The three FreeCAD-native kinds round-trip through the fragment
+    /// format bit-for-bit, including Symmetric's third slot (about-line
+    /// without `thirdpos`, about-point with it).
+    #[test]
+    fn tangent_symmetric_block_round_trip_bit_exact() {
+        let mut sk = Sketch::new();
+        let l = sk.add_geometry(Geometry::LineSegment {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(10.0, 0.0),
+        }); // 0
+        let c = sk.add_geometry(Geometry::Circle {
+            center: Point::new(5.0, 4.0),
+            radius: 4.0,
+        }); // 1
+        let p1 = sk.add_geometry(Geometry::Point { x: 0.0, y: 20.0 }); // 2
+        let p2 = sk.add_geometry(Geometry::Point { x: 0.0, y: -20.0 }); // 3
+        let ps = sk.add_geometry(Geometry::Point { x: 15.0, y: 30.0 }); // 4
+        sk.add_constraint(Constraint::Tangent { g1: l, g2: c })
+            .unwrap();
+        sk.add_constraint(Constraint::Symmetric {
+            g1: p1,
+            pos1: PointPos::Start,
+            g2: p2,
+            pos2: PointPos::End,
+            g3: l,
+            pos3: None,
+        })
+        .unwrap();
+        sk.add_constraint(Constraint::Symmetric {
+            g1: p1,
+            pos1: PointPos::Center,
+            g2: p2,
+            pos2: PointPos::Center,
+            g3: ps,
+            pos3: Some(PointPos::Center),
+        })
+        .unwrap();
+        sk.add_constraint(Constraint::Block { g: ps }).unwrap();
+
+        let xml = sk.to_xml();
+        let back = from_xml(&xml).unwrap();
+        assert_eq!(back.to_xml(), xml, "fragment round-trips bit-exactly");
+        assert_eq!(back.constraints().len(), 4);
+        assert!(matches!(
+            back.constraints()[0],
+            Constraint::Tangent { g1, g2 } if g1.0 == 0 && g2.0 == 1
+        ));
+        assert!(matches!(
+            back.constraints()[1],
+            Constraint::Symmetric { pos3: None, g3, .. } if g3.0 == 0
+        ));
+        assert!(matches!(
+            back.constraints()[2],
+            Constraint::Symmetric {
+                pos3: Some(PointPos::Center),
+                g3,
+                ..
+            } if g3.0 == 4
+        ));
+        assert!(matches!(
+            back.constraints()[3],
+            Constraint::Block { g } if g.0 == 4
+        ));
+
+        // The emitted fragment carries the documented shape: type 13/14/15,
+        // with `thirdpos` present only in the about-point Symmetric.
+        assert!(xml.contains(r#"<Constraint type="13" first="0" second="1"/>"#));
+        assert!(xml.contains(
+            r#"<Constraint type="14" first="2" firstpos="1" second="3" secondpos="2" third="0"/>"#
+        ));
+        assert!(xml.contains(r#"<Constraint type="14" first="2" firstpos="3" second="3" secondpos="3" third="4" thirdpos="3"/>"#));
+        assert!(xml.contains(r#"<Constraint type="15" first="4"/>"#));
+    }
+
+    /// The strict parser rejects unknown attribute shapes on the new
+    /// kinds (the honest-error contract of the fragment grammar).
+    #[test]
+    fn new_kinds_reject_unknown_attributes() {
+        assert!(from_xml(
+            "<Sketch>\n  <Geometry type=\"0\" x=\"0\" y=\"0\"/>\n  \
+             <Constraint type=\"13\" first=\"0\" second=\"0\" value=\"1\"/>\n</Sketch>\n"
+        )
+        .is_err());
+        assert!(from_xml(
+            "<Sketch>\n  <Geometry type=\"0\" x=\"0\" y=\"0\"/>\n  \
+             <Constraint type=\"14\" first=\"0\" firstpos=\"1\" second=\"0\" secondpos=\"1\"/>\n</Sketch>\n"
+        )
+        .is_err());
+        assert!(from_xml(
+            "<Sketch>\n  <Geometry type=\"0\" x=\"0\" y=\"0\"/>\n  \
+             <Constraint type=\"15\" first=\"0\" second=\"0\"/>\n</Sketch>\n"
+        )
+        .is_err());
     }
 }

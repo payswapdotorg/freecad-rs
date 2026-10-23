@@ -51,7 +51,7 @@ Honest, incremental, no vaporware.
       notation), conversion table incl. affine `C`/`F`, canonical
       storage (mm/kg/s/A/K/mol/cd/deg)
 - [x] **FC-5** Sketcher v1 — `fc-sketcher` crate: point/line/circle/
-      arc geometry, 13 constraint kinds, Levenberg-Marquardt solver
+      arc geometry, 16 constraint kinds, Levenberg-Marquardt solver
       (fd Jacobian, normal equations, honest DOF/overconstraint
       reporting, failure leaves geometry untouched), FreeCAD-style
       `<Sketch>` XML fragments

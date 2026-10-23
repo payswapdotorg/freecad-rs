@@ -455,20 +455,26 @@ fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
     for c in sketch.constraints() {
         // FreeCAD's element references: a used slot is (GeoId, pos
         // ordinal — shared numbering: start=1, end=2, mid=3), an unused
-        // one is GeoUndef (-2000) with pos 0.
-        let (ty, first, firstpos, second, secondpos, value) = match *c {
+        // one is GeoUndef (-2000) with pos 0. `third`/`thirdpos` carry
+        // Symmetric's mirror reference (Third; 0 for the about-line
+        // form, the point's slot for about-point).
+        let (ty, first, firstpos, second, secondpos, third, thirdpos, value) = match *c {
             Constraint::Coincident { g1, pos1, g2, pos2 } => (
                 1,
                 g1.0 as i64,
                 pos1.ordinal(),
                 g2.0 as i64,
                 pos2.ordinal(),
+                -2000,
+                0,
                 None,
             ),
-            Constraint::Horizontal { g } => (2, g.0 as i64, 0, -2000, 0, None),
-            Constraint::Vertical { g } => (3, g.0 as i64, 0, -2000, 0, None),
-            Constraint::Parallel { g1, g2 } => (4, g1.0 as i64, 0, g2.0 as i64, 0, None),
-            Constraint::Perpendicular { g1, g2 } => (10, g1.0 as i64, 0, g2.0 as i64, 0, None),
+            Constraint::Horizontal { g } => (2, g.0 as i64, 0, -2000, 0, -2000, 0, None),
+            Constraint::Vertical { g } => (3, g.0 as i64, 0, -2000, 0, -2000, 0, None),
+            Constraint::Parallel { g1, g2 } => (4, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None),
+            Constraint::Perpendicular { g1, g2 } => {
+                (10, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None)
+            }
             Constraint::Distance {
                 g1,
                 pos1,
@@ -481,6 +487,8 @@ fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
                 pos1.ordinal(),
                 g2.0 as i64,
                 pos2.ordinal(),
+                -2000,
+                0,
                 Some(value),
             ),
             Constraint::DistanceX {
@@ -495,6 +503,8 @@ fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
                 pos1.ordinal(),
                 g2.0 as i64,
                 pos2.ordinal(),
+                -2000,
+                0,
                 Some(value),
             ),
             Constraint::DistanceY {
@@ -509,15 +519,51 @@ fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
                 pos1.ordinal(),
                 g2.0 as i64,
                 pos2.ordinal(),
+                -2000,
+                0,
                 Some(value),
             ),
-            Constraint::Radius { g, value } => (11, g.0 as i64, 0, -2000, 0, Some(value)),
-            Constraint::Diameter { g, value } => (18, g.0 as i64, 0, -2000, 0, Some(value)),
-            Constraint::Equal { g1, g2 } => (12, g1.0 as i64, 0, g2.0 as i64, 0, None),
-            Constraint::Angle { g1, g2, value } => (9, g1.0 as i64, 0, g2.0 as i64, 0, Some(value)),
-            Constraint::PointOnObject { g1, pos1, g2 } => {
-                (13, g1.0 as i64, pos1.ordinal(), g2.0 as i64, 0, None)
+            Constraint::Radius { g, value } => (11, g.0 as i64, 0, -2000, 0, -2000, 0, Some(value)),
+            Constraint::Diameter { g, value } => {
+                (18, g.0 as i64, 0, -2000, 0, -2000, 0, Some(value))
             }
+            Constraint::Equal { g1, g2 } => (12, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None),
+            Constraint::Angle { g1, g2, value } => {
+                (9, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, Some(value))
+            }
+            Constraint::PointOnObject { g1, pos1, g2 } => (
+                13,
+                g1.0 as i64,
+                pos1.ordinal(),
+                g2.0 as i64,
+                0,
+                -2000,
+                0,
+                None,
+            ),
+            // FreeCAD's simple (edge) Tangent: both slots empty.
+            Constraint::Tangent { g1, g2 } => (5, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None),
+            // FreeCAD's Symmetric: Third is the mirror line (ThirdPos
+            // 0) or the symmetry point (ThirdPos = the point's slot).
+            Constraint::Symmetric {
+                g1,
+                pos1,
+                g2,
+                pos2,
+                g3,
+                pos3,
+            } => (
+                14,
+                g1.0 as i64,
+                pos1.ordinal(),
+                g2.0 as i64,
+                pos2.ordinal(),
+                g3.0 as i64,
+                pos3.map(|p| p.ordinal()).unwrap_or(0),
+                None,
+            ),
+            // FreeCAD's Block: a bare First reference.
+            Constraint::Block { g } => (17, g.0 as i64, 0, -2000, 0, -2000, 0, None),
         };
         let value = value.unwrap_or(0.0);
         xml.push_str(&format!(
@@ -525,7 +571,7 @@ fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
              Value=\"{value:?}\" LabelDistance=\"0.0\" LabelPosition=\"0.0\" \
              IsDriving=\"1\" IsInVirtualSpace=\"0\" IsVisible=\"1\" IsActive=\"1\" \
              First=\"{first}\" FirstPos=\"{firstpos}\" Second=\"{second}\" \
-             SecondPos=\"{secondpos}\" Third=\"-2000\" ThirdPos=\"0\"/>\n",
+             SecondPos=\"{secondpos}\" Third=\"{third}\" ThirdPos=\"{thirdpos}\"/>\n",
         ));
     }
     xml.push_str("     </ConstraintList>\n");
@@ -669,9 +715,13 @@ enum PropValue {
     /// for the FreeCAD file's geometry `i`, or `None` when that
     /// geometry was skipped (off-plane, construction, unmodeled
     /// kind) — later `Constraints` references route through it.
+    /// `geo_kinds` is the parallel kind table ("point"/"line"/
+    /// "circle"/"arc", `None` when skipped) for per-constraint form
+    /// validation.
     Sketch {
         fragment: String,
         geo_remap: Vec<Option<u32>>,
+        geo_kinds: Vec<Option<&'static str>>,
     },
     /// The raw inner XML of FreeCAD 1.0's `Constraints` property
     /// (`Sketcher::PropertyConstraintList`, `<ConstraintList …>`), held
@@ -1083,6 +1133,7 @@ fn parse_object_properties(
     // while no geometry property has been seen (the legacy `<Sketch>`
     // fragment path needs no remap — its indices are already ours).
     let mut geo_remap: Option<Vec<Option<u32>>> = None;
+    let mut geo_kinds: Option<Vec<Option<&'static str>>> = None;
     loop {
         match next_event(reader, buf)? {
             Event::Start(e) if e.name().as_ref() == b"Property" => {
@@ -1098,6 +1149,7 @@ fn parse_object_properties(
                         Some(PropValue::Sketch {
                             fragment,
                             geo_remap: remap,
+                            geo_kinds: kinds,
                         }),
                     ) => {
                         // FreeCAD 1.0's `Geometry` property, already
@@ -1105,6 +1157,7 @@ fn parse_object_properties(
                         // (with its GeoId remap).
                         store_sketch_fragment(object, &fragment, owner, report);
                         geo_remap = Some(remap);
+                        geo_kinds = Some(kinds);
                     }
                     (false, Some(PropValue::SketchConstraints(inner))) => {
                         constraint_inner = Some(inner);
@@ -1167,6 +1220,7 @@ fn parse_object_properties(
                     object,
                     constraint_inner.as_deref(),
                     geo_remap.as_deref(),
+                    geo_kinds.as_deref(),
                     owner,
                     report,
                 );
@@ -1203,14 +1257,23 @@ fn parse_object_properties(
 /// this kernel's 2D sketcher; construction geometry and other curve
 /// types are skipped with per-element warnings — the honest-policy
 /// record of what did not survive the trip.
+///
+/// Returns the fragment, the GeoId remap (entry `i` = our index for
+/// FreeCAD geometry `i`, `None` if skipped) and the parallel geometry
+/// kind table (`"point"`/`"line"`/`"circle"`/`"arc"`, `None` if
+/// skipped) — the kinds let `Constraints` forms be pre-validated per
+/// constraint (a bad one is skipped alone, never fails the splice).
 fn freecad_geometrylist_to_fragment(
     inner: &str,
     owner: &str,
     report: &mut LoadReport,
-) -> (String, Vec<Option<u32>>) {
+) -> (String, Vec<Option<u32>>, Vec<Option<&'static str>>) {
     let mut fragment = String::from("<Sketch>\n");
     // geometry-index translation: FreeCAD's `i` → our index, `None` if skipped
     let mut remap: Vec<Option<u32>> = Vec::new();
+    // geometry kind per FreeCAD index ("point"/"line"/"circle"/"arc",
+    // `None` if skipped) — for per-constraint form validation.
+    let mut kinds: Vec<Option<&'static str>> = Vec::new();
     let mut i = 0usize;
     let mut index = 0usize;
     while let Some(start) = inner[i..].find("<Geometry ") {
@@ -1230,6 +1293,7 @@ fn freecad_geometrylist_to_fragment(
                 "{owner}: geometry #{index} ({kind}) is construction — skipped"
             ));
             remap.push(None);
+            kinds.push(None);
             index += 1;
             continue;
         }
@@ -1244,10 +1308,19 @@ fn freecad_geometrylist_to_fragment(
                         "  <Geometry type=\"0\" x=\"{x:?}\" y=\"{y:?}\"/>\n"
                     ));
                     remap.push(Some(ours));
+                    kinds.push(Some("point"));
                 }
-                _ => report.warnings.push(format!(
-                    "{owner}: geometry #{index} (point) off the XY plane or malformed — skipped"
-                )),
+                _ => {
+                    report.warnings.push(format!(
+                        "{owner}: geometry #{index} (point) off the XY plane or malformed — skipped"
+                    ));
+                    // Every FreeCAD geometry owns exactly one remap/kinds
+                    // slot — a skipped one is `None`, so later GeoIds stay
+                    // aligned (a missing entry would shift every later
+                    // reference onto the wrong geometry).
+                    remap.push(None);
+                    kinds.push(None);
+                }
             },
             "Part::GeomLineSegment" => {
                 match (
@@ -1265,10 +1338,15 @@ fn freecad_geometrylist_to_fragment(
                             "  <Geometry type=\"1\" startx=\"{sx:?}\" starty=\"{sy:?}\" endx=\"{ex:?}\" endy=\"{ey:?}\"/>\n"
                         ));
                         remap.push(Some(ours));
+                        kinds.push(Some("line"));
                     }
-                    _ => report.warnings.push(format!(
-                        "{owner}: geometry #{index} (line) off the XY plane or malformed — skipped"
-                    )),
+                    _ => {
+                        report.warnings.push(format!(
+                            "{owner}: geometry #{index} (line) off the XY plane or malformed — skipped"
+                        ));
+                        remap.push(None);
+                        kinds.push(None);
+                    }
                 }
             }
             "Part::GeomCircle" | "Part::GeomArcOfCircle" => {
@@ -1299,6 +1377,7 @@ fn freecad_geometrylist_to_fragment(
                             "  <Geometry type=\"2\" centerx=\"{cx:?}\" centery=\"{cy:?}\" radius=\"{radius:?}\"/>\n"
                         ));
                         remap.push(Some(ours));
+                        kinds.push(Some("circle"));
                     }
                     (true, Some(radius), _) => match (
                         attr_of_f64(block, "StartAngle"),
@@ -1313,26 +1392,37 @@ fn freecad_geometrylist_to_fragment(
                                 "  <Geometry type=\"3\" centerx=\"{cx:?}\" centery=\"{cy:?}\" radius=\"{radius:?}\" startangle=\"{start_angle:?}\" endangle=\"{end_angle:?}\"/>\n"
                             ));
                             remap.push(Some(ours));
+                            kinds.push(Some("arc"));
                         }
-                        _ => report.warnings.push(format!(
-                            "{owner}: geometry #{index} (arc) malformed angles — skipped"
-                        )),
+                        _ => {
+                            report.warnings.push(format!(
+                                "{owner}: geometry #{index} (arc) malformed angles — skipped"
+                            ));
+                            remap.push(None);
+                            kinds.push(None);
+                        }
                     },
-                    _ => report.warnings.push(format!(
-                        "{owner}: geometry #{index} ({kind}) off the XY plane or malformed — skipped"
-                    )),
+                    _ => {
+                        report.warnings.push(format!(
+                            "{owner}: geometry #{index} ({kind}) off the XY plane or malformed — skipped"
+                        ));
+                        remap.push(None);
+                        kinds.push(None);
+                    }
                 }
             }
             other => {
                 report.warnings.push(format!(
                     "{owner}: geometry #{index} type '{other}' not modeled — skipped"
                 ));
+                remap.push(None);
+                kinds.push(None);
             }
         }
         index += 1;
     }
     fragment.push_str("</Sketch>");
-    (fragment, remap)
+    (fragment, remap, kinds)
 }
 
 /// `key="value"` extraction on a raw XML block (first match, exact case).
@@ -1352,11 +1442,13 @@ fn apply_freecad_constraints(
     object: &mut Box<dyn DocumentObject>,
     inner: Option<&str>,
     geo_remap: Option<&[Option<u32>]>,
+    geo_kinds: Option<&[Option<&'static str>]>,
     owner: &str,
     report: &mut LoadReport,
 ) {
     let Some(inner) = inner else { return };
-    let lines = freecad_constraintlist_to_fragment_lines(inner, geo_remap, owner, report);
+    let lines =
+        freecad_constraintlist_to_fragment_lines(inner, geo_remap, geo_kinds, owner, report);
     if lines.is_empty() {
         return;
     }
@@ -1393,7 +1485,7 @@ fn apply_freecad_constraints(
 /// `<ConstraintList>` element) into our `<Sketch>`-fragment `<Constraint
 /// …/>` lines. FreeCAD's `<Constrain …/>` elements (the missing final
 /// "t" is FreeCAD's own spelling) carry the FreeCAD `ConstraintType`
-/// ordinals; the mappable subset translates onto this kernel's 13
+/// ordinals; the mappable subset translates onto this kernel's 16
 /// kinds, everything else is skipped with a warning naming the FreeCAD
 /// kind — the honest-policy record.
 ///
@@ -1406,6 +1498,7 @@ fn apply_freecad_constraints(
 /// | 2  | Horizontal    | 1 (Horizontal, edge form only) |
 /// | 3  | Vertical      | 2 (Vertical, edge form only) |
 /// | 4  | Parallel      | 3 (Parallel) |
+/// | 5  | Tangent       | 13 (Tangent, simple/edge form only) |
 /// | 6  | Distance      | 5 (Distance, two-point form) |
 /// | 7  | DistanceX     | 6 (DistanceX) |
 /// | 8  | DistanceY      | 7 (DistanceY) |
@@ -1414,21 +1507,26 @@ fn apply_freecad_constraints(
 /// | 11 | Radius        | 8 (Radius) |
 /// | 12 | Equal         | 10 (Equal) |
 /// | 13 | PointOnObject | 12 (PointOnObject) |
+/// | 14 | Symmetric     | 14 (Symmetric, both about-point and about-line) |
+/// | 17 | Block         | 15 (Block) |
 /// | 18 | Diameter      | 9 (Diameter) |
 ///
-/// Skipped with warnings: `Tangent` (5), `Symmetric` (14),
-/// `InternalAlignment` (15), `SnellsLaw` (16), `Block` (17), `Weight`
-/// (19), `Group` (20), `Text` (21) — no counterpart in this kernel's
-/// solver vocabulary; axis/root-point/external references (`GeoId < 0`)
-/// — no such geometries here; reference constraints (`IsDriving="0"`)
-/// — measurements, not equations; the extended forms FreeCAD can express
-/// but this solver cannot (two-point Horizontal/Vertical, point-to-line
-/// Distance, angle-via-point) — skipped instead of silently
-/// re-interpreted. GeoIds route through the geometry remap: skipped
-/// geometry shifts every later index.
+/// Skipped with warnings: `InternalAlignment` (15), `SnellsLaw` (16),
+/// `Weight` (19), `Group` (20), `Text` (21) — no counterpart in this
+/// kernel's solver vocabulary; the point-form Tangent
+/// (tangent-via-point / endpoint-to-endpoint — `FirstPos`/`SecondPos`
+/// nonzero, or a third reference) — angle-at-point equations this
+/// solver does not carry; axis/root-point/external references
+/// (`GeoId < 0`) — no such geometries here; reference constraints
+/// (`IsDriving="0"`) — measurements, not equations; the extended forms
+/// FreeCAD can express but this solver cannot (two-point
+/// Horizontal/Vertical, point-to-line Distance, angle-via-point) —
+/// skipped instead of silently re-interpreted. GeoIds route through
+/// the geometry remap: skipped geometry shifts every later index.
 fn freecad_constraintlist_to_fragment_lines(
     inner: &str,
     geo_remap: Option<&[Option<u32>]>,
+    geo_kinds: Option<&[Option<&'static str>]>,
     owner: &str,
     report: &mut LoadReport,
 ) -> String {
@@ -1506,6 +1604,12 @@ fn freecad_constraintlist_to_fragment_lines(
             12 => 10,
             9 => 11,
             13 => 12,
+            // FreeCAD's Tangent, simple (edge) form only.
+            5 => 13,
+            // FreeCAD's Symmetric — needs Third (validated below).
+            14 => 14,
+            // FreeCAD's Block (freeze a geometry).
+            17 => 15,
             other => {
                 report.warnings.push(format!(
                     "{owner}: constraint #{index}: FreeCAD kind {} ({other}) has no counterpart in this kernel — skipped",
@@ -1526,18 +1630,51 @@ fn freecad_constraintlist_to_fragment_lines(
         let third = attr_of_str(block, "Third")
             .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or(-2000);
+        let third_pos = attr_of_str(block, "ThirdPos")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
         let value = attr_of_f64(block, "Value");
+        // The FreeCAD geometry kind behind a GeoId, when the geometry
+        // table is known — for per-constraint form validation.
+        let kind_of = |orig: i64| -> Option<&'static str> {
+            geo_kinds.and_then(|k| k.get(orig as usize).copied().flatten())
+        };
+
+        // Tangent: only FreeCAD's simple (edge) form maps — the point
+        // forms (tangent-via-point, endpoint-to-endpoint, angle-at-point)
+        // do not; named so the warning is honest about the FreeCAD kind.
+        if frag_ty == 13 && !(first_pos == 0 && second_pos == 0 && third < 0) {
+            skip(
+                report,
+                "Tangent in a point form (tangent-via-point / endpoint-to-endpoint) or with a third reference — only the simple edge form maps",
+            );
+            index += 1;
+            continue;
+        }
+        // Symmetric always carries its third element reference in
+        // FreeCAD; without it the constraint is malformed.
+        if frag_ty == 14 && third < 0 {
+            skip(report, "Symmetric without its third element reference");
+            index += 1;
+            continue;
+        }
 
         // Form validation: which slots each of our kinds can express.
         // - edge-form kinds want pos 0 on both references;
         // - the two-point kinds want pos 1..=3 on both;
-        // - PointOnObject wants a point first, an edge second.
+        // - PointOnObject wants a point first, an edge second;
+        // - Tangent (simple form, checked above) and Symmetric (both
+        //   point slots; the third reference is validated below);
+        // - Block wants a bare First reference.
         let form_ok = match frag_ty {
             0 | 5 | 6 | 7 => (1..=3).contains(&first_pos) && (1..=3).contains(&second_pos),
             1 | 2 | 3 | 4 | 10 | 11 => first_pos == 0 && second_pos == 0,
             8 | 9 => first_pos == 0,
             12 => (1..=3).contains(&first_pos) && second_pos == 0,
-            _ => unreachable!("fragment ordinals cover our 13 kinds"),
+            13 => true, // the simple form, fully checked above
+            14 => (1..=3).contains(&first_pos) && (1..=3).contains(&second_pos),
+            15 => first_pos == 0,
+            _ => unreachable!("fragment ordinals cover our 16 kinds"),
         };
         if !form_ok {
             skip(
@@ -1547,9 +1684,51 @@ fn freecad_constraintlist_to_fragment_lines(
             index += 1;
             continue;
         }
-        // A third reference means a form we do not carry (e.g. a
-        // symmetry point) — only FreeCAD's GeoUndef (-2000) is expected.
-        if third >= 0 {
+        // Symmetric is the one kind that REQUIRES its third reference;
+        // validate its form precisely (about-line vs about-point) so a
+        // bad one is skipped alone rather than failing the splice.
+        let mut symmetric_about_point = false;
+        if frag_ty == 14 {
+            let third_kind = kind_of(third);
+            if third_pos == 0 {
+                // About a line: Third must be a line segment.
+                if let Some(k) = third_kind {
+                    if k != "line" {
+                        skip(report, "Symmetric about something that is not a line");
+                        index += 1;
+                        continue;
+                    }
+                }
+            } else if (1..=3).contains(&third_pos) {
+                // About a point: the slot must exist on the third
+                // geometry's kind (points carry all slots, lines
+                // start/end, circles and arcs only their center).
+                if let Some(k) = third_kind {
+                    let slot_ok = match k {
+                        "point" => true,
+                        "line" => (1..=2).contains(&third_pos),
+                        "circle" | "arc" => third_pos == 3,
+                        _ => false,
+                    };
+                    if !slot_ok {
+                        skip(
+                            report,
+                            "Symmetric about a point slot that geometry does not carry",
+                        );
+                        index += 1;
+                        continue;
+                    }
+                }
+                symmetric_about_point = true;
+            } else {
+                skip(report, "Symmetric with an out-of-range ThirdPos");
+                index += 1;
+                continue;
+            }
+        } else if third >= 0 {
+            // For every other kind a third reference means a form we do
+            // not carry (e.g. angle-via-point) — only FreeCAD's GeoUndef
+            // (-2000) is expected.
             skip(report, "carries a third element reference");
             index += 1;
             continue;
@@ -1566,7 +1745,7 @@ fn freecad_constraintlist_to_fragment_lines(
                 None => Some(orig as u32),
             }
         };
-        let needs_second = !matches!(frag_ty, 1 | 2 | 8 | 9);
+        let needs_second = !matches!(frag_ty, 1 | 2 | 8 | 9 | 15);
         let Some(first) = first.filter(|v| *v >= 0).and_then(map_geo) else {
             skip(
                 report,
@@ -1585,6 +1764,23 @@ fn freecad_constraintlist_to_fragment_lines(
                 continue;
             };
             second
+        } else {
+            0
+        };
+        // Symmetric's third reference routes through the same remap
+        // (`third >= 0` is guaranteed by its form check above).
+        let third_v = if frag_ty == 14 {
+            match map_geo(third) {
+                Some(t) => t,
+                None => {
+                    skip(
+                        report,
+                        "references geometry that is an axis, root point, external, or was skipped",
+                    );
+                    index += 1;
+                    continue;
+                }
+            }
         } else {
             0
         };
@@ -1624,6 +1820,26 @@ fn freecad_constraintlist_to_fragment_lines(
                 "  <Constraint type=\"12\" first=\"{first}\" firstpos=\"{first_pos}\" \
                  second=\"{second_v}\"/>\n"
             ),
+            // Tangent: FreeCAD's simple (edge) form, both slots empty.
+            13 => format!("  <Constraint type=\"13\" first=\"{first}\" second=\"{second_v}\"/>\n"),
+            // Symmetric: `thirdpos` only in the about-a-point form.
+            14 => {
+                if symmetric_about_point {
+                    format!(
+                        "  <Constraint type=\"14\" first=\"{first}\" firstpos=\"{first_pos}\" \
+                         second=\"{second_v}\" secondpos=\"{second_pos}\" \
+                         third=\"{third_v}\" thirdpos=\"{third_pos}\"/>\n"
+                    )
+                } else {
+                    format!(
+                        "  <Constraint type=\"14\" first=\"{first}\" firstpos=\"{first_pos}\" \
+                         second=\"{second_v}\" secondpos=\"{second_pos}\" \
+                         third=\"{third_v}\"/>\n"
+                    )
+                }
+            }
+            // Block: a bare First reference.
+            15 => format!("  <Constraint type=\"15\" first=\"{first}\"/>\n"),
             _ => unreachable!("frag_ty validated above"),
         };
         lines.push_str(&line);
@@ -1747,7 +1963,7 @@ fn parse_property_value(
                 // the raw XML is captured and translated instead.
                 if element_name == b"GeometryList" && prop == "Geometry" {
                     let inner = raw_inner_xml(xml, reader, buf, b"GeometryList")?;
-                    let (fragment, geo_remap) =
+                    let (fragment, geo_remap, geo_kinds) =
                         freecad_geometrylist_to_fragment(&inner, owner, report);
                     return finish_property(
                         reader,
@@ -1755,6 +1971,7 @@ fn parse_property_value(
                         Some(PropValue::Sketch {
                             fragment,
                             geo_remap,
+                            geo_kinds,
                         }),
                     );
                 }

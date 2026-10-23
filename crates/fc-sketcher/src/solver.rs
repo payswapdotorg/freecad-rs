@@ -21,12 +21,23 @@
 //! | `Angle` | `wrap_pi(theta2 - theta1 - value)` with `theta = atan2(dy, dx)` |
 //! | `PointOnObject` (line) | signed point-to-line distance |
 //! | `PointOnObject` (circle) | `(px-cx)^2 + (py-cy)^2 - r^2` |
+//! | `Tangent` (line-circle/arc) | `d^2 - r^2` (signed center-to-line distance, either side) |
+//! | `Tangent` (circle/arc-circle/arc) | `|c1-c2| - (r1+r2)` (external, FreeCAD's default) |
+//! | `Tangent` (line-line) | both of `g2`'s endpoints' signed distance to `g1`'s line (FreeCAD's collinear decomposition, 2 equations) |
+//! | `Symmetric` (about point) | `x1+x2-2*xs`, `y1+y2-2*ys` (2 equations) |
+//! | `Symmetric` (about line) | midpoint's signed distance to the line; `(p2-p1)·line_dir` (2 equations) |
+//! | `Block` | none — the geometry's parameters are pinned (fixed input) |
 //!
 //! # Algorithm
 //!
-//! Levenberg-Marquardt: iterate `(J^T J + lambda * diag) * delta = -J^T r`,
+//! Levenberg-Marquardt: iterate `(J^T J + lambda * I) * delta = -J^T r`,
 //! accepting a step only when it decreases `||r||_2`, shrinking `lambda`
 //! by 3 on success and growing it by 10 on rejection (capped at `1e12`).
+//! The isotropic (Levenberg) term is deliberate: scaling the damping by
+//! the diagonal of `J^T J` leaves near-zero-gradient directions
+//! effectively undamped, and cross-coupling then produces enormous
+//! rejected steps (a tangent circle pair joined by a near-horizontal
+//! line is the canonical case) — `lambda * I` bounds every direction.
 //! The Jacobian is built by **central finite differences** with a relative
 //! step of `1e-7` — a deliberate v1 choice: it is uniform across all
 //! residual types, immune to hand-derivation sign errors, and avoids
@@ -116,14 +127,34 @@ pub enum SolveResult {
 
 impl Sketch {
     /// Degrees of freedom: total geometry parameters minus total
-    /// constraint dimensions. Negative means over-constrained.
+    /// constraint dimensions minus blocked geometries' parameters (a
+    /// `Block`ed geometry's parameters are not free). Negative means
+    /// over-constrained.
     ///
     /// Note this is *arithmetic* DOF (FreeCAD-style); it does not detect
     /// redundant-but-consistent constraint sets.
     pub fn dof(&self) -> isize {
-        let params: usize = self.geometry().iter().map(|g| g.dof()).sum();
-        let dims: usize = self.constraints().iter().map(|c| c.dimension()).sum();
-        params as isize - dims as isize
+        let geos = self.geometry();
+        let params: usize = geos.iter().map(|g| g.dof()).sum();
+        // A blocked geometry's parameters leave the free set; blocking
+        // the same geometry twice is still one frozen set (FreeCAD's
+        // blockedGeometry is a bool per geometry).
+        let mut blocked_ids: Vec<GeoId> = self
+            .constraints()
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Block { g } => Some(*g),
+                _ => None,
+            })
+            .collect();
+        blocked_ids.sort_by_key(|g| g.0);
+        blocked_ids.dedup();
+        let blocked: usize = blocked_ids
+            .iter()
+            .filter_map(|g| geos.get(g.as_index()).map(|gg| gg.dof()))
+            .sum();
+        let dims: usize = self.constraints().iter().map(|c| c.dimension(geos)).sum();
+        (params - blocked) as isize - dims as isize
     }
 
     /// `dof() == 0`. True for consistent redundant systems too (see the
@@ -182,6 +213,31 @@ fn write_back(sk: &mut Sketch, offsets: &[usize], params: &[f64]) {
 /// vector when (and only when) the run succeeded.
 fn run_lm(sk: &Sketch, offsets: &[usize], p0: Vec<f64>) -> (SolveResult, Option<Vec<f64>>) {
     let mut p = p0;
+    // Blocked geometries' parameter ranges — pinned out of the free set
+    // (FreeCAD's fix-parameter treatment: they act as fixed input to
+    // every other constraint and never move).
+    let blocked_ranges: Vec<(usize, usize)> = {
+        let geos = sk.geometry();
+        let mut ids: Vec<GeoId> = sk
+            .constraints()
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Block { g } => Some(*g),
+                _ => None,
+            })
+            .collect();
+        ids.sort_by_key(|g| g.0);
+        ids.dedup();
+        ids.iter()
+            .filter_map(|g| {
+                let i = g.as_index();
+                let geo = geos.get(i)?;
+                let start = *offsets.get(i)?;
+                Some((start, start + geo.dof()))
+            })
+            .collect()
+    };
+    let is_blocked = |i: usize| blocked_ranges.iter().any(|&(a, b)| i >= a && i < b);
     let mut r = residual_vector(sk, offsets, &p);
     let mut r_norm = norm2(&r);
     if r_norm < RESIDUAL_TOL {
@@ -216,6 +272,23 @@ fn run_lm(sk: &Sketch, offsets: &[usize], p0: Vec<f64>) -> (SolveResult, Option<
                 }
             }
         }
+        // Pin blocked parameters out of the free set: zero their rows and
+        // columns, park a 1 on the diagonal and clear their gradient, so
+        // every solve yields exactly `delta = 0` there and the free
+        // parameters see precisely the reduced system (FreeCAD's
+        // fix-parameter treatment).
+        if !blocked_ranges.is_empty() {
+            for i in 0..n {
+                if is_blocked(i) {
+                    for l in 0..n {
+                        a[i * n + l] = 0.0;
+                        a[l * n + i] = 0.0;
+                    }
+                    a[i * n + i] = 1.0;
+                    g[i] = 0.0;
+                }
+            }
+        }
 
         // Step attempts with escalating damping until one improves r_norm.
         let mut accepted = false;
@@ -223,8 +296,15 @@ fn run_lm(sk: &Sketch, offsets: &[usize], p0: Vec<f64>) -> (SolveResult, Option<
         loop {
             let mut sys = a.clone();
             for i in 0..n {
-                let d = sys[i * n + i].max(DIAGONAL_FLOOR);
-                sys[i * n + i] += lambda * d;
+                // Levenberg's isotropic term (lambda * I): it bounds the
+                // step in near-zero-gradient directions, where the
+                // Marquardt diagonal (lambda * J_i^2) leaves the system
+                // effectively undamped and cross-coupling dominates —
+                // e.g. a tangent circle pair whose connecting line is
+                // almost horizontal. The floor keeps a positive pivot for
+                // parameters that appear in no residual (their step
+                // pins to zero).
+                sys[i * n + i] += lambda.max(DIAGONAL_FLOOR);
             }
             let mut delta: Vec<f64> = g.iter().map(|&gv| -gv).collect();
             if gauss_solve(n, &mut sys, &mut delta) {
@@ -301,7 +381,10 @@ fn point_at_params(
     let i = g.as_index();
     let o = offsets[i];
     match (&geos[i], pos) {
-        (Geometry::Point { .. }, PointPos::Start) => (p[o], p[o + 1]),
+        // A standalone point resolves every slot to itself (FreeCAD's
+        // GeomPoint does the same — all PointPos values are the one GCS
+        // point).
+        (Geometry::Point { .. }, _) => (p[o], p[o + 1]),
         (Geometry::LineSegment { .. }, PointPos::Start) => (p[o], p[o + 1]),
         (Geometry::LineSegment { .. }, PointPos::End) => (p[o + 2], p[o + 3]),
         (Geometry::Circle { .. }, PointPos::Center) => (p[o], p[o + 1]),
@@ -321,7 +404,7 @@ fn point_at_params(
 /// Assembles the constraint residual vector at parameter state `p`.
 fn residual_vector(sk: &Sketch, offsets: &[usize], p: &[f64]) -> Vec<f64> {
     let geos = sk.geometry();
-    let mut out = Vec::with_capacity(sk.constraints().iter().map(|c| c.dimension()).sum());
+    let mut out = Vec::with_capacity(sk.constraints().iter().map(|c| c.dimension(geos)).sum());
     let line = |g: GeoId| -> (f64, f64, f64, f64) {
         let (sx, sy) = point_at_params(geos, offsets, p, g, PointPos::Start);
         let (ex, ey) = point_at_params(geos, offsets, p, g, PointPos::End);
@@ -426,6 +509,89 @@ fn residual_vector(sk: &Sketch, offsets: &[usize], p: &[f64]) -> Vec<f64> {
                     _ => unreachable!("add_constraint rejects PointOnObject onto non-line/circle"),
                 }
             }
+            Constraint::Tangent { g1, g2 } => {
+                let is_line =
+                    |g: GeoId| matches!(&geos[g.as_index()], Geometry::LineSegment { .. });
+                match (is_line(g1), is_line(g2)) {
+                    // Line-circle/arc (either order, either side): the
+                    // circle center's signed distance d to the line's
+                    // infinite line satisfies d^2 = r^2 — smooth on both
+                    // sheets, so Newton picks whichever side the initial
+                    // geometry is nearest (FreeCAD's Orientation-less
+                    // edge tangency).
+                    (true, false) => {
+                        let (sx, sy, ex, ey) = line(g1);
+                        let (cx, cy) = pt(g2, PointPos::Center);
+                        let r = radius_of(g2);
+                        let (dx, dy) = (ex - sx, ey - sy);
+                        let len = dx.hypot(dy).max(1e-12);
+                        let d = (dx * (cy - sy) - dy * (cx - sx)) / len;
+                        out.push(d * d - r * r);
+                    }
+                    (false, true) => {
+                        let (sx, sy, ex, ey) = line(g2);
+                        let (cx, cy) = pt(g1, PointPos::Center);
+                        let r = radius_of(g1);
+                        let (dx, dy) = (ex - sx, ey - sy);
+                        let len = dx.hypot(dy).max(1e-12);
+                        let d = (dx * (cy - sy) - dy * (cx - sx)) / len;
+                        out.push(d * d - r * r);
+                    }
+                    // Line-line: FreeCAD's collinear decomposition — both
+                    // of the second line's endpoints on the first line's
+                    // infinite line (2 equations).
+                    (true, true) => {
+                        let (sx, sy, ex, ey) = line(g1);
+                        let (dx, dy) = (ex - sx, ey - sy);
+                        let len = dx.hypot(dy).max(1e-12);
+                        let (px, py) = pt(g2, PointPos::Start);
+                        let (qx, qy) = pt(g2, PointPos::End);
+                        out.push((dx * (py - sy) - dy * (px - sx)) / len);
+                        out.push((dx * (qy - sy) - dy * (qx - sx)) / len);
+                    }
+                    // Circle/arc-circle/arc: external tangency, FreeCAD's
+                    // Orientation-less default: |c1 - c2| = r1 + r2.
+                    (false, false) => {
+                        let (x1, y1) = pt(g1, PointPos::Center);
+                        let (x2, y2) = pt(g2, PointPos::Center);
+                        let (r1, r2) = (radius_of(g1), radius_of(g2));
+                        out.push((x2 - x1).hypot(y2 - y1) - (r1 + r2));
+                    }
+                }
+            }
+            Constraint::Symmetric {
+                g1,
+                pos1,
+                g2,
+                pos2,
+                g3,
+                pos3,
+            } => {
+                let (x1, y1) = pt(g1, pos1);
+                let (x2, y2) = pt(g2, pos2);
+                match pos3 {
+                    // About a point: p1 + p2 = 2 * p_sym.
+                    Some(slot) => {
+                        let (xs, ys) = pt(g3, slot);
+                        out.push(x1 + x2 - 2.0 * xs);
+                        out.push(y1 + y2 - 2.0 * ys);
+                    }
+                    // About a line: the line is the perpendicular
+                    // bisector of [p1, p2] — the midpoint lies on it and
+                    // the connecting segment is perpendicular to it.
+                    None => {
+                        let (sx, sy, ex, ey) = line(g3);
+                        let (dx, dy) = (ex - sx, ey - sy);
+                        let len = dx.hypot(dy).max(1e-12);
+                        let (mx, my) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+                        out.push((dx * (my - sy) - dy * (mx - sx)) / len);
+                        out.push(((x2 - x1) * dx + (y2 - y1) * dy) / len);
+                    }
+                }
+            }
+            // Block contributes no residuals — its parameters are pinned
+            // out of the free set (see run_lm).
+            Constraint::Block { .. } => {}
         }
     }
     out
@@ -1030,6 +1196,195 @@ mod tests {
         // Min-movement: nothing wandered far from the drawn input.
         assert!((x - 1.0).hypot(y - 1.0) < 1.0);
         assert_eq!(sk.dof(), 5); // 2 + 4 - 1
+    }
+
+    #[test]
+    fn solve_tangent_line_circle() {
+        // FreeCAD's simple edge tangency: the circle center's distance
+        // to the line's infinite line equals the radius.
+        let mut sk = Sketch::new();
+        let l = line(&mut sk, 0.0, 0.0, 10.0, 0.0);
+        let c = sk.add_geometry(Geometry::Circle {
+            center: Point::new(5.0, 6.0),
+            radius: 4.0,
+        });
+        sk.add_constraint(Constraint::Tangent { g1: l, g2: c })
+            .unwrap();
+        assert_eq!(sk.dof(), 6); // 4 + 3 params - 1 equation
+        assert!(matches!(sk.solve().unwrap(), SolveResult::Solved { .. }));
+        let Geometry::Circle { center, radius } = sk.geometry_by_id(c).unwrap() else {
+            panic!("not a circle");
+        };
+        let (ls, le) = (
+            pt_coords(&sk, l, PointPos::Start),
+            pt_coords(&sk, l, PointPos::End),
+        );
+        let (dx, dy) = (le.0 - ls.0, le.1 - ls.1);
+        let len = dx.hypot(dy);
+        let dist = ((center.x - ls.0) * dy - (center.y - ls.1) * dx).abs() / len;
+        assert!((dist - radius).abs() < 1e-9, "dist={dist} r={radius}");
+    }
+
+    #[test]
+    fn solve_tangent_circles_external() {
+        let mut sk = Sketch::new();
+        let c1 = sk.add_geometry(Geometry::Circle {
+            center: Point::new(0.0, 0.0),
+            radius: 5.0,
+        });
+        let c2 = sk.add_geometry(Geometry::Circle {
+            center: Point::new(12.0, 0.4),
+            radius: 5.0,
+        });
+        sk.add_constraint(Constraint::Tangent { g1: c1, g2: c2 })
+            .unwrap();
+        assert_eq!(sk.dof(), 5); // 3 + 3 params - 1 equation
+        assert!(matches!(sk.solve().unwrap(), SolveResult::Solved { .. }));
+        let (
+            Geometry::Circle {
+                center: a,
+                radius: r1,
+            },
+            Geometry::Circle {
+                center: b,
+                radius: r2,
+            },
+        ) = (
+            *sk.geometry_by_id(c1).unwrap(),
+            *sk.geometry_by_id(c2).unwrap(),
+        )
+        else {
+            panic!("not circles");
+        };
+        let d = (b.x - a.x).hypot(b.y - a.y);
+        assert!((d - (r1 + r2)).abs() < 1e-9, "d={d} r1+r2={}", r1 + r2);
+    }
+
+    #[test]
+    fn solve_tangent_lines_are_collinear() {
+        // FreeCAD decomposes line-line tangency into both of the second
+        // line's endpoints on the first line's infinite line.
+        let mut sk = Sketch::new();
+        let l1 = line(&mut sk, 0.0, 0.0, 10.0, 0.0);
+        let l2 = line(&mut sk, 10.0, 0.5, 20.0, 0.3);
+        sk.add_constraint(Constraint::Tangent { g1: l1, g2: l2 })
+            .unwrap();
+        assert_eq!(sk.dof(), 6); // 4 + 4 - 2
+        assert!(matches!(sk.solve().unwrap(), SolveResult::Solved { .. }));
+        for pos in [PointPos::Start, PointPos::End] {
+            let (px, py) = pt_coords(&sk, l2, pos);
+            let (ls, le) = (
+                pt_coords(&sk, l1, PointPos::Start),
+                pt_coords(&sk, l1, PointPos::End),
+            );
+            let (dx, dy) = (le.0 - ls.0, le.1 - ls.1);
+            let len = dx.hypot(dy);
+            let dist = ((px - ls.0) * dy - (py - ls.1) * dx).abs() / len;
+            assert!(dist < 1e-9, "endpoint distance {dist}");
+        }
+    }
+
+    #[test]
+    fn solve_symmetric_about_point() {
+        let mut sk = Sketch::new();
+        let p1 = sk.add_geometry(Geometry::Point { x: 0.0, y: 0.0 });
+        let p2 = sk.add_geometry(Geometry::Point { x: 10.0, y: 4.0 });
+        let ps = sk.add_geometry(Geometry::Point { x: 4.0, y: 1.0 });
+        sk.add_constraint(Constraint::Symmetric {
+            g1: p1,
+            pos1: PointPos::Start,
+            g2: p2,
+            pos2: PointPos::Start,
+            g3: ps,
+            pos3: Some(PointPos::Center), // a point's every slot is itself
+        })
+        .unwrap();
+        assert_eq!(sk.dof(), 4); // 2+2+2 params - 2 equations
+        assert!(matches!(sk.solve().unwrap(), SolveResult::Solved { .. }));
+        let (
+            Geometry::Point { x: x1, y: y1 },
+            Geometry::Point { x: x2, y: y2 },
+            Geometry::Point { x: xs, y: ys },
+        ) = (
+            *sk.geometry_by_id(p1).unwrap(),
+            *sk.geometry_by_id(p2).unwrap(),
+            *sk.geometry_by_id(ps).unwrap(),
+        )
+        else {
+            panic!("not points");
+        };
+        assert!((x1 + x2 - 2.0 * xs).abs() < 1e-9);
+        assert!((y1 + y2 - 2.0 * ys).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solve_symmetric_about_line() {
+        let mut sk = Sketch::new();
+        let p1 = sk.add_geometry(Geometry::Point { x: 0.0, y: 0.0 });
+        let p2 = sk.add_geometry(Geometry::Point { x: 0.0, y: -6.0 });
+        let l = line(&mut sk, 0.0, -3.0, 5.0, -3.0);
+        sk.add_constraint(Constraint::Symmetric {
+            g1: p1,
+            pos1: PointPos::Start,
+            g2: p2,
+            pos2: PointPos::Start,
+            g3: l,
+            pos3: None,
+        })
+        .unwrap();
+        assert_eq!(sk.dof(), 6); // 2+2+4 params - 2 equations
+        assert!(matches!(sk.solve().unwrap(), SolveResult::Solved { .. }));
+        let (Geometry::Point { x: x1, y: y1 }, Geometry::Point { x: x2, y: y2 }) = (
+            *sk.geometry_by_id(p1).unwrap(),
+            *sk.geometry_by_id(p2).unwrap(),
+        ) else {
+            panic!("not points");
+        };
+        // The mirror line stays horizontal: the segment p1-p2 is
+        // perpendicular to it and bisected by it.
+        assert!((x1 - x2).abs() < 1e-9, "p1p2 not vertical: {x1} vs {x2}");
+        assert!((y1 + y2 - (-6.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn block_freezes_geometry_and_others_solve_around_it() {
+        let mut sk = Sketch::new();
+        let l = line(&mut sk, 0.0, 0.0, 10.0, 0.0);
+        let c = sk.add_geometry(Geometry::Circle {
+            center: Point::new(5.0, 6.0),
+            radius: 4.0,
+        });
+        // Block the circle: its 3 parameters leave the free set.
+        sk.add_constraint(Constraint::Block { g: c }).unwrap();
+        assert_eq!(sk.dof(), 4); // (4 + 3) - 3 blocked - 0 equations
+                                 // Tangency now has to be satisfied by moving the line only.
+        sk.add_constraint(Constraint::Tangent { g1: l, g2: c })
+            .unwrap();
+        assert_eq!(sk.dof(), 3);
+        assert!(matches!(sk.solve().unwrap(), SolveResult::Solved { .. }));
+        // The blocked circle is bit-identical.
+        let Geometry::Circle { center, radius } = sk.geometry_by_id(c).unwrap() else {
+            panic!("not a circle");
+        };
+        assert_eq!((center.x, center.y, *radius), (5.0, 6.0, 4.0));
+        // The line moved so its distance to the frozen center = 4.
+        let (ls, le) = (
+            pt_coords(&sk, l, PointPos::Start),
+            pt_coords(&sk, l, PointPos::End),
+        );
+        let (dx, dy) = (le.0 - ls.0, le.1 - ls.1);
+        let len = dx.hypot(dy);
+        let dist = ((center.x - ls.0) * dy - (center.y - ls.1) * dx).abs() / len;
+        assert!((dist - 4.0).abs() < 1e-9, "dist={dist}");
+    }
+
+    #[test]
+    fn block_counts_once_per_geometry() {
+        let mut sk = Sketch::new();
+        let p = sk.add_geometry(Geometry::Point { x: 1.0, y: 2.0 });
+        sk.add_constraint(Constraint::Block { g: p }).unwrap();
+        sk.add_constraint(Constraint::Block { g: p }).unwrap();
+        assert_eq!(sk.dof(), 0); // 2 params - 2 blocked, not -4
     }
 
     #[test]

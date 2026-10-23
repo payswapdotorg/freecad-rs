@@ -47,8 +47,9 @@ and `App::PropertyDirection` vectors, `LinkSub` profiles, nested
 `<LinkList>`s), placements as quaternions, sketch geometry via
 `Part::PropertyGeometryList` (point/line/circle/arc, XY-plane sketches),
 **sketch constraints via `Sketcher::PropertyConstraintList`** (all
-thirteen mappable kinds with FreeCAD's own ordinals — verified against
-the r39109 binary, `fixtures/freecad_sketch_constraints.fcstd`),
+sixteen mappable kinds with FreeCAD's own ordinals — verified against
+the r39109 binary, `fixtures/freecad_sketch_constraints.fcstd` and
+`fixtures/freecad_tangent_symmetric_block.fcstd`),
 expression bindings, and the FreeCAD 1.0 `<Sketch>` fragment family.
 Constraint GeoIds route through a remap (skipped geometry shifts every
 later index); axis/root-point/external references, `IsDriving="0"`
@@ -107,11 +108,20 @@ FreeCAD file carries.)
   (`Sketcher::PropertyConstraintList`): `<Constrain …/>` elements
   (FreeCAD's own spelling — no trailing "t"), ordinals from FreeCAD's
   `ConstraintType` enum (Coincident=1, Tangent=5, Distance=6, Angle=9,
-  Perpendicular=10, Radius=11, Equal=12, PointOnObject=13, Diameter=18,
-  …), `PointPos` slots shared (start=1, end=2, mid=3 — a circle's
-  center is its `mid`), unused references `GeoUndef` (-2000), Angle
-  values in radians. The thirteen mappable kinds map both ways; the
-  rest is skipped with warnings that name the FreeCAD kind.
+  Perpendicular=10, Radius=11, Equal=12, PointOnObject=13, Symmetric=14,
+  Block=17, Diameter=18, …), `PointPos` slots shared (start=1, end=2,
+  mid=3 — a circle's center is its `mid`, and a standalone point
+  resolves every slot, exactly FreeCAD's GeomPoint), unused references
+  `GeoUndef` (-2000), Angle values in radians. The sixteen mappable
+  kinds map both ways; the rest is skipped with warnings that name the
+  FreeCAD kind. Tangent maps FreeCAD's simple (edge) form — line-circle
+  in either order and on either side, circle-circle external tangency
+  (FreeCAD's Orientation-less default), line-line collinearity (FreeCAD's
+  own two-equation decomposition). Symmetric maps both forms — about a
+  line (Third, ThirdPos=0) and about a point (Third, ThirdPos=the
+  point's slot). Block freezes its geometry's parameters out of the
+  solver's free set (FreeCAD's fix-parameter treatment), so other
+  constraints solve around the frozen values.
 - STEP exchange (import and export) was verified earlier against the
   same FreeCAD 1.0 binaries — see the `fc-step` crate tests for the
   exact fixtures (FreeCAD's own sphere/cone/torus exports included).
@@ -123,12 +133,12 @@ FreeCAD file carries.)
 - **OCCT BRep payloads are not parsed** (`.brp` geometry is skipped,
   parameters kept); our own files persist parameters instead of shapes,
   so both systems rebuild on recompute.
-- Sketch constraints beyond the thirteen mappable kinds (Tangent,
-  Symmetric, Block, SnellsLaw, InternalAlignment, …) and their extended
-  forms (two-point Horizontal, point-to-line Distance, angle-via-point)
-  are skipped with warnings — this kernel's solver vocabulary is its own
-  13-kind set, and unmappable constraints are never silently
-  re-interpreted.
+- Sketch constraints beyond the sixteen mappable kinds (SnellsLaw,
+  InternalAlignment, Weight, Group, Text, …) and the extended forms
+  (two-point Horizontal, point-to-line Distance, angle-via-point,
+  tangent-via-point / endpoint-to-endpoint Tangency) are skipped with
+  warnings — this kernel's solver vocabulary is its own 16-kind set,
+  and unmappable constraints are never silently re-interpreted.
 - `Part::Mirroring`'s `MirrorPlane` link (a face/datum override) has no
   geometry to read here — `Base`/`Normal` planes only.
 - No GUI: the `fc-viewer` renders offscreen; there is no workbench,

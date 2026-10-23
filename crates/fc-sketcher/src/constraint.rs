@@ -24,6 +24,22 @@
 //! - `PointOnObject` puts a point onto a **line segment's (infinite) line**
 //!   or onto a **circle's curve**. Arcs are rejected in v1 (a point on an
 //!   arc's *circle* would silently ignore the angle range).
+//! - `Tangent` is FreeCAD's **simple (edge) form**: line-circle (either
+//!   order, either side of the line), circle-circle external tangency
+//!   (center distance = `r1 + r2`, FreeCAD's Orientation-less default),
+//!   or line-line collinearity (FreeCAD decomposes that into both of the
+//!   second line's endpoints on the first line — we carry the same two
+//!   equations). The point-form tangencies (tangent-via-point,
+//!   endpoint-to-endpoint) are not part of the vocabulary.
+//! - `Symmetric` makes two point-slots mirror-symmetric about a third
+//!   point (any point slot) or about a line: about a point it is
+//!   `p1 + p2 = 2 * p_sym`; about a line the line is the perpendicular
+//!   bisector of `[p1, p2]` (midpoint on the line **and** the connecting
+//!   segment perpendicular to it). Both forms carry 2 equations, like
+//!   FreeCAD's.
+//! - `Block` freezes a geometry: it contributes no equations, but its
+//!   parameters leave the solver's free set (they act as fixed input to
+//!   every other constraint, exactly FreeCAD's fix-parameter treatment).
 
 use crate::geometry::{GeoId, Geometry, Sketch};
 use crate::SketchError;
@@ -188,14 +204,66 @@ pub enum Constraint {
         /// The line or circle the point must lie on.
         g2: GeoId,
     },
+    /// FreeCAD kind 5, simple (edge) form: two curves tangent. Line-circle
+    /// (either order, either side) fixes the circle center's distance to
+    /// the line's infinite line: `d^2 = r^2`. Circle-circle fixes external
+    /// tangency: `|c1 - c2| = r1 + r2`. Line-line is FreeCAD's collinearity
+    /// (both of `g2`'s endpoints on `g1`'s infinite line) — 2 equations.
+    Tangent {
+        /// First curve.
+        g1: GeoId,
+        /// Second curve.
+        g2: GeoId,
+    },
+    /// FreeCAD kind 14: two point-slots mirror-symmetric about a third
+    /// point (`pos3 = Some(slot)`) or about a line (`pos3 = None`).
+    Symmetric {
+        /// First geometry.
+        g1: GeoId,
+        /// Point slot on the first geometry.
+        pos1: PointPos,
+        /// Second geometry.
+        g2: GeoId,
+        /// Point slot on the second geometry.
+        pos2: PointPos,
+        /// The symmetry point (when `pos3` is `Some`) or the mirror line.
+        g3: GeoId,
+        /// `Some(slot)` — symmetric about the point at that slot on `g3`;
+        /// `None` — symmetric about the line `g3`.
+        pos3: Option<PointPos>,
+    },
+    /// FreeCAD kind 17: freeze a geometry. No equations — the geometry's
+    /// parameters leave the solver's free set and act as fixed input to
+    /// every other constraint.
+    Block {
+        /// The geometry to freeze.
+        g: GeoId,
+    },
 }
 
 impl Constraint {
     /// Number of scalar equations the constraint contributes to the
-    /// solver's residual vector (`Coincident` -> 2, everything else -> 1).
-    pub fn dimension(&self) -> usize {
+    /// solver's residual vector (`Coincident` -> 2, line-line `Tangent` and
+    /// `Symmetric` -> 2, `Block` -> 0, everything else -> 1).
+    ///
+    /// The count can depend on the geometry kinds the constraint targets
+    /// (a `Tangent` between two lines is FreeCAD's 2-equation collinearity;
+    /// between a line and a circle it is 1), so the sketch's geometry table
+    /// is a parameter.
+    pub fn dimension(&self, geos: &[Geometry]) -> usize {
         match self {
-            Constraint::Coincident { .. } => 2,
+            Constraint::Coincident { .. } | Constraint::Symmetric { .. } => 2,
+            Constraint::Tangent { g1, g2 } => {
+                let is_line = |g: &GeoId| {
+                    matches!(geos.get(g.as_index()), Some(Geometry::LineSegment { .. }))
+                };
+                if is_line(g1) && is_line(g2) {
+                    2 // FreeCAD's collinear decomposition
+                } else {
+                    1
+                }
+            }
+            Constraint::Block { .. } => 0,
             _ => 1,
         }
     }
@@ -213,11 +281,14 @@ impl Constraint {
             | Constraint::Perpendicular { g1, g2 }
             | Constraint::Equal { g1, g2 }
             | Constraint::Angle { g1, g2, .. }
-            | Constraint::PointOnObject { g1, g2, .. } => vec![g1, g2],
+            | Constraint::PointOnObject { g1, g2, .. }
+            | Constraint::Tangent { g1, g2 } => vec![g1, g2],
+            Constraint::Symmetric { g1, g2, g3, .. } => vec![g1, g2, g3],
             Constraint::Horizontal { g }
             | Constraint::Vertical { g }
             | Constraint::Radius { g, .. }
-            | Constraint::Diameter { g, .. } => vec![g],
+            | Constraint::Diameter { g, .. }
+            | Constraint::Block { g } => vec![g],
         }
     }
 }
@@ -384,6 +455,59 @@ fn validate(geos: &[Geometry], c: &Constraint) -> Result<(), SketchError> {
                 }
             }
         }
+        Constraint::Tangent { g1, g2 } => {
+            // FreeCAD's simple form accepts line-line, line-circle/arc
+            // (either order) and circle/arc-circle/arc. Everything else
+            // (points, an edge-form on a point slot) is rejected.
+            let is_line =
+                |g: GeoId| matches!(geos.get(g.as_index()), Some(Geometry::LineSegment { .. }));
+            let is_circleish = |g: GeoId| {
+                matches!(
+                    geos.get(g.as_index()),
+                    Some(Geometry::Circle { .. }) | Some(Geometry::ArcOfCircle { .. })
+                )
+            };
+            for g in [g1, g2] {
+                geos.get(g.as_index())
+                    .ok_or(SketchError::UnknownGeometry(g))?;
+            }
+            if !((is_line(g1) && is_line(g2))
+                || (is_line(g1) && is_circleish(g2))
+                || (is_circleish(g1) && is_line(g2))
+                || (is_circleish(g1) && is_circleish(g2)))
+            {
+                return Err(SketchError::UnsupportedConstraint(format!(
+                    "Tangent needs line-line, line-circle/arc or circle/arc-circle/arc pairs, got {g1:?} and {g2:?}"
+                )));
+            }
+        }
+        Constraint::Symmetric {
+            g1,
+            pos1,
+            g2,
+            pos2,
+            g3,
+            pos3,
+        } => {
+            require_point(g1, pos1)?;
+            require_point(g2, pos2)?;
+            match pos3 {
+                Some(slot) => {
+                    // Symmetric about a point: any geometry's point slot
+                    // (a standalone point, a line endpoint, a circle
+                    // center...) can be the symmetry point.
+                    require_point(g3, slot)?;
+                }
+                None => {
+                    // Symmetric about a line.
+                    require_line(g3)?;
+                }
+            }
+        }
+        Constraint::Block { g } => {
+            geos.get(g.as_index())
+                .ok_or(SketchError::UnknownGeometry(g))?;
+        }
     }
     Ok(())
 }
@@ -432,7 +556,9 @@ mod tests {
             g2: GeoId(1),
             pos2: PointPos::Start,
         };
-        assert_eq!(c.dimension(), 2);
+        let sk = demo_sketch();
+        assert_eq!(c.dimension(sk.geometry()), 2);
+        let geos = demo_sketch().geometry().to_vec();
         let singles = [
             Constraint::Horizontal { g: GeoId(1) },
             Constraint::Vertical { g: GeoId(1) },
@@ -487,10 +613,31 @@ mod tests {
                 pos1: PointPos::Start,
                 g2: GeoId(1),
             },
+            Constraint::Tangent {
+                g1: GeoId(1),
+                g2: GeoId(2),
+            },
         ];
         for c in &singles {
-            assert_eq!(c.dimension(), 1, "{c:?}");
+            assert_eq!(c.dimension(&geos), 1, "{c:?}");
         }
+        // The kind-dependent and zero-dimensional counts.
+        let line_line = Constraint::Tangent {
+            g1: GeoId(1),
+            g2: GeoId(1),
+        };
+        assert_eq!(line_line.dimension(&geos), 2);
+        let symmetric = Constraint::Symmetric {
+            g1: GeoId(0),
+            pos1: PointPos::Start,
+            g2: GeoId(1),
+            pos2: PointPos::Start,
+            g3: GeoId(2),
+            pos3: Some(PointPos::Center),
+        };
+        assert_eq!(symmetric.dimension(&geos), 2);
+        let block = Constraint::Block { g: GeoId(0) };
+        assert_eq!(block.dimension(&geos), 0);
     }
 
     #[test]
@@ -581,10 +728,12 @@ mod tests {
                 pos: PointPos::Start
             }
         );
-        // End of a bare point does not exist.
+        // A bare point carries every slot now (FreeCAD's GeomPoint
+        // resolves all PointPos values to the same GCS point) — the
+        // invalid slot is a circle's Start/End, which do not exist.
         let err = sk
             .add_constraint(Constraint::DistanceX {
-                g1: GeoId(0),
+                g1: GeoId(2),
                 pos1: PointPos::End,
                 g2: GeoId(1),
                 pos2: PointPos::Start,
@@ -594,7 +743,7 @@ mod tests {
         assert_eq!(
             err,
             SketchError::InvalidPointPos {
-                geo: GeoId(0),
+                geo: GeoId(2),
                 pos: PointPos::End
             }
         );

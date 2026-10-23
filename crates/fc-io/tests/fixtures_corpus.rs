@@ -618,3 +618,150 @@ fn our_constraint_output_round_trips_through_both_engines() {
         "constraint + geometry content survives our save/load cycle byte-identically"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Real-binary provenance fixture: Tangent / Symmetric / Block — the three
+// FreeCAD-native kinds that closed the last constraint parity gap.
+//
+// `freecad_tangent_symmetric_block.fcstd` was written by **real FreeCAD
+// 1.0** (AppImage r39109, `freecadcmd`): twelve geometries and six
+// constraints — a line tangent to a circle, two externally tangent
+// circles, two collinear lines (FreeCAD's line-line tangency), points
+// symmetric about a line, points symmetric about a point, and a blocked
+// point. Every constraint was authored pre-satisfied, so the saved
+// geometry is deterministic and both engines report it solved with
+// zero movement. Verified with the real binary both ways: FreeCAD opens
+// freecad-rs's re-save of this file and restores all six constraints
+// exactly (including the about-point Symmetric's ThirdPos=3), recompute
+// clean; freecad-rs loads the FreeCAD-authored file to the same
+// geometry + constraints with DOF 23 — the same arithmetic FreeCAD
+// reports (33 params - 2 blocked - 8 equations).
+// ---------------------------------------------------------------------------
+
+/// The fixture authored by real FreeCAD 1.0 loads with every Tangent /
+/// Symmetric / Block constraint intact, and its DOF matches FreeCAD's
+/// own arithmetic.
+#[test]
+fn freecad_authored_tangent_symmetric_block_loads_every_constraint() {
+    let (doc, report) = load_fixture("freecad_tangent_symmetric_block");
+
+    // One object: the sketch (the console-authored file carries
+    // document properties we do not model and two OCCT .brp shape
+    // payloads; all honestly warned, none fatal).
+    assert_eq!(report.objects, 1);
+    assert_eq!(report.skipped, 0);
+    let object = doc.get_by_name("Sketch").expect("the sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .expect("it is a Sketcher::SketchObject");
+    let sketch = &sketch_object.sketch;
+
+    // Twelve geometries, exactly as authored: bottom line + tangent
+    // circle, the tangent circle pair, the collinear pair, the two
+    // symmetric point pairs + symmetry point, the blocked point.
+    assert_eq!(sketch.geometry().len(), 12);
+    use fc_sketcher::Constraint;
+    let cs = sketch.constraints();
+    assert_eq!(cs.len(), 6);
+    // Tangent: line 0 - circle 1 (both pos 0 = the simple edge form).
+    assert!(matches!(cs[0], Constraint::Tangent { g1, g2 } if g1.0 == 0 && g2.0 == 1));
+    // Tangent: circles 2 and 3, externally tangent.
+    assert!(matches!(cs[1], Constraint::Tangent { g1, g2 } if g1.0 == 2 && g2.0 == 3));
+    // Tangent: lines 4 and 5, FreeCAD's collinear decomposition.
+    assert!(matches!(cs[2], Constraint::Tangent { g1, g2 } if g1.0 == 4 && g2.0 == 5));
+    // Symmetric: points 6 and 7 about line 0.
+    assert!(matches!(
+        cs[3],
+        Constraint::Symmetric {
+            pos3: None,
+            g3,
+            ..
+        } if g3.0 == 0
+    ));
+    // Symmetric: points 8 and 9 about point 10 (FreeCAD writes the
+    // standalone point's slot as mid — ThirdPos=3).
+    assert!(matches!(
+        cs[4],
+        Constraint::Symmetric {
+            pos3: Some(fc_sketcher::PointPos::Center),
+            g3,
+            ..
+        } if g3.0 == 10
+    ));
+    // Block: the point at index 11.
+    assert!(matches!(cs[5], Constraint::Block { g } if g.0 == 11));
+
+    // Every constraint was authored pre-satisfied: the sketch solves
+    // without moving anything, and the DOF matches FreeCAD's own
+    // arithmetic (33 params - 2 blocked - 8 equations = 23).
+    assert_eq!(sketch.dof(), 23);
+    let mut probe = sketch_object.sketch.clone();
+    assert!(matches!(
+        probe.solve(),
+        Ok(fc_sketcher::SolveResult::Solved { iterations: 0, .. })
+    ));
+    // And the original geometry is bit-identical to what FreeCAD saved.
+    let fc_sketcher::Geometry::Point { x, y } = sketch.geometry()[11] else {
+        panic!("geometry 11 is the blocked point");
+    };
+    assert_eq!((x, y), (50.0, 50.0));
+
+    // The OCCT .brp payloads are the documented skip (this file's
+    // Sketch.Shape landed in the newer payload wrapper, its
+    // InternalShape in the older raw stream — both honestly warned).
+    let warnings = report.warnings.join("\n");
+    let payload_warns = warnings.matches("unknown shape payload format").count()
+        + warnings.matches("OCCT BRep shape not supported").count();
+    assert!(
+        payload_warns >= 2,
+        "both BRep payloads are honestly warned: {warnings}"
+    );
+}
+
+/// freecad-rs's re-save of the FreeCAD-authored file round-trips through
+/// our own reader byte-identically — and real FreeCAD 1.0 restores it
+/// exactly (verified with the r39109 binary: ConstraintCount 6, every
+/// First/FirstPos/Second/SecondPos/Third/ThirdPos matching — including
+/// the about-point Symmetric's ThirdPos=3 — recompute clean, solve 0).
+#[test]
+fn our_tangent_symmetric_block_output_round_trips() {
+    let (doc, report) = load_fixture("freecad_tangent_symmetric_block");
+    assert_eq!(report.objects, 1);
+    let object = doc.get_by_name("Sketch").expect("the sketch loads");
+    let before = &object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap()
+        .sketch
+        .to_xml();
+
+    let temp = std::env::temp_dir().join(format!(
+        "fcrs-tsb-rt-{}-{:?}.fcstd",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    save_document(&doc, &temp).unwrap();
+    let (doc2, report2) = load_document(&temp).unwrap();
+    let _ = std::fs::remove_file(&temp);
+    // Our canonical writer emits only forms our reader takes cleanly.
+    let warnings: Vec<String> = report2
+        .warnings
+        .iter()
+        .filter(|w| !w.contains("unknown shape payload format"))
+        .cloned()
+        .collect();
+    assert!(warnings.is_empty(), "{:?}", warnings);
+    let after = &doc2
+        .get_by_name("Sketch")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap()
+        .sketch
+        .to_xml();
+    assert_eq!(
+        after, before,
+        "tangent/symmetric/block content survives our save/load cycle byte-identically"
+    );
+}

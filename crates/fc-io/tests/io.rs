@@ -619,11 +619,26 @@ fn constrain(
     second_pos: i64,
     value: f64,
 ) -> String {
+    constrain3(ty, first, first_pos, second, second_pos, -2000, 0, value)
+}
+
+/// The same, with an explicit third element reference (Symmetric).
+#[allow(clippy::too_many_arguments)]
+fn constrain3(
+    ty: i64,
+    first: i64,
+    first_pos: i64,
+    second: i64,
+    second_pos: i64,
+    third: i64,
+    third_pos: i64,
+    value: f64,
+) -> String {
     format!(
         "<Constrain Name=\"\" MetaData=\"\" Type=\"{ty}\" Orientation=\"0\" Value=\"{value}\" \
          LabelDistance=\"0\" LabelPosition=\"0\" IsDriving=\"1\" IsInVirtualSpace=\"0\" \
          IsVisible=\"1\" IsActive=\"1\" First=\"{first}\" FirstPos=\"{first_pos}\" \
-         Second=\"{second}\" SecondPos=\"{second_pos}\" Third=\"-2000\" ThirdPos=\"0\"/>"
+         Second=\"{second}\" SecondPos=\"{second_pos}\" Third=\"{third}\" ThirdPos=\"{third_pos}\"/>"
     )
 }
 
@@ -686,29 +701,33 @@ fn freecad_sketch_document(constraints: &str, count: usize) -> String {
 }
 
 #[test]
-fn freecad_native_constraints_all_thirteen_kinds_load() {
+fn freecad_native_constraints_all_sixteen_kinds_load() {
     let path = temp_path("fc-constraints");
     cleanup(&path);
     let half_pi = std::f64::consts::FRAC_PI_2;
     // One `<Constrain>` per mappable kind (FreeCAD ordinals; point-slots
     // 1=start, 2=end, 3=mid-as-center):
     let constraints = [
-        constrain(1, 0, 2, 1, 1, 0.0),       // Coincident (0-end ↔ 1-start)
-        constrain(2, 0, 0, -2000, 0, 0.0),   // Horizontal on line 0
-        constrain(3, 1, 0, -2000, 0, 0.0),   // Vertical on line 1
-        constrain(4, 0, 0, 2, 0, 0.0),       // Parallel 0 ∥ 2
-        constrain(10, 0, 0, 1, 0, 0.0),      // Perpendicular 0 ⊥ 1
-        constrain(6, 0, 1, 0, 2, 40.0),      // Distance |line 0| = 40
-        constrain(7, 2, 1, 3, 1, -40.0),     // DistanceX start(2)→start(3)
-        constrain(8, 0, 1, 2, 1, 30.0),      // DistanceY start(0)→start(2)
-        constrain(9, 0, 0, 1, 0, half_pi),   // Angle line0→line1 = 90°
-        constrain(11, 4, 0, -2000, 0, 9.0),  // Radius of circle
-        constrain(18, 4, 0, -2000, 0, 18.0), // Diameter of circle
-        constrain(12, 0, 0, 2, 0, 0.0),      // Equal length 0 == 2
-        constrain(13, 2, 1, 0, 0, 0.0),      // PointOnObject start(2) on line 0
+        constrain(1, 0, 2, 1, 1, 0.0),         // Coincident (0-end ↔ 1-start)
+        constrain(2, 0, 0, -2000, 0, 0.0),     // Horizontal on line 0
+        constrain(3, 1, 0, -2000, 0, 0.0),     // Vertical on line 1
+        constrain(4, 0, 0, 2, 0, 0.0),         // Parallel 0 ∥ 2
+        constrain(10, 0, 0, 1, 0, 0.0),        // Perpendicular 0 ⊥ 1
+        constrain(6, 0, 1, 0, 2, 40.0),        // Distance |line 0| = 40
+        constrain(7, 2, 1, 3, 1, -40.0),       // DistanceX start(2)→start(3)
+        constrain(8, 0, 1, 2, 1, 30.0),        // DistanceY start(0)→start(2)
+        constrain(9, 0, 0, 1, 0, half_pi),     // Angle line0→line1 = 90°
+        constrain(11, 4, 0, -2000, 0, 9.0),    // Radius of circle
+        constrain(18, 4, 0, -2000, 0, 18.0),   // Diameter of circle
+        constrain(12, 0, 0, 2, 0, 0.0),        // Equal length 0 == 2
+        constrain(13, 2, 1, 0, 0, 0.0),        // PointOnObject start(2) on line 0
+        constrain(5, 0, 0, 4, 0, 0.0),         // Tangent line 0 ↔ circle 4 (simple form)
+        constrain3(14, 0, 1, 2, 1, 1, 0, 0.0), // Symmetric start(0) ↔ start(2) about line 1
+        constrain3(14, 0, 2, 3, 2, 5, 3, 0.0), // Symmetric end(0) ↔ end(3) about point 5 (mid)
+        constrain(17, 5, 0, -2000, 0, 0.0),    // Block the point geometry
     ]
     .join("");
-    craft_fcstd(&path, &freecad_sketch_document(&constraints, 13), &[]);
+    craft_fcstd(&path, &freecad_sketch_document(&constraints, 17), &[]);
 
     let (doc, report) = load_document(&path).unwrap();
     assert!(
@@ -732,9 +751,9 @@ fn freecad_native_constraints_all_thirteen_kinds_load() {
         sketch.geometry()[4],
         fc_sketcher::Geometry::Circle { radius, .. } if (radius - 9.0).abs() < 1e-12
     ));
-    // All 13 kinds mapped, with the right values and targets.
+    // All 16 kinds mapped, with the right values and targets.
     let cs = sketch.constraints();
-    assert_eq!(cs.len(), 13);
+    assert_eq!(cs.len(), 17);
     assert!(matches!(cs[0], fc_sketcher::Constraint::Coincident { .. }));
     assert!(matches!(cs[1], fc_sketcher::Constraint::Horizontal { g } if g.0 == 0));
     assert!(matches!(cs[2], fc_sketcher::Constraint::Vertical { g } if g.0 == 1));
@@ -756,6 +775,25 @@ fn freecad_native_constraints_all_thirteen_kinds_load() {
         cs[12],
         fc_sketcher::Constraint::PointOnObject { .. }
     ));
+    // The three FreeCAD-native kinds added for parity: Tangent (simple
+    // form), Symmetric (about-line and about-point) and Block.
+    assert!(matches!(
+        cs[13],
+        fc_sketcher::Constraint::Tangent { g1, g2 } if g1.0 == 0 && g2.0 == 4
+    ));
+    assert!(matches!(
+        cs[14],
+        fc_sketcher::Constraint::Symmetric { pos3: None, g3, .. } if g3.0 == 1
+    ));
+    assert!(matches!(
+        cs[15],
+        fc_sketcher::Constraint::Symmetric {
+            pos3: Some(fc_sketcher::PointPos::Center),
+            g3,
+            ..
+        } if g3.0 == 5
+    ));
+    assert!(matches!(cs[16], fc_sketcher::Constraint::Block { g } if g.0 == 5));
     cleanup(&path);
 }
 
@@ -764,22 +802,28 @@ fn freecad_native_constraints_skip_unmappable_with_honest_warnings() {
     let path = temp_path("fc-constraints-skip");
     cleanup(&path);
     let constraints = [
-        constrain(5, 0, 0, 4, 0, 0.0),      // Tangent — no counterpart
-        constrain(14, 0, 1, 1, 1, 0.0),     // Symmetric — no counterpart
-        constrain(17, 0, 0, -2000, 0, 0.0), // Block — no counterpart
-        constrain(1, -1, 1, 0, 2, 0.0),     // Coincident on the root point
-        constrain(2, 0, 1, 1, 1, 0.0),      // two-point Horizontal form
+        constrain(5, 0, 1, 4, 0, 0.0),  // Tangent via a point slot — point form
+        constrain(14, 0, 1, 1, 1, 0.0), // Symmetric without a Third reference
+        constrain3(14, 0, 1, 2, 1, 4, 0, 0.0), // Symmetric about a circle as its "line"
+        constrain3(14, 0, 1, 2, 1, 4, 1, 0.0), // Symmetric about a slot a circle does not carry
+        constrain(15, 0, 0, -2000, 0, 0.0), // InternalAlignment — no counterpart
+        constrain(16, 0, 0, -2000, 0, 0.0), // SnellsLaw — no counterpart
+        constrain(1, -1, 1, 0, 2, 0.0), // Coincident on the root point
+        constrain(2, 0, 1, 1, 1, 0.0),  // two-point Horizontal form
         constrain(11, 4, 0, -2000, 0, 9.0), // Radius — mappable, must load
     ]
     .join("");
-    craft_fcstd(&path, &freecad_sketch_document(&constraints, 6), &[]);
+    craft_fcstd(&path, &freecad_sketch_document(&constraints, 9), &[]);
 
     let (doc, report) = load_document(&path).unwrap();
     let warnings = report.warnings.join("\n");
     // Every unmappable case is named honestly.
     assert!(warnings.contains("Tangent"), "{warnings}");
     assert!(warnings.contains("Symmetric"), "{warnings}");
-    assert!(warnings.contains("Block"), "{warnings}");
+    assert!(warnings.contains("InternalAlignment"), "{warnings}");
+    assert!(warnings.contains("SnellsLaw"), "{warnings}");
+    assert!(warnings.contains("not a line"), "{warnings}");
+    assert!(warnings.contains("does not carry"), "{warnings}");
     assert!(
         warnings.contains("axis, root point, external"),
         "{warnings}"
