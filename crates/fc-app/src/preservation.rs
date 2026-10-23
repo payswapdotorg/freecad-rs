@@ -77,6 +77,14 @@ pub struct ObjectPreservation {
     /// Attributes of the object's `<Properties>` element beyond
     /// `Count`/`TransientCount`, in file order.
     pub properties_attrs: Vec<(String, String)>,
+    /// The file's `status` attribute per modeled property (FreeCAD's
+    /// persisted property-state bitmask: `1` Touched, `4` ReadOnly,
+    /// `8` Hidden, `8388608`… LockDynamic etc. — the editor preferences
+    /// a user set are stored here). The model does not compute these
+    /// bits; they re-emit verbatim on the canonically re-serialized
+    /// properties (unmodeled ones carry theirs inside the raw element
+    /// already).
+    pub property_status: Vec<(String, String)>,
     /// Shape payloads kept verbatim (OCCT BRep, unknown formats).
     pub payloads: Vec<PreservedShape>,
 }
@@ -86,6 +94,7 @@ impl std::fmt::Debug for ObjectPreservation {
         f.debug_struct("ObjectPreservation")
             .field("object_attrs", &self.object_attrs)
             .field("extensions", &self.extensions.is_some())
+            .field("property_status", &self.property_status)
             .field(
                 "properties",
                 &self
@@ -148,6 +157,11 @@ pub struct DocumentPreservation {
     /// file order. The three the model carries
     /// (`Label`/`Creator`/`CreationDate`) are live state, never here.
     pub properties: Vec<(String, String)>,
+    /// The file's `status` attribute on the modeled document properties
+    /// (`Label`/`Creator`/`CreationDate` — FreeCAD's persisted
+    /// property-state bitmask; unmodeled ones carry theirs inside the
+    /// raw element already), re-emitted verbatim.
+    pub property_status: Vec<(String, String)>,
     /// FreeCAD's transient document `<_Property …/>` markers
     /// (FileName/Tip/TransientDir — value-less, counted by the
     /// section's `TransientCount` attribute): raw sources, in file
@@ -179,6 +193,7 @@ impl std::fmt::Debug for DocumentPreservation {
                     .collect::<Vec<_>>(),
             )
             .field("properties_attrs", &self.properties_attrs)
+            .field("property_status", &self.property_status)
             .field(
                 "properties",
                 &self

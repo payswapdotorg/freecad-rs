@@ -71,6 +71,19 @@ load→save cycle never destroys data a real FreeCAD wrote:
   keep their raw `<Property>` elements, re-emitted verbatim — including
   enumerations with their `CustomEnumList`s, transient `<_Property>`
   markers, `<Extensions>` blocks.
+- **Property `status` bits round-trip on modeled properties too**: the
+  `status` attribute on a `<Property>` is FreeCAD's persisted
+  property-state bitmask (`1` Touched, `4` ReadOnly, `8` Hidden,
+  `8388608` LockDynamic, `134217728` …) — the read-only/hidden editor
+  preferences a user set live there. The model re-serializes modeled
+  property values canonically but re-emits the file's `status`
+  verbatim (unmodeled properties carry theirs inside the raw element
+  by construction). Verified with the real r39109 binary: a fixture
+  with `Length` read-only (`status="4"`) and `Width` hidden
+  (`status="8"`) round-trips and FreeCAD still reports
+  `getEditorMode('Length') == ['ReadOnly']`,
+  `getEditorMode('Width') == ['Hidden']`; all 32 status attributes of
+  the fixture survive identically.
 - **Document metadata** (Uid, Company, License, `StringHasher`, root
   attributes, `ObjectDeps`) round-trips verbatim.
 - **Sketch constructs the solver cannot express** — construction

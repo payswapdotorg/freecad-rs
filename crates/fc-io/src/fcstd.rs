@@ -241,6 +241,7 @@ fn build_document_xml(
         "Label",
         &Property::String(doc.label().to_string()),
         "App::Document",
+        doc_status(&pres.property_status, "Label"),
     );
     push_property(
         &mut xml,
@@ -248,6 +249,7 @@ fn build_document_xml(
         "Creator",
         &Property::String(doc.creator().to_string()),
         "App::Document",
+        doc_status(&pres.property_status, "Creator"),
     );
     push_property(
         &mut xml,
@@ -255,6 +257,7 @@ fn build_document_xml(
         "CreationDate",
         &Property::String(doc.created().to_string()),
         "App::Document",
+        doc_status(&pres.property_status, "CreationDate"),
     );
     for (_, raw) in &pres.properties {
         xml.push_str(&format!(" {raw}\n"));
@@ -420,7 +423,12 @@ fn build_document_xml(
             xml.push_str(&format!("    {raw}\n"));
         }
         for (key, value) in props {
-            push_property(&mut xml, 4, key, value, &o.type_name);
+            let status = preservation
+                .property_status
+                .iter()
+                .find(|(n, _)| n == key)
+                .map(|(_, s)| s.as_str());
+            push_property(&mut xml, 4, key, value, &o.type_name, status);
         }
         // Unmodeled properties of a modeled object: raw, verbatim, after
         // the modeled ones (the modeled ones are live state — the file's
@@ -432,19 +440,52 @@ fn build_document_xml(
         // and one `Sketcher::PropertyConstraintList`, exactly where
         // FreeCAD's writer puts them (after the plain properties).
         if let Some((geometry_xml, constraints_xml)) = sketch_props {
-            xml.push_str("    <Property name=\"Geometry\" type=\"Part::PropertyGeometryList\">\n");
+            let status = |n: &str| {
+                preservation
+                    .property_status
+                    .iter()
+                    .find(|(p, _)| p == n)
+                    .map(|(_, s)| s.as_str())
+            };
+            match status("Geometry") {
+                Some(s) => xml.push_str(&format!(
+                    "    <Property name=\"Geometry\" type=\"Part::PropertyGeometryList\" status=\"{}\">\n",
+                    escape_attr(s)
+                )),
+                None => xml.push_str(
+                    "    <Property name=\"Geometry\" type=\"Part::PropertyGeometryList\">\n",
+                ),
+            }
             xml.push_str(&geometry_xml);
             xml.push_str("    </Property>\n");
-            xml.push_str(
-                "    <Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\">\n",
-            );
+            match status("Constraints") {
+                Some(s) => xml.push_str(&format!(
+                    "    <Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\" status=\"{}\">\n",
+                    escape_attr(s)
+                )),
+                None => xml.push_str(
+                    "    <Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\">\n",
+                ),
+            }
             xml.push_str(&constraints_xml);
             xml.push_str("    </Property>\n");
         }
         // Computed geometry goes last, as one referenced FCBREP side file.
         if let Some(shape) = shape {
             let file = fresh_side_file_name(side_files);
-            xml.push_str("    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">\n");
+            let status = preservation
+                .property_status
+                .iter()
+                .find(|(p, _)| p == "Shape")
+                .map(|(_, s)| s.as_str());
+            match status {
+                Some(s) => xml.push_str(&format!(
+                    "    <Property name=\"Shape\" type=\"Part::PropertyPartShape\" status=\"{}\">\n",
+                    escape_attr(s)
+                )),
+                None => xml
+                    .push_str("    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">\n"),
+            }
             xml.push_str(&format!("     <Part file=\"{}\"/>\n", escape_attr(&file)));
             xml.push_str("    </Property>\n");
             let mut bytes = Vec::new();
@@ -507,7 +548,16 @@ fn fresh_side_file_name(side_files: &[SideFile]) -> String {
 }
 
 /// Append one `<Property>` (with its value element) at `indent` spaces.
-fn push_property(xml: &mut String, indent: usize, name: &str, value: &Property, owner_type: &str) {
+/// `status` is the file's preserved `status` attribute (FreeCAD's
+/// persisted property-state bitmask), re-emitted verbatim when present.
+fn push_property(
+    xml: &mut String,
+    indent: usize,
+    name: &str,
+    value: &Property,
+    owner_type: &str,
+    status: Option<&str>,
+) {
     let ind = " ".repeat(indent);
     let (default_ty, body) = property_xml(value);
     // FreeCAD's reader finds a property by name and then restores it
@@ -520,10 +570,17 @@ fn push_property(xml: &mut String, indent: usize, name: &str, value: &Property, 
     } else {
         default_ty
     };
-    xml.push_str(&format!(
-        "{ind}<Property name=\"{}\" type=\"{ty}\">\n",
-        escape_attr(name)
-    ));
+    match status {
+        Some(s) => xml.push_str(&format!(
+            "{ind}<Property name=\"{}\" type=\"{ty}\" status=\"{}\">\n",
+            escape_attr(name),
+            escape_attr(s)
+        )),
+        None => xml.push_str(&format!(
+            "{ind}<Property name=\"{}\" type=\"{ty}\">\n",
+            escape_attr(name)
+        )),
+    }
     xml.push_str(&format!("{ind} {body}\n"));
     xml.push_str(&format!("{ind}</Property>\n"));
 }
@@ -1466,10 +1523,17 @@ fn parse_document_properties(
                 let value =
                     parse_property_value(reader, buf, xml, "document", &name, &map, report)?;
                 match (name.as_str(), value) {
-                    ("Label", Some(PropValue::Value(Property::String(s)))) => doc.set_label(&s),
-                    ("Creator", Some(PropValue::Value(Property::String(s)))) => doc.set_creator(&s),
+                    ("Label", Some(PropValue::Value(Property::String(s)))) => {
+                        doc.set_label(&s);
+                        record_doc_status(doc, &name, &map);
+                    }
+                    ("Creator", Some(PropValue::Value(Property::String(s)))) => {
+                        doc.set_creator(&s);
+                        record_doc_status(doc, &name, &map);
+                    }
                     ("CreationDate", Some(PropValue::Value(Property::String(s)))) => {
-                        doc.set_created(s)
+                        doc.set_created(s);
+                        record_doc_status(doc, &name, &map);
                     }
                     (n @ ("Label" | "Creator" | "CreationDate"), Some(_)) => {
                         report.warnings.push(format!(
@@ -1671,6 +1735,23 @@ fn parse_objects_section(
     }
 }
 
+/// Record a modeled document property's `status` attribute (FreeCAD's
+/// persisted property-state bitmask) into the document preservation bag,
+/// for the writer to re-emit verbatim on the canonical element.
+fn record_doc_status(doc: &mut Document, name: &str, map: &BTreeMap<String, String>) {
+    if let Some(status) = map.get("status") {
+        doc.preservation_mut()
+            .property_status
+            .push((name.to_string(), status.clone()));
+    }
+}
+
+/// The preserved `status` attribute for a modeled document property, if
+/// the file carried one.
+fn doc_status<'a>(bag: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    bag.iter().find(|(n, _)| n == name).map(|(_, s)| s.as_str())
+}
+
 /// The `<ObjectData>` section: feeds each `<Object>`'s `<Properties>` into
 /// the object built from the `<Objects>` table (matched by name).
 fn parse_object_data_section(
@@ -1846,6 +1927,15 @@ fn parse_object_properties(
                 let after_end = reader.buffer_position() as usize;
                 match (name.is_empty(), value) {
                     (false, Some(PropValue::Value(v))) => {
+                        // The file's `status` attribute on this modeled
+                        // property (FreeCAD's persisted property-state
+                        // bitmask: ReadOnly/Hidden editor preferences and
+                        // friends) — re-emitted verbatim on save.
+                        if let Some(status) = map.get("status") {
+                            if let Some(p) = object.preservation_mut() {
+                                p.property_status.push((name.clone(), status.clone()));
+                            }
+                        }
                         object.properties_mut().insert(name, v);
                     }
                     (
