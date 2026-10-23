@@ -233,7 +233,9 @@ macro_rules! impl_document_object {
             fn preservation(&self) -> &$crate::preservation::ObjectPreservation {
                 &self.container.preserved
             }
-            fn preservation_mut(&mut self) -> Option<&mut $crate::preservation::ObjectPreservation> {
+            fn preservation_mut(
+                &mut self,
+            ) -> Option<&mut $crate::preservation::ObjectPreservation> {
                 Some(&mut self.container.preserved)
             }
             fn execute(&mut self, doc: &$crate::Document) -> Result<(), String> {

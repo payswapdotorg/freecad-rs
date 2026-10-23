@@ -376,7 +376,10 @@ fn load_report_is_sensible_for_imperfect_archives() {
     // Unknown types are no longer dropped: the object loads as an opaque
     // ForeignObject (raw data preserved verbatim) and is counted there.
     assert_eq!(report.skipped, 0, "nothing is dropped outright anymore");
-    assert_eq!(report.foreign, 1, "the unknown type is preserved as foreign");
+    assert_eq!(
+        report.foreign, 1,
+        "the unknown type is preserved as foreign"
+    );
     assert!(
         report
             .warnings

@@ -131,15 +131,18 @@ fn assert_round_trip_list_parity(stem: &str, doc: &Document) {
     );
     assert_eq!(report.skipped, 0, "{stem}: nothing skipped on reload");
     assert!(
-        report.warnings.iter().all(|w| fc_app::is_preservation_warning(w)),
+        report
+            .warnings
+            .iter()
+            .all(|w| fc_app::is_preservation_warning(w)),
         "{stem}: reload warnings are all preservation notes (nothing lost): {:?}",
         report.warnings
     );
     assert!(
-        report
-            .skipped_properties
+        report.skipped_properties.iter().all(|_| report
+            .warnings
             .iter()
-            .all(|_| report.warnings.iter().any(|w| fc_app::is_preservation_warning(w))),
+            .any(|w| fc_app::is_preservation_warning(w))),
         "{stem}: per-property skips on reload are all preservation-backed: {:?}",
         report.skipped_properties
     );
@@ -467,15 +470,15 @@ fn unknown_object_type_is_reported_not_silent() {
     // The unknown type is a per-object record: an opaque ForeignObject,
     // counted as foreign (nothing is dropped outright anymore).
     assert_eq!(report.skipped, 0, "nothing is dropped outright");
-    assert_eq!(report.foreign, 1, "the unknown object is counted as foreign");
+    assert_eq!(
+        report.foreign, 1,
+        "the unknown object is counted as foreign"
+    );
     assert_eq!(report.objects, 1, "the known object still loads");
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains("Ghost")
-                && w.contains("unknown type 'Mesh::Feature'")
-                && w.contains("preserved verbatim")),
+        report.warnings.iter().any(|w| w.contains("Ghost")
+            && w.contains("unknown type 'Mesh::Feature'")
+            && w.contains("preserved verbatim")),
         "per-object warning: {:?}",
         report.warnings
     );

@@ -108,9 +108,15 @@ fn real_freecad_document_round_trips_losslessly() {
     // and SnellsLaw at position 8, the file's counts.
     let preserved = sketch.preserved.as_ref().expect("shadow present");
     assert_eq!(preserved.geometry_count, 6);
-    assert!(preserved.skipped_geometry.contains_key(&0), "construction kept");
+    assert!(
+        preserved.skipped_geometry.contains_key(&0),
+        "construction kept"
+    );
     assert_eq!(preserved.constraint_count, 9);
-    assert!(preserved.raw_constraints.contains_key(&7), "Block (on the construction line) kept");
+    assert!(
+        preserved.raw_constraints.contains_key(&7),
+        "Block (on the construction line) kept"
+    );
     assert!(preserved.raw_constraints.contains_key(&8), "SnellsLaw kept");
     assert_eq!(preserved.geo_remap.len(), 6, "one remap slot per geometry");
     // The report is honest about the modeled gaps — as preservation.
@@ -154,7 +160,10 @@ fn real_freecad_document_round_trips_losslessly() {
     // until a recompute regenerates geometry from parameters (at which
     // point our own payload takes the entry), the file's copy of the
     // shape is the most truthful one — preservation keeps it.
-    assert!(after.contains_key("Document.xml"), "the document is regenerated");
+    assert!(
+        after.contains_key("Document.xml"),
+        "the document is regenerated"
+    );
     assert_eq!(
         before.get("Base.Shape.brp"),
         after.get("Base.Shape.brp"),
@@ -167,14 +176,20 @@ fn real_freecad_document_round_trips_losslessly() {
     // Document metadata (the modeled trio + preserved raws).
     assert!(xml.contains("payswap"), "Company survives");
     assert!(xml.contains("MIT"), "License survives");
-    assert!(xml.contains("opensource.org/license/mit"), "LicenseURL survives");
+    assert!(
+        xml.contains("opensource.org/license/mit"),
+        "LicenseURL survives"
+    );
     assert!(
         xml.matches("App::PropertyUUID").count() >= 1,
         "the Uid property element re-emits verbatim"
     );
     // The sketch's geometry list: 6 elements — 5 modeled (re-serialized
     // canonically) + the construction block at slot 0, verbatim.
-    assert!(xml.contains(r#"<GeometryList count="6">"#), "geometry slots: 5 modeled + construction");
+    assert!(
+        xml.contains(r#"<GeometryList count="6">"#),
+        "geometry slots: 5 modeled + construction"
+    );
     let raw_construction = original_xml
         .match_indices("<Geometry ")
         .map(|(i, _)| i)
@@ -198,9 +213,15 @@ fn real_freecad_document_round_trips_losslessly() {
     // reference the ORIGINAL file GeoIds — the construction hole at 0
     // stays a hole (Block on 0, coincidences over 1..4, radius on 5).
     let block = raw_constrain(&xml, "17");
-    assert!(block.contains("First=\"0\""), "Block keeps the file's GeoId 0: {block}");
+    assert!(
+        block.contains("First=\"0\""),
+        "Block keeps the file's GeoId 0: {block}"
+    );
     let radius = raw_constrain(&xml, "11");
-    assert!(radius.contains("First=\"5\""), "Radius keeps the file's GeoId 5: {radius}");
+    assert!(
+        radius.contains("First=\"5\""),
+        "Radius keeps the file's GeoId 5: {radius}"
+    );
     let coincident = raw_constrain(&xml, "1");
     assert!(
         coincident.contains("First=\"1\"") && coincident.contains("Second=\"2\""),
@@ -237,9 +258,7 @@ fn real_freecad_document_round_trips_losslessly() {
 fn fresh_document_saves_without_preservation_noise() {
     let mut doc = Document::new("fresh");
     let mut object = fc_part::features::BoxFeature::new("Box");
-    object
-        .container
-        .set("Length", fc_app::Property::Float(3.0));
+    object.container.set("Length", fc_app::Property::Float(3.0));
     doc.add(Box::new(object));
     doc.recompute_all().expect("recompute");
 

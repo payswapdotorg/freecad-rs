@@ -88,7 +88,11 @@ impl std::fmt::Debug for ObjectPreservation {
             .field("extensions", &self.extensions.is_some())
             .field(
                 "properties",
-                &self.properties.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                &self
+                    .properties
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>(),
             )
             .field(
                 "payloads",
@@ -168,20 +172,29 @@ impl std::fmt::Debug for DocumentPreservation {
             .field("root_attributes", &self.root_attributes)
             .field(
                 "raw_elements",
-                &self.raw_elements.iter().map(|e| e.len()).collect::<Vec<_>>(),
+                &self
+                    .raw_elements
+                    .iter()
+                    .map(|e| e.len())
+                    .collect::<Vec<_>>(),
             )
             .field("properties_attrs", &self.properties_attrs)
             .field(
                 "properties",
-                &self.properties.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                &self
+                    .properties
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>(),
             )
-            .field(
-                "object_deps",
-                &self.object_deps.keys().collect::<Vec<_>>(),
-            )
+            .field("object_deps", &self.object_deps.keys().collect::<Vec<_>>())
             .field(
                 "zip_entries",
-                &self.zip_entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                &self
+                    .zip_entries
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>(),
             )
             .finish()
     }

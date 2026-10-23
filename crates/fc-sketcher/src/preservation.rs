@@ -82,11 +82,7 @@ impl SketchPreservation {
         match self.original_geoid(ours) {
             Some(orig) => orig,
             None => {
-                let mapped = self
-                    .geo_remap
-                    .iter()
-                    .filter(|m| m.is_some())
-                    .count() as u32;
+                let mapped = self.geo_remap.iter().filter(|m| m.is_some()).count() as u32;
                 self.geometry_count as u32 + (ours - mapped)
             }
         }

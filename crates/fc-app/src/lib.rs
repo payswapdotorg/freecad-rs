@@ -29,8 +29,8 @@ pub use document::{Document, ObjectId, ObjectSummary};
 pub use foreign::ForeignObject;
 pub use object::{DocumentObject, ObjectStatus, PropertyContainer};
 pub use preservation::{
-    DocumentPreservation, ObjectPreservation, PreservedShape, PreservedZipEntry,
-    is_preservation_warning,
+    is_preservation_warning, DocumentPreservation, ObjectPreservation, PreservedShape,
+    PreservedZipEntry,
 };
 pub use property::Property;
 pub use recompute::RecomputeError;

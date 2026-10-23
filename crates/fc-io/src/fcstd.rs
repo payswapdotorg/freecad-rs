@@ -338,11 +338,7 @@ fn build_document_xml(
         if let Some(foreign) = obj.as_any().downcast_ref::<ForeignObject>() {
             xml.push_str(&format!("  <Object name=\"{}\"", escape_attr(&o.name)));
             for (key, value) in &foreign.object_attrs {
-                xml.push_str(&format!(
-                    " {}=\"{}\"",
-                    escape_attr(key),
-                    escape_attr(value)
-                ));
+                xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
             }
             xml.push_str(">\n");
             match &foreign.raw_object_data {
@@ -404,11 +400,7 @@ fn build_document_xml(
 
         xml.push_str(&format!("  <Object name=\"{}\"", escape_attr(&o.name)));
         for (key, value) in &preservation.object_attrs {
-            xml.push_str(&format!(
-                " {}=\"{}\"",
-                escape_attr(key),
-                escape_attr(value)
-            ));
+            xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
         }
         xml.push_str(">\n");
         // FreeCAD's attach-extension blocks come first inside the entry.
@@ -553,20 +545,11 @@ fn is_primitive_dimension(owner_type: &str, name: &str) -> bool {
 /// The FreeCAD value element for a property, per the crate's element table.
 fn property_xml(value: &Property) -> (&'static str, String) {
     match value {
-        Property::Bool(v) => (
-            "App::PropertyBool",
-            format!("<Bool value=\"{v}\"/>"),
-        ),
+        Property::Bool(v) => ("App::PropertyBool", format!("<Bool value=\"{v}\"/>")),
         // Rust's `{}` for f64 prints the shortest round-trip form, which is
         // what FreeCAD's full-precision writer aims for too.
-        Property::Float(v) => (
-            "App::PropertyFloat",
-            format!("<Float value=\"{v}\"/>"),
-        ),
-        Property::Integer(v) => (
-            "App::PropertyInteger",
-            format!("<Integer value=\"{v}\"/>"),
-        ),
+        Property::Float(v) => ("App::PropertyFloat", format!("<Float value=\"{v}\"/>")),
+        Property::Integer(v) => ("App::PropertyInteger", format!("<Integer value=\"{v}\"/>")),
         Property::String(v) => (
             "App::PropertyString",
             format!("<String value=\"{}\"/>", escape_attr(v)),
@@ -818,15 +801,14 @@ fn sketch_constraintlist_xml(
             }
             // Constraints added after load emit past the original list.
             while next_modeled < modeled.len() {
-                push_constrain_element(&mut body, &modeled[next_modeled], |g| {
-                    p.saved_geoid(g.0)
-                });
+                push_constrain_element(&mut body, &modeled[next_modeled], |g| p.saved_geoid(g.0));
                 next_modeled += 1;
             }
         }
     }
     let count = body.matches("<Constrain ").count();
-    let mut xml = format!("     <ConstraintList count=\"{count}\">\n{body}     </ConstraintList>\n");
+    let mut xml =
+        format!("     <ConstraintList count=\"{count}\">\n{body}     </ConstraintList>\n");
     if let Some(p) = preserved {
         // Trailing raw content of the property payload (e.g. a
         // <ConstraintExtensions> block), right where the file had it.
@@ -863,26 +845,12 @@ fn push_constrain_element<F: Fn(fc_sketcher::GeoId) -> u32>(
         ),
         Constraint::Horizontal { g } => (2, geo(g) as i64, 0, -2000, 0, -2000, 0, None),
         Constraint::Vertical { g } => (3, geo(g) as i64, 0, -2000, 0, -2000, 0, None),
-        Constraint::Parallel { g1, g2 } => (
-            4,
-            geo(g1) as i64,
-            0,
-            geo(g2) as i64,
-            0,
-            -2000,
-            0,
-            None,
-        ),
-        Constraint::Perpendicular { g1, g2 } => (
-            10,
-            geo(g1) as i64,
-            0,
-            geo(g2) as i64,
-            0,
-            -2000,
-            0,
-            None,
-        ),
+        Constraint::Parallel { g1, g2 } => {
+            (4, geo(g1) as i64, 0, geo(g2) as i64, 0, -2000, 0, None)
+        }
+        Constraint::Perpendicular { g1, g2 } => {
+            (10, geo(g1) as i64, 0, geo(g2) as i64, 0, -2000, 0, None)
+        }
         Constraint::Distance {
             g1,
             pos1,
@@ -931,22 +899,11 @@ fn push_constrain_element<F: Fn(fc_sketcher::GeoId) -> u32>(
             0,
             Some(value),
         ),
-        Constraint::Radius { g, value } => {
-            (11, geo(g) as i64, 0, -2000, 0, -2000, 0, Some(value))
-        }
+        Constraint::Radius { g, value } => (11, geo(g) as i64, 0, -2000, 0, -2000, 0, Some(value)),
         Constraint::Diameter { g, value } => {
             (18, geo(g) as i64, 0, -2000, 0, -2000, 0, Some(value))
         }
-        Constraint::Equal { g1, g2 } => (
-            12,
-            geo(g1) as i64,
-            0,
-            geo(g2) as i64,
-            0,
-            -2000,
-            0,
-            None,
-        ),
+        Constraint::Equal { g1, g2 } => (12, geo(g1) as i64, 0, geo(g2) as i64, 0, -2000, 0, None),
         Constraint::Angle { g1, g2, value } => (
             9,
             geo(g1) as i64,
@@ -968,16 +925,7 @@ fn push_constrain_element<F: Fn(fc_sketcher::GeoId) -> u32>(
             None,
         ),
         // FreeCAD's simple (edge) Tangent: both slots empty.
-        Constraint::Tangent { g1, g2 } => (
-            5,
-            geo(g1) as i64,
-            0,
-            geo(g2) as i64,
-            0,
-            -2000,
-            0,
-            None,
-        ),
+        Constraint::Tangent { g1, g2 } => (5, geo(g1) as i64, 0, geo(g2) as i64, 0, -2000, 0, None),
         // FreeCAD's Symmetric: Third is the mirror line (ThirdPos
         // 0) or the symmetry point (ThirdPos = the point's slot).
         Constraint::Symmetric {
@@ -1104,7 +1052,14 @@ pub fn load_document_with_hook(
     // rest verbatim: GuiDocument.xml, thumbnails, anything else a real
     // FreeCAD wrote that this model has no vocabulary for.
     let mut consumed: BTreeSet<String> = BTreeSet::from(["Document.xml".to_string()]);
-    parse_document(&xml_bytes, &mut zip, &mut doc, &mut report, mutate, &mut consumed)?;
+    parse_document(
+        &xml_bytes,
+        &mut zip,
+        &mut doc,
+        &mut report,
+        mutate,
+        &mut consumed,
+    )?;
 
     // The preservation sweep: every archive entry nobody claimed keeps
     // its raw bytes and storage form for verbatim re-emission on save.
@@ -1125,11 +1080,9 @@ pub fn load_document_with_hook(
         if entry.read_to_end(&mut data).is_err() {
             continue;
         }
-        doc.preservation_mut().zip_entries.push(PreservedZipEntry {
-            name,
-            data,
-            stored,
-        });
+        doc.preservation_mut()
+            .zip_entries
+            .push(PreservedZipEntry { name, data, stored });
     }
 
     Ok((doc, report))
@@ -1293,10 +1246,7 @@ fn skip_element(reader: &mut XmlReader<'_>, buf: &mut Vec<u8>) -> Result<(), Fcs
 /// Attributes of an element beyond the `consumed` set, in file order
 /// (quick-xml yields them in source order). What a parser reads is live
 /// state; the rest is preservation — re-emitted verbatim on save.
-fn extra_attrs(
-    e: &BytesStart<'_>,
-    consumed: &[&str],
-) -> Vec<(String, String)> {
+fn extra_attrs(e: &BytesStart<'_>, consumed: &[&str]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for a in e.attributes().flatten() {
         let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
@@ -1540,9 +1490,10 @@ fn parse_document_properties(
                     // is preserved verbatim, so the re-saved file still
                     // carries it.
                     (_, _) => {
-                        if let (Some(start), Some(end)) =
-                            (tag_start(xml, after_start), Some(reader.buffer_position() as usize))
-                        {
+                        if let (Some(start), Some(end)) = (
+                            tag_start(xml, after_start),
+                            Some(reader.buffer_position() as usize),
+                        ) {
                             let raw = String::from_utf8_lossy(&xml[start..end]).into_owned();
                             let key = if name.is_empty() {
                                 format!("<unnamed #{}>", doc.preservation().properties.len())
@@ -1563,7 +1514,9 @@ fn parse_document_properties(
                 let raw = raw_element_and_skip(xml, reader, buf, after_start)?;
                 let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
                 if !name.is_empty() {
-                    doc.preservation_mut().transient_properties.push((name, raw));
+                    doc.preservation_mut()
+                        .transient_properties
+                        .push((name, raw));
                 }
             }
             Event::Empty(e) if e.name().as_ref() == b"_Property" => {
@@ -1572,7 +1525,9 @@ fn parse_document_properties(
                     let raw = String::from_utf8_lossy(&xml[start..pos]).into_owned();
                     let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
                     if !name.is_empty() {
-                        doc.preservation_mut().transient_properties.push((name, raw));
+                        doc.preservation_mut()
+                            .transient_properties
+                            .push((name, raw));
                     }
                 }
             }
@@ -1623,10 +1578,7 @@ fn parse_objects_section(
                 let pos = reader.buffer_position() as usize;
                 if !name.is_empty() {
                     if let Some(start) = tag_start(xml, pos) {
-                        deps.push((
-                            name,
-                            String::from_utf8_lossy(&xml[start..pos]).into_owned(),
-                        ));
+                        deps.push((name, String::from_utf8_lossy(&xml[start..pos]).into_owned()));
                     }
                 }
             }
@@ -1751,11 +1703,7 @@ fn parse_object_data_section(
                             // `<Object>` entry — the model has no
                             // vocabulary for it, and the bytes are the
                             // only truthful representation.
-                            if object
-                                .as_any()
-                                .downcast_ref::<ForeignObject>()
-                                .is_some()
-                            {
+                            if object.as_any().downcast_ref::<ForeignObject>().is_some() {
                                 let foreign =
                                     object.as_any_mut().downcast_mut::<ForeignObject>().unwrap();
                                 // Extra attributes of the ObjectData row
@@ -1766,11 +1714,7 @@ fn parse_object_data_section(
                                     if k == "name" {
                                         continue;
                                     }
-                                    if !foreign
-                                        .object_attrs
-                                        .iter()
-                                        .any(|(fk, _)| fk == k)
-                                    {
+                                    if !foreign.object_attrs.iter().any(|(fk, _)| fk == k) {
                                         foreign.object_attrs.push((k.clone(), v.clone()));
                                     }
                                 }
@@ -1793,14 +1737,7 @@ fn parse_object_data_section(
                                 }
                             }
                             parse_object_properties(
-                                reader,
-                                buf,
-                                xml,
-                                object,
-                                &owner,
-                                zip,
-                                report,
-                                consumed,
+                                reader, buf, xml, object, &owner, zip, report, consumed,
                             )?;
                         }
                         // An object that failed to build was already reported
@@ -1905,8 +1842,7 @@ fn parse_object_properties(
                 // '<' (buffer_position is past the start tag) to wherever
                 // the value parser stops (always at `</Property>`).
                 let after_start = reader.buffer_position() as usize;
-                let value =
-                    parse_property_value(reader, buf, xml, owner, &name, &map, report)?;
+                let value = parse_property_value(reader, buf, xml, owner, &name, &map, report)?;
                 let after_end = reader.buffer_position() as usize;
                 match (name.is_empty(), value) {
                     (false, Some(PropValue::Value(v))) => {
@@ -1933,7 +1869,14 @@ fn parse_object_properties(
                             sketch_preserved = Some(preserved);
                         }
                     }
-                    (false, Some(PropValue::SketchConstraints { inner, count, trailing })) => {
+                    (
+                        false,
+                        Some(PropValue::SketchConstraints {
+                            inner,
+                            count,
+                            trailing,
+                        }),
+                    ) => {
                         constraint_inner = Some(inner);
                         constraint_count = count;
                         constraint_extensions = trailing;
@@ -1982,8 +1925,7 @@ fn parse_object_properties(
                     // preservation note) already names the gap.
                     (false, None) => {
                         if let Some(start) = tag_start(xml, after_start) {
-                            let raw =
-                                String::from_utf8_lossy(&xml[start..after_end]).into_owned();
+                            let raw = String::from_utf8_lossy(&xml[start..after_end]).into_owned();
                             if let Some(p) = object.preservation_mut() {
                                 p.properties.push((name.clone(), raw));
                             }
@@ -2172,8 +2114,10 @@ fn freecad_geometrylist_to_fragment(
                     block[geo_start..geo_start + geo_len + "</GeoExtensions>".len()].to_string(),
                 );
             } else if let Some(empty_len) = block[geo_start..].find("/>") {
-                preserved.geo_extensions
-                    .insert(slot, block[geo_start..geo_start + empty_len + 2].to_string());
+                preserved.geo_extensions.insert(
+                    slot,
+                    block[geo_start..geo_start + empty_len + 2].to_string(),
+                );
             }
         }
         // The fragment index this geometry takes when it maps — computed
@@ -2185,7 +2129,9 @@ fn freecad_geometrylist_to_fragment(
             ));
             remap.push(None);
             kinds.push(None);
-            preserved.skipped_geometry.insert(slot, raw_block.to_string());
+            preserved
+                .skipped_geometry
+                .insert(slot, raw_block.to_string());
             index += 1;
             continue;
         }
@@ -2213,7 +2159,9 @@ fn freecad_geometrylist_to_fragment(
                     // reference onto the wrong geometry).
                     remap.push(None);
                     kinds.push(None);
-                    preserved.skipped_geometry.insert(slot, raw_block.to_string());
+                    preserved
+                        .skipped_geometry
+                        .insert(slot, raw_block.to_string());
                 }
             },
             "Part::GeomLineSegment" => {
@@ -2241,7 +2189,9 @@ fn freecad_geometrylist_to_fragment(
                         ));
                         remap.push(None);
                         kinds.push(None);
-                        preserved.skipped_geometry.insert(slot, raw_block.to_string());
+                        preserved
+                            .skipped_geometry
+                            .insert(slot, raw_block.to_string());
                     }
                 }
             }
@@ -2297,7 +2247,9 @@ fn freecad_geometrylist_to_fragment(
                             ));
                             remap.push(None);
                             kinds.push(None);
-                            preserved.skipped_geometry.insert(slot, raw_block.to_string());
+                            preserved
+                                .skipped_geometry
+                                .insert(slot, raw_block.to_string());
                         }
                     },
                     _ => {
@@ -2307,7 +2259,9 @@ fn freecad_geometrylist_to_fragment(
                         ));
                         remap.push(None);
                         kinds.push(None);
-                        preserved.skipped_geometry.insert(slot, raw_block.to_string());
+                        preserved
+                            .skipped_geometry
+                            .insert(slot, raw_block.to_string());
                     }
                 }
             }
@@ -2318,7 +2272,9 @@ fn freecad_geometrylist_to_fragment(
                 ));
                 remap.push(None);
                 kinds.push(None);
-                preserved.skipped_geometry.insert(slot, raw_block.to_string());
+                preserved
+                    .skipped_geometry
+                    .insert(slot, raw_block.to_string());
             }
         }
         index += 1;
@@ -2370,8 +2326,9 @@ fn apply_freecad_constraints(
     // The constraint-side shadow fields (raw unmappable elements,
     // the file's counts) — merged into whatever the geometry built.
     let mut raws: BTreeMap<usize, String> = BTreeMap::new();
-    let lines =
-        freecad_constraintlist_to_fragment_lines(inner, geo_remap, geo_kinds, owner, report, &mut raws);
+    let lines = freecad_constraintlist_to_fragment_lines(
+        inner, geo_remap, geo_kinds, owner, report, &mut raws,
+    );
     let shadow = preserved.get_or_insert_with(SketchPreservation::default);
     shadow.constraint_count = constraint_count;
     shadow.raw_constraints = raws;
@@ -2614,7 +2571,11 @@ fn freecad_constraintlist_to_fragment_lines(
         // Symmetric always carries its third element reference in
         // FreeCAD; without it the constraint is malformed.
         if frag_ty == 14 && third < 0 {
-            skip(report, raws, "Symmetric without its third element reference");
+            skip(
+                report,
+                raws,
+                "Symmetric without its third element reference",
+            );
             index += 1;
             continue;
         }
@@ -3550,7 +3511,10 @@ fn load_shape_payload(
                     "{owner}: malformed FCBREP payload: {e} — geometry skipped (parameters kept), \
                      payload preserved verbatim for round-trip"
                 ));
-                Ok((None, provenance.map(|(entry, stored)| (entry, bytes, stored))))
+                Ok((
+                    None,
+                    provenance.map(|(entry, stored)| (entry, bytes, stored)),
+                ))
             }
         },
         BrpFormat::OcctBrep => {
@@ -3558,14 +3522,20 @@ fn load_shape_payload(
                 "{owner}: OCCT BRep shape not modeled — geometry skipped (parameters kept), \
                  payload preserved verbatim for round-trip"
             ));
-            Ok((None, provenance.map(|(entry, stored)| (entry, bytes, stored))))
+            Ok((
+                None,
+                provenance.map(|(entry, stored)| (entry, bytes, stored)),
+            ))
         }
         BrpFormat::Unknown => {
             report.warnings.push(format!(
                 "{owner}: unknown shape payload format — geometry skipped (parameters kept), \
                  payload preserved verbatim for round-trip"
             ));
-            Ok((None, provenance.map(|(entry, stored)| (entry, bytes, stored))))
+            Ok((
+                None,
+                provenance.map(|(entry, stored)| (entry, bytes, stored)),
+            ))
         }
     }
 }
@@ -3973,7 +3943,10 @@ mod sketch_persistence_tests {
         assert!(!xml.contains("<Sketch>\n"), "{xml}");
         // The property count accounts for both (plus the transient
         // count FreeCAD's header always carries).
-        assert!(xml.contains("<Properties Count=\"4\" TransientCount=\"0\">"), "{xml}");
+        assert!(
+            xml.contains("<Properties Count=\"4\" TransientCount=\"0\">"),
+            "{xml}"
+        );
 
         std::fs::remove_file(&path).ok();
     }
