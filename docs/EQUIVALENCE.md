@@ -53,10 +53,47 @@ the r39109 binary, `fixtures/freecad_sketch_constraints.fcstd` and
 expression bindings, and the FreeCAD 1.0 `<Sketch>` fragment family.
 Constraint GeoIds route through a remap (skipped geometry shifts every
 later index); axis/root-point/external references, `IsDriving="0"`
-reference constraints and the unmappable kinds (Tangent, Symmetric,
-Block, …) are skipped with warnings naming the FreeCAD kind.
-Known-skipped payloads are reported as per-property warnings — OCCT BRep
-shape payloads (`.brp`) keep their parameters and rebuild on recompute.
+reference constraints and the unmappable kinds are skipped with warnings
+naming the FreeCAD kind.
+
+**Nothing else is dropped either — it is preserved verbatim.** A
+load→save cycle never destroys data a real FreeCAD wrote:
+
+- **OCCT BRep shape payloads** (`.brp`) ride along byte-identically
+  under their original entry names — imported `Part::Feature` shapes
+  and the last-good shapes of errored features survive the trip (the
+  two cases where the file's shape is the only copy of the data). A
+  recomputed feature replaces its preserved payload with our own.
+- **Unconsumed zip entries** re-emit byte-identically with their
+  original storage form: `GuiDocument.xml`, `Thumbnails/Thumbnail.png`,
+  element maps, anything else a real FreeCAD wrote.
+- **Unmodeled property types** (and malformed values of modeled ones)
+  keep their raw `<Property>` elements, re-emitted verbatim — including
+  enumerations with their `CustomEnumList`s, transient `<_Property>`
+  markers, `<Extensions>` blocks.
+- **Document metadata** (Uid, Company, License, `StringHasher`, root
+  attributes, `ObjectDeps`) round-trips verbatim.
+- **Sketch constructs the solver cannot express** — construction
+  geometry, off-plane/unmodeled curve kinds, `SnellsLaw`-style
+  constraints — keep their raw elements at their original GeoId/list
+  slots, and the reader's compaction remap is inverted on write, so
+  every constraint reference keeps the file's own numbering.
+- **Unknown object types** load as opaque `ForeignObject`s: real name
+  and type in the document, raw `ObjectData` verbatim, links to them
+  resolve, nothing recomputed.
+
+The load report says so in as many words: every preservation carries a
+`preserved verbatim` note, and `fc_app::is_preservation_warning`
+separates "kept, not modeled" from "kept nothing".
+
+Verified against the real r39109 binary both ways on
+`fixtures/freecad_lossless_full.fcstd` (an imported STEP shape, a
+parametric Box, a sketch with construction geometry and a `SnellsLaw`
+constraint, document metadata, GUI entries): every preserved entry is
+byte-identical across a round trip, and FreeCAD opens our re-saved
+file with the same three objects, the same imported volume
+(7178.097245096173), the same 6-geometries/9-constraints sketch, the
+same metadata — recompute clean.
 
 **freecad-rs files → FreeCAD.** Real FreeCAD 1.0 opens our files and
 restores every parameter, link, placement and sketch — geometry AND
@@ -73,10 +110,10 @@ types are FreeCAD's own — dimension floats serialize as
 `App::PropertyLength`, exactly as FreeCAD 1.0 writes them, because
 FreeCAD's reader silently skips type-mismatched properties.
 
-Geometry payloads are the honest boundary: FreeCAD restores **only**
-OCCT BRep, our kernel emits parametric truth instead — the same
-trade-off FreeCAD itself makes when it writes parameters. A one-line
-touch-and-recompute in FreeCAD rebuilds the whole model natively:
+Geometry payloads: FreeCAD restores **only** OCCT BRep, our kernel emits
+parametric truth instead — the same trade-off FreeCAD itself makes when
+it writes parameters. A one-line touch-and-recompute in FreeCAD
+rebuilds the whole model natively:
 
 ```python
 doc = FreeCAD.openDocument("fcrs-demo.FCStd")
@@ -88,7 +125,8 @@ doc.recompute()   # OCCT rebuilds: Base 3000.000, Cut 2497.345, Ball 904.779
 in the object table, matching the state their geometry is in. The
 **last-good shapes of errored features** and imported `Part::Feature`
 meshes are the two cases that persist geometry, exactly the payloads a
-FreeCAD file carries.)
+FreeCAD file carries — and for files loaded *from* FreeCAD, those
+original payloads re-emerge byte-identically on save.)
 
 ## Format details that had to match
 
@@ -129,17 +167,12 @@ FreeCAD file carries.)
 ## Known differences — the honest list
 
 - **Booleans are mesh-level** (BSP on tessellations, watertight,
-  deflection-bounded volumes), not OCCT exact BRep booleans.
-- **OCCT BRep payloads are not parsed** (`.brp` geometry is skipped,
-  parameters kept); our own files persist parameters instead of shapes,
-  so both systems rebuild on recompute.
-- Sketch constraints beyond the sixteen mappable kinds (SnellsLaw,
-  InternalAlignment, Weight, Group, Text, …) and the extended forms
-  (two-point Horizontal, point-to-line Distance, angle-via-point,
-  tangent-via-point / endpoint-to-endpoint Tangency) are skipped with
-  warnings — this kernel's solver vocabulary is its own 16-kind set,
-  and unmappable constraints are never silently re-interpreted.
+  deflection-bounded volumes), not OCCT exact BRep booleans — the one
+  remaining place where a conversion through this kernel is not
+  bit-exact. (Volumes agree to the deflection; the file *data* loss is
+  zero — operands, parameters and results all round-trip.)
 - `Part::Mirroring`'s `MirrorPlane` link (a face/datum override) has no
   geometry to read here — `Base`/`Normal` planes only.
 - No GUI: the `fc-viewer` renders offscreen; there is no workbench,
-  no interaction loop. This is the CLI/kernel side of FreeCAD.
+  no interaction loop. This is the CLI/kernel side of FreeCAD. (GUI
+  *data* — `GuiDocument.xml`, thumbnails — round-trips verbatim.)
