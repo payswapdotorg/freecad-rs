@@ -132,7 +132,6 @@ fn real_freecad_document_round_trips_losslessly() {
     save_document(&doc, &temp).expect("re-save works");
     let before = zip_entries(&src);
     let after = zip_entries(&temp);
-    std::fs::copy(&temp, "/tmp/fixture/after.fcstd").unwrap();
 
     // Every entry the model does not regenerate is byte-identical:
     // the imported OCCT shape (the data-loss case this test exists
