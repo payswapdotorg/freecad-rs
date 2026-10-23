@@ -283,6 +283,7 @@ forms:
 | `App::PropertyPlacement` | `pos=(x,y,z);axis=(x,y,z);angle=deg`  | `pos=(0,0,12);axis=(0,0,1);angle=25`   |
 | `App::PropertyLink`      | object name                           | `Ball`                                 |
 | `App::PropertyLinkList`  | object names, comma-separated         | `Ball,Stem`                            |
+| `App::PropertyLinkSub`   | `name` or `name[sub,sub]`             | `Box[Face3]`                           |
 
 Whitespace around scalars is tolerated on parse. Placement segments may
 appear in any order (angle in degrees).
@@ -329,6 +330,28 @@ freecad-rs add demo.fcstd --name Core common --base Base --tool Ball
 
 Changing either operand's parameters (e.g. `set demo.fcstd Stem Radius
 3`) touches the boolean like any other dependent.
+
+## Mirroring: `add mirroring`
+
+`Part::Mirroring` reflects its `--source` shape through a plane —
+given directly by `--base`/`--normal`, or named by a linked datum
+plane (`--mirror-plane`, FreeCAD's `MirrorPlane` property):
+
+```sh
+freecad-rs add demo.fcstd --name Twin mirroring --source Base \
+    --base 30,0,0 --normal 1,0,0
+#   recomputed Twin (Part::Mirroring)
+```
+
+A `--mirror-plane` datum (a `Part::Plane` in the document, from a
+FreeCAD-authored file) overrides the given plane: its placement is the
+mirror plane — position, rotation · +Z — exactly FreeCAD's
+`FeatureMirroring` resolution, and like FreeCAD the resolved plane is
+written back into `Base`/`Normal` at recompute. A face-subelement
+link (`set demo.fcstd Twin MirrorPlane Box[Face3]`, FreeCAD's own form
+for mirroring through a face) rides on the file's persisted
+`Base`/`Normal` — the plane FreeCAD itself resolved there on its last
+execute.
 
 ## PartDesign: `pad` / `pocket` / `revolution`
 

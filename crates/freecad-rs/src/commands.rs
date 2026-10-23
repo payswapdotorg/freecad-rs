@@ -13,8 +13,8 @@ use fc_base::{Placement, Rotation, Vector3};
 use fc_io::mesh_export::{write_obj, write_stl_ascii, write_stl_binary};
 use fc_io::{load_document, load_document_with_hook, save_document};
 use fc_part::features::{
-    BooleanFeature, BoxFeature, ConeFeature, CylinderFeature, SphereFeature, TorusFeature,
-    TransformFeature,
+    BooleanFeature, BoxFeature, ConeFeature, CylinderFeature, MirroringFeature, SphereFeature,
+    TorusFeature, TransformFeature,
 };
 use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{mesh_of, shape_of, BooleanKind, Mesh, TopoShape};
@@ -300,6 +300,43 @@ fn build_feature(
         }
         AddShape::Common { base, tool } => {
             boolean_feature(doc, name, BooleanKind::Common, &base, &tool)?
+        }
+        AddShape::Mirroring {
+            source,
+            base,
+            normal,
+            mirror_plane,
+        } => {
+            if doc.get_by_name(&source).is_none() {
+                return Err(format!(
+                    "--source object '{source}' not found in the document; available: {}",
+                    names_list(doc)
+                ));
+            }
+            if let Some(plane) = &mirror_plane {
+                if doc.get_by_name(plane).is_none() {
+                    return Err(format!(
+                        "--mirror-plane object '{plane}' not found in the document; \
+                         available: {}",
+                        names_list(doc)
+                    ));
+                }
+            }
+            let mut f = MirroringFeature::new(name.unwrap_or("Mirrored"));
+            f.container.set("Source", Property::Link(source.clone()));
+            f.container.set(
+                "Base",
+                Property::Vector(Vector3::new(base[0], base[1], base[2])),
+            );
+            f.container.set(
+                "Normal",
+                Property::Vector(Vector3::new(normal[0], normal[1], normal[2])),
+            );
+            if let Some(plane) = mirror_plane {
+                f.container
+                    .set("MirrorPlane", Property::LinkSub(plane, Vec::new()));
+            }
+            Box::new(f)
         }
     })
 }
@@ -721,7 +758,7 @@ fn pad(
     let mut feature = PadFeature::new(name.unwrap_or("Pad"));
     feature
         .container
-        .set("Profile", Property::Link(sketch.to_string()));
+        .set("Profile", Property::LinkSub(sketch.to_string(), Vec::new()));
     feature.container.set("Length", Property::Float(length));
     if midplane {
         feature.container.set("Midplane", Property::Bool(true));
@@ -755,7 +792,7 @@ fn pocket(
     let mut feature = PocketFeature::new(name.unwrap_or("Pocket"));
     feature
         .container
-        .set("Profile", Property::Link(sketch.to_string()));
+        .set("Profile", Property::LinkSub(sketch.to_string(), Vec::new()));
     feature
         .container
         .set("Base", Property::Link(base.to_string()));
@@ -783,7 +820,7 @@ fn revolution(
     let mut feature = RevolutionFeature::new(name.unwrap_or("Revolution"));
     feature
         .container
-        .set("Profile", Property::Link(sketch.to_string()));
+        .set("Profile", Property::LinkSub(sketch.to_string(), Vec::new()));
     feature.container.set("Angle", Property::Float(angle));
     feature.container.set(
         "Axis",

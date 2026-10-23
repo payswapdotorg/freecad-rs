@@ -492,9 +492,24 @@ impl_document_object!(MultiFuseFeature, "Part::MultiFuse");
 
 /// FreeCAD `Part::Mirroring` (`Mod/Part/App/FeatureMirroring.cpp`):
 /// reflects the `Source` shape through the plane given by `Base`
-/// (point) and `Normal` (direction). FreeCAD's optional `MirrorPlane`
-/// link (a face/datum overriding Base+Normal) has no geometry to read
-/// in this kernel — an error names it honestly instead of guessing.
+/// (point) and `Normal` (direction) — or, when `MirrorPlane` is linked,
+/// through the plane that link names:
+///
+/// * **a datum plane** (`Part::Plane` and family): its `Placement`
+///   gives the plane exactly — position, rotation · +Z. Verified
+///   against the real r39109 binary: a `Part::Plane` at (30, 0, 0)
+///   rotated 30° about X resolves to `Base` = (30, 0, 0),
+///   `Normal` = (0, −0.5, 0.8660254…).
+/// * **a face subelement** (e.g. `("Box", ["Face3"])`): a mesh
+///   kernel has no OCCT face numbering to re-identify "Face3" — and
+///   FreeCAD itself persists the resolved plane into `Base`/`Normal`
+///   on every execute (observed on r39109: Face3 of an 8×6×4 box at
+///   the origin resolved to `Base` = (8, 0, 0), `Normal` = (0, 1, 0)),
+///   so the file's own resolution is the plane used.
+///
+/// Either way FreeCAD's execute writes the resolved plane back into
+/// `Base`/`Normal` (observed on r39109); this kernel mirrors that
+/// write-back for the datum case.
 ///
 /// Mirroring flips orientation, so the reflected mesh's triangles are
 /// re-wound to keep outward normals (FreeCAD/OCCT handles this inside
@@ -507,13 +522,14 @@ pub struct MirroringFeature {
 
 impl MirroringFeature {
     /// Properties: `Source` (Link, required), `Base` (Vector, origin),
-    /// `Normal` (Vector, +Z), `Placement` identity — FreeCAD's set
-    /// (`MirrorPlane` omitted; see the struct docs).
+    /// `Normal` (Vector, +Z), `MirrorPlane` (LinkSub, unset),
+    /// `Placement` identity — FreeCAD's set.
     pub fn new(name: &str) -> Self {
         let mut container = PropertyContainer::new(name);
         container.set("Source", Property::Link(String::new()));
         container.set("Base", Property::Vector(Vector3::ZERO));
         container.set("Normal", Property::Vector(Vector3::new(0.0, 0.0, 1.0)));
+        container.set("MirrorPlane", Property::LinkSub(String::new(), Vec::new()));
         container.set("Placement", Property::Placement(Placement::IDENTITY));
         Self {
             container,
@@ -532,7 +548,7 @@ impl MirroringFeature {
                 ))
             }
         };
-        let base = match self.container.get("Base") {
+        let mut base = match self.container.get("Base") {
             Some(Property::Vector(v)) => *v,
             _ => return Err(format!("{type_name} '{name}': missing property 'Base'")),
         };
@@ -547,6 +563,67 @@ impl MirroringFeature {
             ));
         }
         normal = Vector3::new(normal.x / length, normal.y / length, normal.z / length);
+
+        // FreeCAD's `MirrorPlane` (a `PropertyLinkSub`) overrides
+        // Base + Normal — FeatureMirroring resolves it into the plane
+        // on every execute. The datum case is computed exactly (any
+        // `Part::Datum` family member: FreeCAD reads its placement,
+        // position + rotation · +Z — a `Part::Plane` loaded through this
+        // kernel's unknown-family path carries its real type in the
+        // `TypeId` property); the face-subelement case uses the plane
+        // persisted in Base/Normal (FreeCAD's own last resolution — see
+        // the struct docs). A linked target that is neither (a bare
+        // shape without subelements, say) is the same error FreeCAD
+        // raises ("No subelement specified").
+        if let Some(Property::LinkSub(target, subs)) = self.container.get("MirrorPlane") {
+            if !target.is_empty() && subs.is_empty() {
+                let object = doc.get_by_name(target).ok_or_else(|| {
+                    format!("{type_name} '{name}': MirrorPlane '{target}' not found")
+                })?;
+                let placement = datum_placement_of(object).ok_or_else(|| {
+                    format!(
+                        "{type_name} '{name}': MirrorPlane '{target}' is not a \
+                         datum plane (no placement to read)"
+                    )
+                })?;
+                if !is_datum_family(object) {
+                    return Err(format!(
+                        "{type_name} '{name}': MirrorPlane '{target}' is a {} — \
+                         subelement links (faces) are not computable at mesh level, \
+                         and FreeCAD accepts a bare link only for datum planes",
+                        object.type_name()
+                    ));
+                }
+                // Plane: the datum's position, its rotation · +Z
+                // (FreeCAD: `Base::Rotation tmp; tmp.multVec(
+                // (0,0,1), normal)`).
+                let rotated = placement
+                    .rotation
+                    .to_matrix()
+                    .transform_direction(&Vector3::new(0.0, 0.0, 1.0));
+                let rotated_length =
+                    (rotated.x * rotated.x + rotated.y * rotated.y + rotated.z * rotated.z).sqrt();
+                if !rotated_length.is_finite() || rotated_length <= 1e-12 {
+                    return Err(format!(
+                        "{type_name} '{name}': MirrorPlane '{target}' placement is \
+                         degenerate"
+                    ));
+                }
+                normal = Vector3::new(
+                    rotated.x / rotated_length,
+                    rotated.y / rotated_length,
+                    rotated.z / rotated_length,
+                );
+                // FreeCAD's write-back: the resolved plane lands in
+                // Base/Normal (observed on r39109).
+                base = placement.position;
+                self.container
+                    .set("Base", Property::Vector(placement.position));
+                self.container.set("Normal", Property::Vector(normal));
+            }
+            // The face-subelement case keeps Base/Normal — the file's
+            // persisted resolution (see the struct docs).
+        }
 
         let object = doc
             .get_by_name(&source)
@@ -578,6 +655,73 @@ impl MirroringFeature {
 }
 
 impl_document_object!(MirroringFeature, "Part::Mirroring");
+
+/// The placement of a datum-plane link target: a modeled `Placement`
+/// property when the object has one, else the `PropertyPlacement`
+/// parsed out of a `ForeignObject`'s preserved raw `<ObjectData>`
+/// (FreeCAD's datum planes — `Part::Plane`, `PartDesign::Plane`, ... —
+/// store their plane in exactly that element).
+fn datum_placement_of(object: &dyn DocumentObject) -> Option<Placement> {
+    if let Some(Property::Placement(p)) = object.properties().get("Placement") {
+        return Some(*p);
+    }
+    let foreign = object.as_any().downcast_ref::<fc_app::ForeignObject>()?;
+    let raw = foreign.raw_object_data.as_ref()?;
+    placement_from_raw_object_data(raw)
+}
+
+/// Is `object` a member of FreeCAD's `Part::Datum` family — the targets
+/// `FeatureMirroring` accepts for a bare (subelement-less) `MirrorPlane`
+/// link? The real type id rides in the loader's `TypeId` property for
+/// unknown-family loads (a `Part::Plane` loads as the `Part::Feature`
+/// parameter container carrying `TypeId = "Part::Plane"`), in
+/// `ForeignObject::type_id` for opaque loads, and is the type name
+/// itself for everything else.
+fn is_datum_family(object: &dyn DocumentObject) -> bool {
+    let type_id = match object.properties().get("TypeId") {
+        Some(Property::String(s)) => s.clone(),
+        _ => match object.as_any().downcast_ref::<fc_app::ForeignObject>() {
+            Some(foreign) => foreign.type_id.clone(),
+            None => object.type_name().to_string(),
+        },
+    };
+    matches!(
+        type_id.as_str(),
+        "Part::Plane"
+            | "Part::Line"
+            | "Part::Point"
+            | "PartDesign::Plane"
+            | "PartDesign::Line"
+            | "PartDesign::Point"
+    )
+}
+
+/// Parse the `<Property name="Placement" type="App::PropertyPlacement">`
+/// element out of raw object data: the position from `Px/Py/Pz`, the
+/// rotation from the `Q0/Q1/Q2/Q3` quaternion (the same attributes
+/// this crate's own writer emits — and FreeCAD's, verified against
+/// r39109's `Part::Plane` serialization).
+fn placement_from_raw_object_data(raw: &str) -> Option<Placement> {
+    let start = raw.find("<PropertyPlacement ")?;
+    let end = raw[start..].find("/>")? + start;
+    let element = &raw[start..end];
+    let attr = |name: &str| -> Option<f64> {
+        let needle = format!("{name}=\"");
+        let i = element.find(&needle)? + needle.len();
+        let rest = &element[i..];
+        let j = rest.find('"')?;
+        rest[..j].trim().parse::<f64>().ok()
+    };
+    Some(Placement {
+        position: Vector3::new(attr("Px")?, attr("Py")?, attr("Pz")?),
+        rotation: fc_base::Rotation {
+            x: attr("Q0")?,
+            y: attr("Q1")?,
+            z: attr("Q2")?,
+            w: attr("Q3")?,
+        },
+    })
+}
 
 /// The operand geometry of `object` with its own `Placement` applied —
 /// the rule FreeCAD applies when a consumer asks for a shape: local

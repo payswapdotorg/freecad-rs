@@ -107,10 +107,11 @@ impl PropertyContainer {
         }
     }
 
-    /// Link or LinkList targets as a flat list.
+    /// Link, LinkSub or LinkList targets as a flat list.
     pub fn get_links(&self, key: &str) -> Option<Vec<String>> {
         match self.properties.get(key)? {
             Property::Link(target) => Some(vec![target.clone()]),
+            Property::LinkSub(target, _) if !target.is_empty() => Some(vec![target.clone()]),
             Property::LinkList(targets) => Some(targets.clone()),
             _ => None,
         }
@@ -258,10 +259,10 @@ macro_rules! impl_document_object {
 }
 
 /// All link targets of an object, in property-key order: `Link` +
-/// `LinkList` properties **plus** the objects referenced by bound
-/// expressions (their dependency edges are just as real). Shared by the
-/// document graph walks (link listing, dependent traversal, topological
-/// recompute, DOT export).
+/// `LinkSub` + `LinkList` properties **plus** the objects referenced by
+/// bound expressions (their dependency edges are just as real). Shared
+/// by the document graph walks (link listing, dependent traversal,
+/// topological recompute, DOT export).
 pub(crate) fn link_targets(object: &dyn DocumentObject) -> Vec<String> {
     let mut targets = Vec::new();
     for property in object.properties().values() {
@@ -270,6 +271,11 @@ pub(crate) fn link_targets(object: &dyn DocumentObject) -> Vec<String> {
             // `<Link value=""/>`, e.g. a `PartDesign::Body`'s unset
             // `BaseFeature`) — not a dangling reference.
             Property::Link(target) if !target.is_empty() => targets.push(target.clone()),
+            // A LinkSub's edge is to the whole target object — a
+            // `MirrorPlane` → datum link orders the recompute exactly
+            // like a plain link (the subelements name faces/edges of
+            // the same object).
+            Property::LinkSub(target, _) if !target.is_empty() => targets.push(target.clone()),
             Property::LinkList(list) => {
                 targets.extend(list.iter().filter(|t| !t.is_empty()).cloned())
             }

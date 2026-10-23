@@ -287,9 +287,21 @@ fn build_document_xml(
         if let Some(dep) = pres.object_deps.get(&o.name) {
             xml.push_str(&format!("  {dep}\n"));
         }
+        // The row's `type` is the class a reader will restore the object
+        // as — for the loader's unknown-family parameter containers the
+        // real type rides in their `TypeId` property (a `Part::Plane`
+        // datum, say, loads as a `Part::Feature` container carrying
+        // `TypeId = "Part::Plane"`). Emitting the family root here would
+        // DEMOTE the class in every reader (a real FreeCAD would restore
+        // a plain `Part::Feature`, and its own re-save would then lose
+        // the type for good).
+        let row_type = match obj.properties().get("TypeId") {
+            Some(Property::String(real)) => real.clone(),
+            _ => o.type_name.clone(),
+        };
         xml.push_str(&format!(
             "  <Object type=\"{}\" name=\"{}\" id=\"{}\"",
-            escape_attr(&o.type_name),
+            escape_attr(&row_type),
             escape_attr(&o.name),
             o.id.0
         ));
@@ -396,11 +408,20 @@ fn build_document_xml(
         } else {
             &preservation.payloads[..]
         };
+        // The loader's unknown-family parameter containers carry their
+        // real type in a `TypeId` string property — that is loader-side
+        // bookkeeping, not file data. It rides out through the table
+        // row's `type` attribute (see above); emitting it as a property
+        // too would inject an element the source file never carried.
+        // (No real FreeCAD object carries a `TypeId` property — the type
+        // id lives in the table row — so the marker is unambiguous.)
+        let type_id_property = matches!(props.get("TypeId"), Some(Property::String(_)));
         let count = props.len()
             + preservation.properties.len()
             + usize::from(shape.is_some())
             + usize::from(sketch_props.is_some()) * 2
-            + payloads.len();
+            + payloads.len()
+            - usize::from(type_id_property);
 
         xml.push_str(&format!("  <Object name=\"{}\"", escape_attr(&o.name)));
         for (key, value) in &preservation.object_attrs {
@@ -424,6 +445,9 @@ fn build_document_xml(
             xml.push_str(&format!("    {raw}\n"));
         }
         for (key, value) in props {
+            if type_id_property && key == "TypeId" {
+                continue;
+            }
             let status = preservation
                 .property_status
                 .iter()
@@ -566,11 +590,7 @@ fn push_property(
     // disagrees is silently skipped. The Part primitives' dimensions
     // are `App::PropertyLength` in FreeCAD 1.0 (verified against its
     // own files), so that is what our files must say.
-    let ty = if default_ty == "App::PropertyFloat" && is_primitive_dimension(owner_type, name) {
-        "App::PropertyLength"
-    } else {
-        default_ty
-    };
+    let ty = canonical_type_for(owner_type, name, default_ty);
     match status {
         Some(s) => xml.push_str(&format!(
             "{ind}<Property name=\"{}\" type=\"{ty}\" status=\"{}\">\n",
@@ -584,6 +604,26 @@ fn push_property(
     }
     xml.push_str(&format!("{ind} {body}\n"));
     xml.push_str(&format!("{ind}</Property>\n"));
+}
+
+/// The type attribute a property element must carry. FreeCAD types some
+/// properties narrower than the generic value type this crate models:
+/// the Part primitives' dimensions (`App::PropertyLength`) and
+/// `Part::Mirroring`'s plane pair (`App::PropertyPosition` /
+/// `App::PropertyDirection`) — all checked against FreeCAD 1.0's own
+/// serialization (r39109).
+fn canonical_type_for<'a>(owner_type: &str, name: &str, default_ty: &'a str) -> &'a str {
+    if default_ty == "App::PropertyFloat" && is_primitive_dimension(owner_type, name) {
+        return "App::PropertyLength";
+    }
+    if owner_type == "Part::Mirroring" && default_ty == "App::PropertyVector" {
+        return match name {
+            "Base" => "App::PropertyPosition",
+            "Normal" => "App::PropertyDirection",
+            _ => default_ty,
+        };
+    }
+    default_ty
 }
 
 /// The dimension properties FreeCAD types `App::PropertyLength`
@@ -648,6 +688,23 @@ fn property_xml(value: &Property) -> (&'static str, String) {
             "App::PropertyLink",
             format!("<Link value=\"{}\"/>", escape_attr(v)),
         ),
+        // FreeCAD's `PropertyLinkSub::Save` (App/PropertyLinks.cpp,
+        // verified against r39109's own bytes): an open `<LinkSub …>`
+        // element carrying `value` and the subelement `count`, one
+        // `<Sub value="…"/>` child per subelement, closed — even when
+        // empty (`count="0"`, value possibly blank).
+        Property::LinkSub(target, subs) => {
+            let mut body = format!(
+                "<LinkSub value=\"{}\" count=\"{}\">",
+                escape_attr(target),
+                subs.len()
+            );
+            for sub in subs {
+                body.push_str(&format!("<Sub value=\"{}\"/>", escape_attr(sub)));
+            }
+            body.push_str("</LinkSub>");
+            ("App::PropertyLinkSub", body)
+        }
         Property::LinkList(v) => {
             // FreeCAD's `PropertyLinkList::Restore` reads a `count`
             // attribute and then exactly that many nested `<Link>`
@@ -3283,24 +3340,25 @@ fn parse_value_element(
             Ok(Some(PropValue::Value(property)))
         }
         // `App::PropertyLinkSub` — an object link plus a list of
-        // subelement names (faces/edges). FreeCAD writes it for
-        // `PartDesign` profiles (`<LinkSub value="Sketch" count="0"/>`)
-        // and every "link to a feature of an object" property. The
-        // subelements carry no geometry semantics in this kernel, so
-        // the link is read as a plain `Link` and subelement names are
-        // recorded as a warning when present.
+        // subelement names (faces/edges): `PartDesign` profiles
+        // (`<LinkSub value="Sketch" count="0">` … `</LinkSub>`),
+        // `Part::Mirroring`'s `MirrorPlane` (`count="1"` with
+        // `<Sub value="Face3"/>` children — both forms verified against
+        // r39109's own serialization). Fully modeled: the target and
+        // the subelement names both live in the property.
         "LinkSub" => {
             let value = map.get("value").cloned().unwrap_or_default();
-            let count = map
-                .get("count")
-                .and_then(|c| c.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            if count > 0 {
-                report.warnings.push(format!(
-                    "{owner}: property '{prop}': LinkSub subelements dropped ({count})"
-                ));
-            }
-            Ok(Some(PropValue::Value(Property::Link(value))))
+            let mut subs: Vec<String> = children
+                .iter()
+                .filter(|(name, _)| name == "Sub")
+                .filter_map(|(_, attrs)| attrs.get("value").cloned())
+                .collect();
+            subs.truncate(
+                map.get("count")
+                    .and_then(|c| c.trim().parse::<usize>().ok())
+                    .unwrap_or(subs.len()),
+            );
+            Ok(Some(PropValue::Value(Property::LinkSub(value, subs))))
         }
         "LinkList" => {
             // FreeCAD's form: `<LinkList count="N"><Link value="…"/>…

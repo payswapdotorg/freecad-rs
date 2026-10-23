@@ -360,6 +360,23 @@ pub enum AddShape {
         #[arg(long)]
         tool: String,
     },
+    /// Part::Mirroring — reflect the Source shape through a plane
+    /// (given directly, or by a linked datum plane).
+    Mirroring {
+        /// Source object name.
+        #[arg(long)]
+        source: String,
+        /// Point on the mirror plane, `x,y,z`.
+        #[arg(long, value_delimiter = ',', default_values_t = [0.0, 0.0, 0.0])]
+        base: Vec<f64>,
+        /// Mirror plane normal, `x,y,z`.
+        #[arg(long, value_delimiter = ',', default_values_t = [0.0, 0.0, 1.0])]
+        normal: Vec<f64>,
+        /// Datum-plane object name (overrides --base/--normal: the plane
+        /// is the datum's placement — position, rotation · +Z).
+        #[arg(long)]
+        mirror_plane: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

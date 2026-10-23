@@ -86,6 +86,25 @@ load→save cycle never destroys data a real FreeCAD wrote:
   the fixture survive identically.
 - **Document metadata** (Uid, Company, License, `StringHasher`, root
   attributes, `ObjectDeps`) round-trips verbatim.
+- **`App::PropertyLinkSub` is modeled end to end** — a link plus its
+  subelement names (`PartDesign` profiles, `Part::Mirroring`'s
+  `MirrorPlane`): the loader parses target *and* `<Sub>` children, the
+  writer re-emits FreeCAD's own byte form (`<LinkSub value="…"
+  count="N">` with `<Sub value="…"/>` children — verified against
+  r39109's own serialization, which uses the open form even when
+  empty), and `link_targets` follows the edge (a `MirrorPlane` →
+  datum link orders the recompute). `Part::Mirroring`'s `MirrorPlane`
+  resolves like FreeCAD's `FeatureMirroring`: a datum plane's placement
+  gives the plane exactly (position, rotation · +Z — verified: a
+  `Part::Plane` at (30, 0, 0) rotated 30° about X resolves to
+  `Base` = (30, 0, 0), `Normal` = (0, −0.5, 0.8660254…), with
+  FreeCAD's own write-back into `Base`/`Normal`); a bare non-datum
+  link errors exactly where FreeCAD's does ("No subelement
+  specified" — verified on r39109: state `Invalid`). Unknown
+  `Part::`-family object types keep their real type in the table row
+  (through the loader's `TypeId` convention) — a `Part::Plane` datum
+  round-trips as a `Part::Plane`, so a real FreeCAD restores the right
+  class instead of demoting it to the family root.
 - **A round-trip injects nothing either.** The no-inversion of
   preservation: the document-level property *set* comes back exactly as
   the file carried it. The loader records which of the modeled document
@@ -198,8 +217,14 @@ original payloads re-emerge byte-identically on save.)
   remaining place where a conversion through this kernel is not
   bit-exact. (Volumes agree to the deflection; the file *data* loss is
   zero — operands, parameters and results all round-trip.)
-- `Part::Mirroring`'s `MirrorPlane` link (a face/datum override) has no
-  geometry to read here — `Base`/`Normal` planes only.
+- `Part::Mirroring`'s `MirrorPlane` **face-subelement** links (a mirror
+  through "Face3" of a linked shape) cannot re-resolve at mesh level —
+  no OCCT face numbering survives tessellation — so the plane FreeCAD
+  itself persisted into `Base`/`Normal` on its last execute is used
+  (verified against r39109: FreeCAD writes the resolved plane there on
+  every execute, and its own files carry it). **Datum-plane links**
+  (`Part::Plane` and family) resolve exactly from the datum's
+  placement, with FreeCAD's own write-back into `Base`/`Normal`.
 - No GUI: the `fc-viewer` renders offscreen; there is no workbench,
   no interaction loop. This is the CLI/kernel side of FreeCAD. (GUI
   *data* — `GuiDocument.xml`, thumbnails — round-trips verbatim.)

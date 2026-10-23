@@ -15,6 +15,12 @@ pub enum Property {
     /// Link to another object, by its unique internal name.
     Link(String),
     LinkList(Vec<String>),
+    /// FreeCAD `App::PropertyLinkSub`: a link to another object plus a
+    /// list of subelement names (faces/edges of the target's shape,
+    /// e.g. `("Box", ["Face3"])` — `Part::Mirroring`'s `MirrorPlane`
+    /// and `PartDesign` profiles carry it). The target name plus the
+    /// subelement names, in file order.
+    LinkSub(String, Vec<String>),
 }
 
 impl Property {
@@ -29,6 +35,7 @@ impl Property {
             Property::Placement(_) => "App::PropertyPlacement",
             Property::Link(_) => "App::PropertyLink",
             Property::LinkList(_) => "App::PropertyLinkList",
+            Property::LinkSub(_, _) => "App::PropertyLinkSub",
         }
     }
 
@@ -44,6 +51,7 @@ impl Property {
     /// | `Placement` | `pos=(x,y,z);axis=(x,y,z);angle=deg`      |
     /// | `Link`      | the target name, verbatim                  |
     /// | `LinkList`  | target names, comma-joined verbatim       |
+    /// | `LinkSub`   | `name` / `name[sub,sub]`, verbatim        |
     ///
     /// Placement angles are degrees rounded to at most 4 decimals; axis
     /// components to at most 12 (see `format_axis` below for why), so that
@@ -81,6 +89,13 @@ impl Property {
             }
             Property::Link(name) => name.clone(),
             Property::LinkList(names) => names.join(","),
+            Property::LinkSub(name, subs) => {
+                if subs.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}[{}]", subs.join(","))
+                }
+            }
         }
     }
 
@@ -101,6 +116,31 @@ impl Property {
             "App::PropertyVector" => parse_vector(text).map(Property::Vector),
             "App::PropertyPlacement" => parse_placement(text).map(Property::Placement),
             "App::PropertyLink" => Some(Property::Link(text.to_string())),
+            "App::PropertyLinkSub" => {
+                // `name` or `name[sub,sub]` — the exact inverse of the
+                // `LinkSub` text form. Names and subelements are taken
+                // verbatim (FreeCAD internal names cannot contain `[`,
+                // `]` or `,`... they are `[A-Za-z0-9_]`; subelement
+                // names like `Face3`/`Edge7` cannot either).
+                let trimmed = text.trim();
+                if let Some(open) = trimmed.find('[') {
+                    if !trimmed.ends_with(']') || open + 1 >= trimmed.len() - 1 {
+                        return None;
+                    }
+                    let inner = &trimmed[open + 1..trimmed.len() - 1];
+                    let mut subs = Vec::new();
+                    for part in inner.split(',') {
+                        let sub = part.trim();
+                        if sub.is_empty() {
+                            return None;
+                        }
+                        subs.push(sub.to_string());
+                    }
+                    Some(Property::LinkSub(trimmed[..open].trim().to_string(), subs))
+                } else {
+                    Some(Property::LinkSub(trimmed.to_string(), Vec::new()))
+                }
+            }
             "App::PropertyLinkList" => {
                 // Tolerant on the way in, invertible on the way out:
                 // entries are trimmed; an empty entry inside the list is

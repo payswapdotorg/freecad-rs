@@ -98,7 +98,9 @@ fn require_bool(container: &PropertyContainer, type_name: &str, key: &str) -> Re
 
 /// Resolve a feature's `Profile` link to its `Sketcher::SketchObject`.
 /// Every error names the feature and the reason (honest recompute
-/// failures; the document marks the object `Error`).
+/// failures; the document marks the object `Error`). FreeCAD types the
+/// profile `App::PropertyLinkSub`; both the plain `Link` form (this
+/// kernel's legacy authoring) and the `LinkSub` form resolve.
 fn profile_sketch<'a>(
     container: &PropertyContainer,
     type_name: &str,
@@ -107,6 +109,7 @@ fn profile_sketch<'a>(
     let name = container.name();
     let target = match container.get("Profile") {
         Some(Property::Link(target)) if !target.is_empty() => target.clone(),
+        Some(Property::LinkSub(target, _)) if !target.is_empty() => target.clone(),
         _ => {
             return Err(format!(
                 "{type_name} '{name}': Profile must link to a sketch object"
@@ -188,7 +191,7 @@ impl PadFeature {
     /// default), `Midplane` (false), `Reversed` (false), `Placement`.
     pub fn new(name: &str) -> Self {
         let mut container = PropertyContainer::new(name);
-        container.set("Profile", Property::Link(String::new()));
+        container.set("Profile", Property::LinkSub(String::new(), Vec::new()));
         container.set("Length", Property::Float(10.0));
         container.set("Midplane", Property::Bool(false));
         container.set("Reversed", Property::Bool(false));
@@ -251,7 +254,7 @@ impl PocketFeature {
     /// (false), `Placement`.
     pub fn new(name: &str) -> Self {
         let mut container = PropertyContainer::new(name);
-        container.set("Profile", Property::Link(String::new()));
+        container.set("Profile", Property::LinkSub(String::new(), Vec::new()));
         container.set("Base", Property::Link(String::new()));
         container.set("Length", Property::Float(5.0));
         container.set("Midplane", Property::Bool(false));
@@ -347,7 +350,7 @@ impl RevolutionFeature {
     /// `Axis` ((0, 0, 1)), `Reversed` (false), `Placement`.
     pub fn new(name: &str) -> Self {
         let mut container = PropertyContainer::new(name);
-        container.set("Profile", Property::Link(String::new()));
+        container.set("Profile", Property::LinkSub(String::new(), Vec::new()));
         container.set("Angle", Property::Float(360.0));
         container.set("Axis", Property::Vector(Vector3::Z));
         container.set("Reversed", Property::Bool(false));

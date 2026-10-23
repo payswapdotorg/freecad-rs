@@ -21,3 +21,6 @@ fc-script.workspace = true
 fc-viewer.workspace = true
 fc-step.workspace = true
 clap.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

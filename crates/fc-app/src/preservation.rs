@@ -227,8 +227,12 @@ impl std::fmt::Debug for DocumentPreservation {
 /// Is this load-report warning a *preservation* note (data kept verbatim
 /// for round-trip) rather than a loss? The load report keeps one channel
 /// for all honest messages; this predicate — matching the documented
-/// phrase every preservation warning carries — lets callers separate
+/// phrases every preservation warning carries — lets callers separate
 /// "kept, not modeled" from "kept nothing" when they assert on losses.
+/// The unknown-`Part::`-family note names the same outcome in different
+/// words (TypeId kept, parameters kept, payload preserved by the
+/// separate warning) — a `Part::Plane` datum, say, loads as a parameter
+/// container whose placement survives to be read.
 pub fn is_preservation_warning(warning: &str) -> bool {
-    warning.contains("preserved verbatim")
+    warning.contains("preserved verbatim") || warning.contains("parameter container (TypeId kept")
 }
