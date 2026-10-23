@@ -102,9 +102,11 @@ fn assert_expectations(doc: &Document, stem: &str, select: &[(&str, &[&str])]) {
 }
 
 /// Gate 1: re-save `doc`, reload it, and require identical `list` output
-/// plus a clean second load report (our canonical writer emits only forms
-/// the reader takes without a warning — quantities/colors/lists/matrices
-/// were mapped to their canonical representations on the first load).
+/// plus a second load report whose every warning is a *preservation*
+/// note (data the model does not carry, kept verbatim — the re-saved
+/// file re-presents it, and the honest reload says so; the canonical
+/// forms — quantities/colors/lists/matrices — the reader takes
+/// silently, as on the first load).
 fn assert_round_trip_list_parity(stem: &str, doc: &Document) {
     // Unique per stem AND per thread: the expectations tests and the
     // every-fixture round-trip run in parallel test threads within one
@@ -129,13 +131,16 @@ fn assert_round_trip_list_parity(stem: &str, doc: &Document) {
     );
     assert_eq!(report.skipped, 0, "{stem}: nothing skipped on reload");
     assert!(
-        report.warnings.is_empty(),
-        "{stem}: re-saved file reloads warning-free: {:?}",
+        report.warnings.iter().all(|w| fc_app::is_preservation_warning(w)),
+        "{stem}: reload warnings are all preservation notes (nothing lost): {:?}",
         report.warnings
     );
     assert!(
-        report.skipped_properties.is_empty(),
-        "{stem}: no per-property skips on reload: {:?}",
+        report
+            .skipped_properties
+            .iter()
+            .all(|_| report.warnings.iter().any(|w| fc_app::is_preservation_warning(w))),
+        "{stem}: per-property skips on reload are all preservation-backed: {:?}",
         report.skipped_properties
     );
 }
@@ -188,17 +193,21 @@ fn partdesign_body_loads_per_expectations() {
             (
                 "Pad",
                 &[
-                    "Angle", "Axis", "Label", "Length", "Midplane", "Profile", "Reversed", "Type",
+                    "Angle", "Axis", "Label", "Length", "Midplane", "Profile", "Reversed",
                 ],
             ),
         ],
     );
 
-    // Everything loaded; nothing skipped.
+    // Everything loaded; nothing skipped. The Pad's `Type` enumeration
+    // is preserved raw (its FreeCAD form is its truth — a modeled copy
+    // would re-serialize with a drifting type attribute), so it is a
+    // per-property modeling-gap record, not a load failure.
     assert_eq!(report.objects, 8);
     assert_eq!(report.skipped, 0);
-    assert!(
-        report.skipped_properties.is_empty(),
+    assert_eq!(
+        report.skipped_properties,
+        vec!["Pad.Type".to_string()],
         "{:?}",
         report.skipped_properties
     );
@@ -214,9 +223,10 @@ fn partdesign_body_loads_per_expectations() {
     // is skipped with THE documented warning, while its parameters load.
     assert!(
         report.warnings.iter().any(|w| w.contains("Pad")
-            && w.contains("OCCT BRep shape not supported")
-            && w.contains("geometry skipped (parameters kept)")),
-        "documented .brp warning: {:?}",
+            && w.contains("OCCT BRep shape not modeled")
+            && w.contains("geometry skipped (parameters kept)")
+            && w.contains("payload preserved verbatim for round-trip")),
+        "documented .brp warning (skipped AND preserved): {:?}",
         report.warnings
     );
     // (b) readable parameters loaded — proven by the expectations dump
@@ -307,7 +317,6 @@ fn property_zoo_maps_every_documented_property_type() {
                 "ALength",
                 "AMatrix",
                 "AnAngle",
-                "AnEnum",
                 "AnIntList",
                 "AStringList",
                 "AStringListEntries",
@@ -335,10 +344,13 @@ fn property_zoo_maps_every_documented_property_type() {
         Some(&Property::Vector(Vector3::new(3.0, 4.0, 5.0))),
         "PropertyVector, element form"
     );
-    assert_eq!(
-        props.get("AnEnum"),
-        Some(&Property::String("ThroughAll".into())),
-        "enumeration stored as its string value"
+    // Enumerations are preserved raw, not modeled: their FreeCAD form
+    // (type attribute + custom value lists) is their truth, and a modeled
+    // copy would re-serialize with a drifting type attribute. The value
+    // is still in the preserved raw element (round-trips verbatim).
+    assert!(
+        !props.contains_key("AnEnum"),
+        "enumeration is preserved raw, not modeled"
     );
     assert_eq!(props.get("AnAngle"), Some(&Property::Float(45.0)));
     assert_eq!(props.get("ALength"), Some(&Property::Float(12.5)));
@@ -385,9 +397,13 @@ fn property_zoo_maps_every_documented_property_type() {
         ]
     );
 
-    // The one unknown property type is a per-property record, never a
-    // silent drop and never a load failure.
-    assert_eq!(report.skipped_properties, vec!["Zoo.AMystery".to_string()]);
+    // The unknown property type and the enumeration are per-property
+    // records, never silent drops and never load failures (the raw
+    // elements ride along for verbatim round-trip).
+    assert_eq!(
+        report.skipped_properties,
+        vec!["Zoo.AMystery".to_string(), "Zoo.AnEnum".to_string()]
+    );
     assert!(
         report.warnings.iter().any(|w| w.contains("Zoo")
             && w.contains("AMystery")
@@ -448,20 +464,26 @@ fn group_links_load_per_expectations() {
 fn unknown_object_type_is_reported_not_silent() {
     let (doc, report) = load_fixture("unknown_object");
 
-    // The unknown type is a per-object record...
-    assert_eq!(report.skipped, 1, "the unknown object is counted");
+    // The unknown type is a per-object record: an opaque ForeignObject,
+    // counted as foreign (nothing is dropped outright anymore).
+    assert_eq!(report.skipped, 0, "nothing is dropped outright");
+    assert_eq!(report.foreign, 1, "the unknown object is counted as foreign");
     assert_eq!(report.objects, 1, "the known object still loads");
     assert!(
         report
             .warnings
             .iter()
-            .any(|w| w.contains("Ghost") && w.contains("unknown type 'Mesh::Feature'")),
+            .any(|w| w.contains("Ghost")
+                && w.contains("unknown type 'Mesh::Feature'")
+                && w.contains("preserved verbatim")),
         "per-object warning: {:?}",
         report.warnings
     );
-    // ...and it is NOT a silent success: the object is really absent.
-    assert!(doc.get_by_name("Ghost").is_none());
-    assert_eq!(doc.object_count(), 1);
+    // ...and it is NOT a silent success: the object is really there,
+    // under its file name and type, carrying its raw data.
+    let ghost = doc.get_by_name("Ghost").expect("the foreign object loads");
+    assert_eq!(ghost.type_name(), "Mesh::Feature", "the real type is kept");
+    assert_eq!(doc.object_count(), 2);
 
     // The rest of the document is intact and dumped per expectations.
     assert_expectations(&doc, "unknown_object", &[("Known", &["Label", "Length"])]);
@@ -481,8 +503,9 @@ fn every_fixture_round_trips_to_identical_list_output() {
     for stem in FIXTURES {
         let (doc, report) = load_fixture(stem);
         // No silent drops on the FIRST load either: everything the file
-        // names is either loaded, or per-object/per-property recorded.
-        let accounted = report.objects + report.skipped;
+        // names is loaded (modeled or foreign), or per-object skipped
+        // with a record.
+        let accounted = report.objects + report.skipped + report.foreign;
         assert!(
             accounted >= doc.object_count(),
             "{stem}: every file entry is loaded or recorded"
@@ -712,7 +735,7 @@ fn freecad_authored_tangent_symmetric_block_loads_every_constraint() {
     // InternalShape in the older raw stream — both honestly warned).
     let warnings = report.warnings.join("\n");
     let payload_warns = warnings.matches("unknown shape payload format").count()
-        + warnings.matches("OCCT BRep shape not supported").count();
+        + warnings.matches("OCCT BRep shape not modeled").count();
     assert!(
         payload_warns >= 2,
         "both BRep payloads are honestly warned: {warnings}"
@@ -744,11 +767,13 @@ fn our_tangent_symmetric_block_output_round_trips() {
     save_document(&doc, &temp).unwrap();
     let (doc2, report2) = load_document(&temp).unwrap();
     let _ = std::fs::remove_file(&temp);
-    // Our canonical writer emits only forms our reader takes cleanly.
+    // Our canonical writer emits only forms our reader takes cleanly —
+    // the honest exceptions are preservation notes (raw data the model
+    // does not carry, re-presented on every load).
     let warnings: Vec<String> = report2
         .warnings
         .iter()
-        .filter(|w| !w.contains("unknown shape payload format"))
+        .filter(|w| !fc_app::is_preservation_warning(w))
         .cloned()
         .collect();
     assert!(warnings.is_empty(), "{:?}", warnings);

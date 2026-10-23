@@ -34,4 +34,3 @@ PartDesign::Pad Pad Touched
   Midplane = false
   Profile = Sketch
   Reversed = false
-  Type = Length

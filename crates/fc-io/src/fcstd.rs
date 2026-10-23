@@ -1,10 +1,13 @@
 //! `.FCStd` reader/writer. See the crate docs for the format.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::Path;
 
-use fc_app::{Document, DocumentObject, ObjectStatus, Property, PropertyContainer};
+use fc_app::{
+    Document, DocumentObject, ForeignObject, ObjectStatus, PreservedShape, PreservedZipEntry,
+    Property, PropertyContainer,
+};
 use fc_base::{Placement, Rotation, Vector3};
 use fc_part::brep::{self, BrpFormat};
 use fc_part::features::{
@@ -15,7 +18,7 @@ use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
 use fc_sketcher::constraint::Constraint;
 use fc_sketcher::geometry::Geometry;
-use fc_sketcher::SketchObject;
+use fc_sketcher::{SketchObject, SketchPreservation};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -53,14 +56,21 @@ pub struct LoadReport {
     pub warnings: Vec<String>,
     /// Objects successfully constructed.
     pub objects: usize,
-    /// Objects skipped entirely (unknown type, unreadable).
+    /// Objects skipped entirely (unreadable `<Object>` rows: no type or
+    /// name). Unknown-type objects are no longer here — they load as
+    /// opaque [`ForeignObject`]s, counted in [`LoadReport::foreign`].
     pub skipped: usize,
+    /// Objects of types this kernel does not model, preserved as opaque
+    /// [`ForeignObject`]s: real name and type in the document, raw
+    /// `ObjectData` re-emitted verbatim on save, never recomputed.
+    pub foreign: usize,
     /// Per-property skips (WOM reader breadth): properties whose value
     /// could not be read at all — unknown value element or malformed
     /// payload — as `Object.Property` paths. The owning object still
     /// loads with its other parameters; the reason is always in
-    /// [`LoadReport::warnings`] too. A property here is never a silent
-    /// drop.
+    /// [`LoadReport::warnings`] too. Every property here had its raw
+    /// `<Property>` element preserved verbatim for round-trip, so a skip
+    /// is a modeling gap, not a data loss.
     pub skipped_properties: Vec<String>,
     /// Properties that arrived quantity-typed (`App::PropertyAngle` /
     /// `App::PropertyLength` / `App::PropertyDistance`) and were mapped
@@ -84,23 +94,59 @@ const QUANTITY_TYPES: [&str; 3] = [
 // Saving
 // ---------------------------------------------------------------------------
 
+/// One zip side entry the writer produces: either a freshly computed
+/// FCBREP shape (`Shape00N.brp`, our own name choice) or a payload
+/// preserved from the loaded file under its ORIGINAL entry name.
+struct SideFile {
+    name: String,
+    data: Vec<u8>,
+    /// Storage form: `true` = stored, `false` = deflated (FreeCAD's
+    /// default, and ours).
+    stored: bool,
+}
+
 /// Save `doc` as `.FCStd`. Writes `Document.xml` first, then one FCBREP
-/// side file per part feature (`Shape001.brp`, `Shape002.brp`, ...).
-/// Deflate-compressed entries, like FreeCAD.
+/// side file per part feature (`Shape001.brp`, `Shape002.brp`, ...),
+/// then the round-trip preservation payload: OCCT/unknown shape payloads
+/// under their original entry names, and every zip entry the model does
+/// not consume (`GuiDocument.xml`, thumbnails, ...) byte-identically
+/// with its original storage form. Writer-generated names win over
+/// preserved ones: a preserved entry whose name our writer just used is
+/// dropped (the model's output is the truth about that entry).
 pub fn save_document(doc: &Document, path: &Path) -> Result<(), FcstdError> {
     let file = std::fs::File::create(path)?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
 
-    let mut side_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut side_files: Vec<SideFile> = Vec::new();
     let xml = build_document_xml(doc, &mut side_files)?;
 
-    zip.start_file("Document.xml", options).map_err(zip_err)?;
+    let mut taken: BTreeSet<String> = BTreeSet::from(["Document.xml".to_string()]);
+    for sf in &side_files {
+        taken.insert(sf.name.clone());
+    }
+
+    zip.start_file("Document.xml", file_options(false))
+        .map_err(zip_err)?;
     zip.write_all(xml.as_bytes())?;
-    for (name, bytes) in &side_files {
-        zip.start_file(name.as_str(), options).map_err(zip_err)?;
-        zip.write_all(bytes)?;
+    for sf in &side_files {
+        zip.start_file(sf.name.as_str(), file_options(sf.stored))
+            .map_err(zip_err)?;
+        zip.write_all(&sf.data)?;
+    }
+    for entry in &doc.preservation().zip_entries {
+        // Our writer-generated entries win: a preserved entry with a
+        // colliding name is dropped, not merged.
+        if !taken.insert(entry.name.clone()) {
+            continue;
+        }
+        let opts = file_options(entry.stored);
+        if entry.name.ends_with('/') {
+            zip.add_directory(entry.name.trim_end_matches('/'), opts)
+                .map_err(zip_err)?;
+        } else {
+            zip.start_file(entry.name.as_str(), opts).map_err(zip_err)?;
+            zip.write_all(&entry.data)?;
+        }
     }
     zip.finish().map_err(zip_err)?;
     Ok(())
@@ -110,20 +156,85 @@ fn zip_err(e: zip::result::ZipError) -> FcstdError {
     FcstdError::Zip(e.to_string())
 }
 
+/// Entry options for the writer: FreeCAD stores its entries deflated.
+fn file_options(stored: bool) -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().compression_method(if stored {
+        zip::CompressionMethod::Stored
+    } else {
+        zip::CompressionMethod::Deflated
+    })
+}
+
+/// The start of the `<…` tag that begins at or before `pos` in the XML
+/// source (quick-xml reports the position *after* the tag; attribute
+/// values never contain a raw `<` — it is escaped — so the last `<` at
+/// or before that position is the tag's own).
+fn tag_start(xml: &[u8], pos: usize) -> Option<usize> {
+    xml[..pos].iter().rposition(|b| *b == b'<')
+}
+
+/// The raw source of the element whose Start event was just read
+/// (position `after_start`), captured while skipping to its matching
+/// End event: `xml[tag_start..after_end]`, the whole element verbatim.
+fn raw_element_and_skip(
+    xml: &[u8],
+    reader: &mut XmlReader<'_>,
+    buf: &mut Vec<u8>,
+    after_start: usize,
+) -> Result<String, FcstdError> {
+    let start = tag_start(xml, after_start)
+        .ok_or_else(|| FcstdError::Xml("element start not found".to_string()))?;
+    skip_element(reader, buf)?;
+    let end = reader.buffer_position() as usize;
+    Ok(String::from_utf8_lossy(&xml[start..end]).into_owned())
+}
+
 /// Render `Document.xml` (FreeCAD's exact skeleton, one-space indentation)
-/// and collect the FCBREP side files to store next to it.
+/// and collect the side files to store next to it — freshly computed
+/// FCBREP shapes and payloads preserved from the loaded file (OCCT BRep,
+/// unknown formats) under their ORIGINAL entry names. Anything the loaded
+/// file carried that the model does not regenerate — root attributes,
+/// document metadata, unmodeled properties, foreign objects' data — is
+/// re-emitted verbatim from the preservation bags.
 fn build_document_xml(
     doc: &Document,
-    side_files: &mut Vec<(String, Vec<u8>)>,
+    side_files: &mut Vec<SideFile>,
 ) -> Result<String, FcstdError> {
+    let pres = doc.preservation();
     let mut xml = String::new();
+    // Root element: the regenerated trio, then every attribute the
+    // loader preserved (e.g. FreeCAD 1.0's StringHasher="1").
     xml.push_str(&format!(
-        "<Document SchemaVersion=\"4\" ProgramVersion=\"freecad-rs {}\" FileVersion=\"1\">\n",
+        "<Document SchemaVersion=\"4\" ProgramVersion=\"freecad-rs {}\" FileVersion=\"1\"",
         env!("CARGO_PKG_VERSION")
     ));
+    for (key, value) in &pres.root_attributes {
+        xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
+    }
+    xml.push_str(">\n");
+    // Raw non-property children of <Document> (e.g. <StringHasher …/>).
+    for raw in &pres.raw_elements {
+        xml.push_str(&format!(" {raw}\n"));
+    }
 
-    // Document-level properties (Label / Creator / CreationDate).
-    xml.push_str(" <Properties Count=\"3\">\n");
+    // Document-level properties: the modeled three (Label / Creator /
+    // CreationDate), then every unmodeled one verbatim (Uid, Company,
+    // License, LicenseURL, Material, Meta, ... — and FreeCAD's transient
+    // `_Property` entries).
+    xml.push_str(&format!(
+        " <Properties Count=\"{}\" TransientCount=\"{}\"",
+        3 + pres.properties.len(),
+        pres.transient_properties.len()
+    ));
+    for (key, value) in &pres.properties_attrs {
+        xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
+    }
+    xml.push_str(">\n");
+    // FreeCAD's transient markers come first (their count rides on the
+    // TransientCount attribute above).
+    for (_, raw) in &pres.transient_properties {
+        xml.push_str(&format!(" {raw}\n"));
+    }
     push_property(
         &mut xml,
         2,
@@ -145,17 +256,33 @@ fn build_document_xml(
         &Property::String(doc.created().to_string()),
         "App::Document",
     );
+    for (_, raw) in &pres.properties {
+        xml.push_str(&format!(" {raw}\n"));
+    }
     xml.push_str(" </Properties>\n");
 
     let objects = doc.summary();
 
-    // Object table.
+    // Object table: FreeCAD precedes an object's row with its
+    // <ObjectDeps> (partial-restore hints) when the file carried one.
+    // `Dependencies="1"` is FreeCAD 1.0's own always-on form; anything
+    // else the file carried beyond `Count` rides along verbatim.
     xml.push_str(&format!(
-        " <Objects Count=\"{}\" Dependencies=\"1\">\n",
+        " <Objects Count=\"{}\" Dependencies=\"1\"",
         objects.len()
     ));
+    for (key, value) in &pres.objects_attrs {
+        if key == "Count" || key == "Dependencies" {
+            continue;
+        }
+        xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
+    }
+    xml.push_str(">\n");
     for o in &objects {
         let Some(obj) = doc.get(o.id) else { continue };
+        if let Some(dep) = pres.object_deps.get(&o.name) {
+            xml.push_str(&format!("  {dep}\n"));
+        }
         xml.push_str(&format!(
             "  <Object type=\"{}\" name=\"{}\" id=\"{}\"",
             escape_attr(&o.type_name),
@@ -188,7 +315,14 @@ fn build_document_xml(
     xml.push_str(" </Objects>\n");
 
     // Per-object property data.
-    xml.push_str(&format!(" <ObjectData Count=\"{}\">\n", objects.len()));
+    xml.push_str(&format!(" <ObjectData Count=\"{}\"", objects.len()));
+    for (key, value) in &pres.objectdata_attrs {
+        if key == "Count" {
+            continue;
+        }
+        xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
+    }
+    xml.push_str(">\n");
     for o in &objects {
         let obj = doc.get(o.id).ok_or_else(|| {
             FcstdError::Xml(format!(
@@ -196,17 +330,46 @@ fn build_document_xml(
                 o.name
             ))
         })?;
+
+        // Foreign objects: the entire ObjectData entry is the file's
+        // own bytes, re-emitted verbatim (the regenerated open tag keeps
+        // the final name — the document may have renamed a duplicate —
+        // and the original extra attributes, e.g. Extensions="True").
+        if let Some(foreign) = obj.as_any().downcast_ref::<ForeignObject>() {
+            xml.push_str(&format!("  <Object name=\"{}\"", escape_attr(&o.name)));
+            for (key, value) in &foreign.object_attrs {
+                xml.push_str(&format!(
+                    " {}=\"{}\"",
+                    escape_attr(key),
+                    escape_attr(value)
+                ));
+            }
+            xml.push_str(">\n");
+            match &foreign.raw_object_data {
+                Some(raw) => xml.push_str(&format!("{raw}\n")),
+                // Named in the <Objects> table but no <ObjectData> entry:
+                // an empty property block keeps the shape ours would have.
+                None => xml.push_str("   <Properties Count=\"0\">\n   </Properties>\n"),
+            }
+            xml.push_str("  </Object>\n");
+            continue;
+        }
+
+        let preservation = obj.preservation();
         let props = obj.properties();
         // Sketch content goes out as the FreeCAD-native property pair
         // (`Geometry` + `Constraints`) — the exact forms a real FreeCAD
         // writes and restores, so the whole sketch — geometry and
         // constraints — survives the trip into the real program. Our
         // old `<Sketch>` object-data fragment is retired from the
-        // writer; the reader still accepts it (files from v0.1.0).
+        // writer; the reader still accepts it (files from v0.1.0). A
+        // loaded sketch also re-emits its preservation shadow: raw
+        // blocks at their original GeoId slots, constraints' GeoIds
+        // mapped back to the file's numbering.
         let sketch_props = obj.as_any().downcast_ref::<SketchObject>().map(|so| {
             (
-                sketch_geometrylist_xml(&so.sketch),
-                sketch_constraintlist_xml(&so.sketch),
+                sketch_geometrylist_xml(&so.sketch, so.preserved.as_ref()),
+                sketch_constraintlist_xml(&so.sketch, so.preserved.as_ref()),
             )
         });
         // Shape payloads go to exactly the objects FreeCAD's own files
@@ -224,13 +387,54 @@ fn build_document_xml(
         } else {
             None
         };
-        let count =
-            props.len() + usize::from(shape.is_some()) + usize::from(sketch_props.is_some()) * 2;
+        // Live geometry wins over the preserved payload: an object this
+        // kernel computed has nothing to preserve — its shape is its own
+        // truth. Without fresh geometry, the preserved OCCT/unknown
+        // payload rides back out under its original entry name.
+        let payloads = if shape.is_some() {
+            &[][..]
+        } else {
+            &preservation.payloads[..]
+        };
+        let count = props.len()
+            + preservation.properties.len()
+            + usize::from(shape.is_some())
+            + usize::from(sketch_props.is_some()) * 2
+            + payloads.len();
 
-        xml.push_str(&format!("  <Object name=\"{}\">\n", escape_attr(&o.name)));
-        xml.push_str(&format!("   <Properties Count=\"{}\">\n", count));
+        xml.push_str(&format!("  <Object name=\"{}\"", escape_attr(&o.name)));
+        for (key, value) in &preservation.object_attrs {
+            xml.push_str(&format!(
+                " {}=\"{}\"",
+                escape_attr(key),
+                escape_attr(value)
+            ));
+        }
+        xml.push_str(">\n");
+        // FreeCAD's attach-extension blocks come first inside the entry.
+        if let Some(raw) = &preservation.extensions {
+            xml.push_str(&format!("   {raw}\n"));
+        }
+        xml.push_str(&format!(
+            "   <Properties Count=\"{}\" TransientCount=\"{}\"",
+            count,
+            preservation.transient_properties.len()
+        ));
+        for (key, value) in &preservation.properties_attrs {
+            xml.push_str(&format!(" {}=\"{}\"", escape_attr(key), escape_attr(value)));
+        }
+        xml.push_str(">\n");
+        for (_, raw) in &preservation.transient_properties {
+            xml.push_str(&format!("    {raw}\n"));
+        }
         for (key, value) in props {
             push_property(&mut xml, 4, key, value, &o.type_name);
+        }
+        // Unmodeled properties of a modeled object: raw, verbatim, after
+        // the modeled ones (the modeled ones are live state — the file's
+        // copy of them is always stale by definition).
+        for (_, raw) in &preservation.properties {
+            xml.push_str(&format!("    {raw}\n"));
         }
         // The sketch's own content: one `Part::PropertyGeometryList`
         // and one `Sketcher::PropertyConstraintList`, exactly where
@@ -247,13 +451,38 @@ fn build_document_xml(
         }
         // Computed geometry goes last, as one referenced FCBREP side file.
         if let Some(shape) = shape {
-            let file = format!("Shape{:03}.brp", side_files.len() + 1);
+            let file = fresh_side_file_name(side_files);
             xml.push_str("    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">\n");
             xml.push_str(&format!("     <Part file=\"{}\"/>\n", escape_attr(&file)));
             xml.push_str("    </Property>\n");
             let mut bytes = Vec::new();
             brep::write_shape(&mut bytes, &shape)?;
-            side_files.push((file, bytes));
+            side_files.push(SideFile {
+                name: file,
+                data: bytes,
+                stored: false,
+            });
+        }
+        // Preserved shape payloads: the raw property element verbatim
+        // (it carries the original entry reference and FreeCAD's extra
+        // attributes/siblings like ElementMap) plus the entry itself,
+        // byte-identical, under its original name. A name collision
+        // with an earlier side file (two objects preserving one entry,
+        // or a fresh name equal to an original one) keeps the first —
+        // pathological in practice, since FreeCAD names entries after
+        // their object and this writer picks its own fresh names.
+        for payload in payloads {
+            if side_files.iter().any(|sf| sf.name == payload.entry) {
+                continue;
+            }
+            xml.push_str(&format!("    {}\n", payload.raw_property));
+            if !payload.entry.is_empty() {
+                side_files.push(SideFile {
+                    name: payload.entry.clone(),
+                    data: payload.data.clone(),
+                    stored: payload.stored,
+                });
+            }
         }
         xml.push_str("   </Properties>\n");
         // Expression bindings (FreeCAD persists them as children of the
@@ -270,6 +499,19 @@ fn build_document_xml(
     xml.push_str(" </ObjectData>\n");
     xml.push_str("</Document>\n");
     Ok(xml)
+}
+
+/// The next free `ShapeNNN.brp` name, skipping any name a preserved
+/// payload already owns — our fresh files never evict preserved data.
+fn fresh_side_file_name(side_files: &[SideFile]) -> String {
+    let mut n = side_files.len() + 1;
+    loop {
+        let candidate = format!("Shape{n:03}.brp");
+        if !side_files.iter().any(|sf| sf.name == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Append one `<Property>` (with its value element) at `indent` spaces.
@@ -336,20 +578,31 @@ fn property_xml(value: &Property) -> (&'static str, String) {
                 v.x, v.y, v.z
             ),
         ),
-        // A/Ox/Oy/Oz are optional in FreeCAD's format; we omit them.
-        Property::Placement(p) => (
-            "App::PropertyPlacement",
-            format!(
-                "<PropertyPlacement Px=\"{}\" Py=\"{}\" Pz=\"{}\" Q0=\"{}\" Q1=\"{}\" Q2=\"{}\" Q3=\"{}\"/>",
-                p.position.x,
-                p.position.y,
-                p.position.z,
-                p.rotation.x,
-                p.rotation.y,
-                p.rotation.z,
-                p.rotation.w
-            ),
-        ),
+        // FreeCAD 1.0 writes the axis-angle form alongside the quaternion
+        // (A in radians, O the axis; identity → A=0, O=+Z) and its reader
+        // wants them present — the canonical FreeCAD form, verified
+        // against r39109's own serialization.
+        Property::Placement(p) => {
+            let (axis, angle) = placement_axis_angle(&p.rotation);
+            (
+                "App::PropertyPlacement",
+                format!(
+                    "<PropertyPlacement Px=\"{}\" Py=\"{}\" Pz=\"{}\" Q0=\"{}\" Q1=\"{}\" Q2=\"{}\" Q3=\"{}\" \
+                     A=\"{}\" Ox=\"{}\" Oy=\"{}\" Oz=\"{}\"/>",
+                    p.position.x,
+                    p.position.y,
+                    p.position.z,
+                    p.rotation.x,
+                    p.rotation.y,
+                    p.rotation.z,
+                    p.rotation.w,
+                    angle,
+                    axis.x,
+                    axis.y,
+                    axis.z
+                ),
+            )
+        }
         Property::Link(v) => (
             "App::PropertyLink",
             format!("<Link value=\"{}\"/>", escape_attr(v)),
@@ -377,63 +630,146 @@ fn property_xml(value: &Property) -> (&'static str, String) {
 /// `GeomArcOfCircle::Save` in the FreeCAD source. Everything is
 /// XY-plane (`Z="0"`, `Normal="0 0 1"`, `AngleXU="0"`), exactly the
 /// subset this kernel's 2D sketcher models.
-fn sketch_geometrylist_xml(sketch: &fc_sketcher::Sketch) -> String {
-    let mut xml = format!(
-        "     <GeometryList count=\"{}\">\n",
-        sketch.geometry().len()
-    );
-    for g in sketch.geometry() {
-        match *g {
-            Geometry::Point { x, y } => {
-                xml.push_str("      <Geometry type=\"Part::GeomPoint\" migrated=\"1\">\n");
-                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
-                xml.push_str(&format!(
-                    "       <GeomPoint X=\"{x:?}\" Y=\"{y:?}\" Z=\"0.0\"/>\n"
-                ));
-                xml.push_str("      </Geometry>\n");
+///
+/// A loaded sketch (`preserved` set) emits at the file's original GeoId
+/// slots: preserved raw blocks for the geometry this kernel skipped
+/// (construction, off-plane, unmodeled kinds — byte-identical to the
+/// source), regenerated blocks for the modeled ones — and each modeled
+/// block carries the `id` attribute and `<GeoExtensions>` element the
+/// file gave it. A fresh sketch (`preserved` absent) emits exactly the
+/// canonical v0.1.2 form.
+fn sketch_geometrylist_xml(
+    sketch: &fc_sketcher::Sketch,
+    preserved: Option<&SketchPreservation>,
+) -> String {
+    let mut body = String::new();
+    match preserved {
+        None => {
+            for g in sketch.geometry() {
+                push_geometry_block(&mut body, g, None, None);
             }
-            Geometry::LineSegment { start, end } => {
-                xml.push_str("      <Geometry type=\"Part::GeomLineSegment\" migrated=\"1\">\n");
-                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
-                xml.push_str(&format!(
-                    "       <LineSegment StartX=\"{:?}\" StartY=\"{:?}\" StartZ=\"0.0\" \
-                     EndX=\"{:?}\" EndY=\"{:?}\" EndZ=\"0.0\"/>\n",
-                    start.x, start.y, end.x, end.y
-                ));
-                xml.push_str("      </Geometry>\n");
+        }
+        Some(p) => {
+            // ours -> original GeoId: the inverse of the reader's compact
+            // remap. The remap is indexed BY the file's slot: entry `i`
+            // is OURS for the file's geometry `i` (`None` = skipped).
+            // Extra geometry added after load has no file slot and
+            // appends past the preserved ones.
+            let mut slot_to_ours: BTreeMap<u32, usize> = BTreeMap::new();
+            let mut mapped_ours: BTreeSet<u32> = BTreeSet::new();
+            for (fc_slot, mapped) in p.geo_remap.iter().enumerate() {
+                if let Some(ours) = mapped {
+                    slot_to_ours.insert(fc_slot as u32, *ours as usize);
+                    mapped_ours.insert(*ours);
+                }
             }
-            Geometry::Circle { center, radius } => {
-                xml.push_str("      <Geometry type=\"Part::GeomCircle\" migrated=\"1\">\n");
-                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
-                xml.push_str(&format!(
-                    "       <Circle CenterX=\"{:?}\" CenterY=\"{:?}\" CenterZ=\"0.0\" \
-                     NormalX=\"0.0\" NormalY=\"0.0\" NormalZ=\"1.0\" AngleXU=\"0.0\" \
-                     Radius=\"{radius:?}\"/>\n",
-                    center.x, center.y
-                ));
-                xml.push_str("      </Geometry>\n");
+            let mut last = p.geometry_count as u32;
+            // Post-load additions: our GeoIds beyond the mapped set take
+            // fresh slots after the original ones.
+            for ours in 0..sketch.geometry().len() as u32 {
+                if !mapped_ours.contains(&ours) {
+                    let slot = p.saved_geoid(ours);
+                    last = last.max(slot + 1);
+                }
             }
-            Geometry::ArcOfCircle {
-                center,
-                radius,
-                start_angle,
-                end_angle,
-            } => {
-                xml.push_str("      <Geometry type=\"Part::GeomArcOfCircle\" migrated=\"1\">\n");
-                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
-                xml.push_str(&format!(
-                    "       <ArcOfCircle CenterX=\"{:?}\" CenterY=\"{:?}\" CenterZ=\"0.0\" \
-                     NormalX=\"0.0\" NormalY=\"0.0\" NormalZ=\"1.0\" AngleXU=\"0.0\" \
-                     Radius=\"{radius:?}\" StartAngle=\"{start_angle:?}\" \
-                     EndAngle=\"{end_angle:?}\"/>\n",
-                    center.x, center.y
-                ));
-                xml.push_str("      </Geometry>\n");
+            last = last.max(p.skipped_geometry.keys().next_back().map_or(0, |k| k + 1));
+            for slot in 0..last {
+                if let Some(raw) = p.skipped_geometry.get(&slot) {
+                    // Verbatim, at its original slot (the captured raw
+                    // carries its own original indentation).
+                    body.push_str(raw);
+                    body.push('\n');
+                } else if let Some(&ours) = slot_to_ours.get(&slot) {
+                    push_geometry_block(
+                        &mut body,
+                        &sketch.geometry()[ours],
+                        p.geo_ids.get(&slot),
+                        p.geo_extensions.get(&slot),
+                    );
+                }
+                // A slot that is neither preserved nor mapped means the
+                // sketch's fields were mutated directly after load —
+                // outside the preservation contract (see
+                // fc_sketcher::preservation); the slot is left empty.
             }
         }
     }
-    xml.push_str("     </GeometryList>\n");
-    xml
+    let count = body.matches("<Geometry ").count();
+    format!("     <GeometryList count=\"{count}\">\n{body}     </GeometryList>\n")
+}
+
+/// One modeled geometry block: the canonical form, plus the preserved
+/// `id` attribute and `<GeoExtensions>` element when the file had them.
+fn push_geometry_block(
+    xml: &mut String,
+    g: &Geometry,
+    id: Option<&String>,
+    geo_extensions: Option<&String>,
+) {
+    let id_attr = id
+        .map(|v| format!(" id=\"{}\"", escape_attr(v)))
+        .unwrap_or_default();
+    let extensions = geo_extensions
+        .map(|raw| format!("       {raw}\n"))
+        .unwrap_or_else(|| {
+            "       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n".to_string()
+        });
+    match *g {
+        Geometry::Point { x, y } => {
+            xml.push_str(&format!(
+                "      <Geometry type=\"Part::GeomPoint\"{id_attr} migrated=\"1\">\n"
+            ));
+            xml.push_str(&extensions);
+            xml.push_str(&format!(
+                "       <GeomPoint X=\"{x:?}\" Y=\"{y:?}\" Z=\"0.0\"/>\n"
+            ));
+            xml.push_str("      </Geometry>\n");
+        }
+        Geometry::LineSegment { start, end } => {
+            xml.push_str(&format!(
+                "      <Geometry type=\"Part::GeomLineSegment\"{id_attr} migrated=\"1\">\n"
+            ));
+            xml.push_str(&extensions);
+            xml.push_str(&format!(
+                "       <LineSegment StartX=\"{:?}\" StartY=\"{:?}\" StartZ=\"0.0\" \
+                 EndX=\"{:?}\" EndY=\"{:?}\" EndZ=\"0.0\"/>\n",
+                start.x, start.y, end.x, end.y
+            ));
+            xml.push_str("      </Geometry>\n");
+        }
+        Geometry::Circle { center, radius } => {
+            xml.push_str(&format!(
+                "      <Geometry type=\"Part::GeomCircle\"{id_attr} migrated=\"1\">\n"
+            ));
+            xml.push_str(&extensions);
+            xml.push_str(&format!(
+                "       <Circle CenterX=\"{:?}\" CenterY=\"{:?}\" CenterZ=\"0.0\" \
+                 NormalX=\"0.0\" NormalY=\"0.0\" NormalZ=\"1.0\" AngleXU=\"0.0\" \
+                 Radius=\"{radius:?}\"/>\n",
+                center.x, center.y
+            ));
+            xml.push_str("      </Geometry>\n");
+        }
+        Geometry::ArcOfCircle {
+            center,
+            radius,
+            start_angle,
+            end_angle,
+        } => {
+            xml.push_str(&format!(
+                "      <Geometry type=\"Part::GeomArcOfCircle\"{id_attr} migrated=\"1\">\n"
+            ));
+            xml.push_str(&extensions);
+            xml.push_str(&format!(
+                "       <ArcOfCircle CenterX=\"{:?}\" CenterY=\"{:?}\" CenterZ=\"0.0\" \
+                 NormalX=\"0.0\" NormalY=\"0.0\" NormalZ=\"1.0\" AngleXU=\"0.0\" \
+                 Radius=\"{radius:?}\" StartAngle=\"{start_angle:?}\" \
+                 EndAngle=\"{end_angle:?}\"/>\n",
+                center.x, center.y
+            ));
+            xml.push_str("      </Geometry>\n");
+        }
+    }
 }
 
 /// A sketch's constraints as FreeCAD 1.0's
@@ -447,135 +783,231 @@ fn sketch_geometrylist_xml(sketch: &fc_sketcher::Sketch) -> String {
 /// (Coincident=1 … Diameter=18), NOT our fragment dialect's. `Value`
 /// carries radians for `Angle` and millimetres for the datum kinds,
 /// matching FreeCAD's internal storage.
-fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
-    let mut xml = format!(
-        "     <ConstraintList count=\"{}\">\n",
-        sketch.constraints().len()
-    );
-    for c in sketch.constraints() {
-        // FreeCAD's element references: a used slot is (GeoId, pos
-        // ordinal — shared numbering: start=1, end=2, mid=3), an unused
-        // one is GeoUndef (-2000) with pos 0. `third`/`thirdpos` carry
-        // Symmetric's mirror reference (Third; 0 for the about-line
-        // form, the point's slot for about-point).
-        let (ty, first, firstpos, second, secondpos, third, thirdpos, value) = match *c {
-            Constraint::Coincident { g1, pos1, g2, pos2 } => (
-                1,
-                g1.0 as i64,
-                pos1.ordinal(),
-                g2.0 as i64,
-                pos2.ordinal(),
-                -2000,
-                0,
-                None,
-            ),
-            Constraint::Horizontal { g } => (2, g.0 as i64, 0, -2000, 0, -2000, 0, None),
-            Constraint::Vertical { g } => (3, g.0 as i64, 0, -2000, 0, -2000, 0, None),
-            Constraint::Parallel { g1, g2 } => (4, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None),
-            Constraint::Perpendicular { g1, g2 } => {
-                (10, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None)
+fn sketch_constraintlist_xml(
+    sketch: &fc_sketcher::Sketch,
+    preserved: Option<&SketchPreservation>,
+) -> String {
+    let mut body = String::new();
+    match preserved {
+        None => {
+            for c in sketch.constraints() {
+                push_constrain_element(&mut body, c, |g| g.0);
             }
-            Constraint::Distance {
-                g1,
-                pos1,
-                g2,
-                pos2,
-                value,
-            } => (
-                6,
-                g1.0 as i64,
-                pos1.ordinal(),
-                g2.0 as i64,
-                pos2.ordinal(),
-                -2000,
-                0,
-                Some(value),
-            ),
-            Constraint::DistanceX {
-                g1,
-                pos1,
-                g2,
-                pos2,
-                value,
-            } => (
-                7,
-                g1.0 as i64,
-                pos1.ordinal(),
-                g2.0 as i64,
-                pos2.ordinal(),
-                -2000,
-                0,
-                Some(value),
-            ),
-            Constraint::DistanceY {
-                g1,
-                pos1,
-                g2,
-                pos2,
-                value,
-            } => (
-                8,
-                g1.0 as i64,
-                pos1.ordinal(),
-                g2.0 as i64,
-                pos2.ordinal(),
-                -2000,
-                0,
-                Some(value),
-            ),
-            Constraint::Radius { g, value } => (11, g.0 as i64, 0, -2000, 0, -2000, 0, Some(value)),
-            Constraint::Diameter { g, value } => {
-                (18, g.0 as i64, 0, -2000, 0, -2000, 0, Some(value))
+        }
+        Some(p) => {
+            // The file's list positions: preserved raw elements at
+            // their slot, the modeled ones (in their original relative
+            // order) at the remaining slots — their GeoIds inverted back
+            // to the file's numbering.
+            let mut next_modeled = 0usize;
+            let modeled = sketch.constraints();
+            for pos in 0..p.constraint_count {
+                if let Some(raw) = p.raw_constraints.get(&pos) {
+                    // Verbatim, at its original list position.
+                    body.push_str(raw);
+                    body.push('\n');
+                } else if next_modeled < modeled.len() {
+                    push_constrain_element(&mut body, &modeled[next_modeled], |g| {
+                        p.saved_geoid(g.0)
+                    });
+                    next_modeled += 1;
+                }
+                // A position with neither raw nor modeled constraint
+                // means the sketch's fields were mutated directly after
+                // load — outside the preservation contract.
             }
-            Constraint::Equal { g1, g2 } => (12, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None),
-            Constraint::Angle { g1, g2, value } => {
-                (9, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, Some(value))
+            // Constraints added after load emit past the original list.
+            while next_modeled < modeled.len() {
+                push_constrain_element(&mut body, &modeled[next_modeled], |g| {
+                    p.saved_geoid(g.0)
+                });
+                next_modeled += 1;
             }
-            Constraint::PointOnObject { g1, pos1, g2 } => (
-                13,
-                g1.0 as i64,
-                pos1.ordinal(),
-                g2.0 as i64,
-                0,
-                -2000,
-                0,
-                None,
-            ),
-            // FreeCAD's simple (edge) Tangent: both slots empty.
-            Constraint::Tangent { g1, g2 } => (5, g1.0 as i64, 0, g2.0 as i64, 0, -2000, 0, None),
-            // FreeCAD's Symmetric: Third is the mirror line (ThirdPos
-            // 0) or the symmetry point (ThirdPos = the point's slot).
-            Constraint::Symmetric {
-                g1,
-                pos1,
-                g2,
-                pos2,
-                g3,
-                pos3,
-            } => (
-                14,
-                g1.0 as i64,
-                pos1.ordinal(),
-                g2.0 as i64,
-                pos2.ordinal(),
-                g3.0 as i64,
-                pos3.map(|p| p.ordinal()).unwrap_or(0),
-                None,
-            ),
-            // FreeCAD's Block: a bare First reference.
-            Constraint::Block { g } => (17, g.0 as i64, 0, -2000, 0, -2000, 0, None),
-        };
-        let value = value.unwrap_or(0.0);
-        xml.push_str(&format!(
-            "      <Constrain Name=\"\" MetaData=\"\" Type=\"{ty}\" Orientation=\"0\" \
-             Value=\"{value:?}\" LabelDistance=\"0.0\" LabelPosition=\"0.0\" \
-             IsDriving=\"1\" IsInVirtualSpace=\"0\" IsVisible=\"1\" IsActive=\"1\" \
-             First=\"{first}\" FirstPos=\"{firstpos}\" Second=\"{second}\" \
-             SecondPos=\"{secondpos}\" Third=\"{third}\" ThirdPos=\"{thirdpos}\"/>\n",
-        ));
+        }
     }
-    xml.push_str("     </ConstraintList>\n");
+    let count = body.matches("<Constrain ").count();
+    let mut xml = format!("     <ConstraintList count=\"{count}\">\n{body}     </ConstraintList>\n");
+    if let Some(p) = preserved {
+        // Trailing raw content of the property payload (e.g. a
+        // <ConstraintExtensions> block), right where the file had it.
+        if let Some(trailing) = &p.constraint_extensions {
+            xml.push_str(&format!("     {trailing}\n"));
+        }
+    }
     xml
+}
+
+/// One `<Constrain …/>` element for a modeled constraint. `geo` maps
+/// this kernel's GeoIds onto the numbering the file uses (identity for
+/// fresh sketches; the inverted reader remap for loaded ones).
+fn push_constrain_element<F: Fn(fc_sketcher::GeoId) -> u32>(
+    xml: &mut String,
+    c: &Constraint,
+    geo: F,
+) {
+    // FreeCAD's element references: a used slot is (GeoId, pos
+    // ordinal — shared numbering: start=1, end=2, mid=3), an unused
+    // one is GeoUndef (-2000) with pos 0. `third`/`thirdpos` carry
+    // Symmetric's mirror reference (Third; 0 for the about-line
+    // form, the point's slot for about-point).
+    let (ty, first, firstpos, second, secondpos, third, thirdpos, value) = match *c {
+        Constraint::Coincident { g1, pos1, g2, pos2 } => (
+            1,
+            geo(g1) as i64,
+            pos1.ordinal(),
+            geo(g2) as i64,
+            pos2.ordinal(),
+            -2000,
+            0,
+            None,
+        ),
+        Constraint::Horizontal { g } => (2, geo(g) as i64, 0, -2000, 0, -2000, 0, None),
+        Constraint::Vertical { g } => (3, geo(g) as i64, 0, -2000, 0, -2000, 0, None),
+        Constraint::Parallel { g1, g2 } => (
+            4,
+            geo(g1) as i64,
+            0,
+            geo(g2) as i64,
+            0,
+            -2000,
+            0,
+            None,
+        ),
+        Constraint::Perpendicular { g1, g2 } => (
+            10,
+            geo(g1) as i64,
+            0,
+            geo(g2) as i64,
+            0,
+            -2000,
+            0,
+            None,
+        ),
+        Constraint::Distance {
+            g1,
+            pos1,
+            g2,
+            pos2,
+            value,
+        } => (
+            6,
+            geo(g1) as i64,
+            pos1.ordinal(),
+            geo(g2) as i64,
+            pos2.ordinal(),
+            -2000,
+            0,
+            Some(value),
+        ),
+        Constraint::DistanceX {
+            g1,
+            pos1,
+            g2,
+            pos2,
+            value,
+        } => (
+            7,
+            geo(g1) as i64,
+            pos1.ordinal(),
+            geo(g2) as i64,
+            pos2.ordinal(),
+            -2000,
+            0,
+            Some(value),
+        ),
+        Constraint::DistanceY {
+            g1,
+            pos1,
+            g2,
+            pos2,
+            value,
+        } => (
+            8,
+            geo(g1) as i64,
+            pos1.ordinal(),
+            geo(g2) as i64,
+            pos2.ordinal(),
+            -2000,
+            0,
+            Some(value),
+        ),
+        Constraint::Radius { g, value } => {
+            (11, geo(g) as i64, 0, -2000, 0, -2000, 0, Some(value))
+        }
+        Constraint::Diameter { g, value } => {
+            (18, geo(g) as i64, 0, -2000, 0, -2000, 0, Some(value))
+        }
+        Constraint::Equal { g1, g2 } => (
+            12,
+            geo(g1) as i64,
+            0,
+            geo(g2) as i64,
+            0,
+            -2000,
+            0,
+            None,
+        ),
+        Constraint::Angle { g1, g2, value } => (
+            9,
+            geo(g1) as i64,
+            0,
+            geo(g2) as i64,
+            0,
+            -2000,
+            0,
+            Some(value),
+        ),
+        Constraint::PointOnObject { g1, pos1, g2 } => (
+            13,
+            geo(g1) as i64,
+            pos1.ordinal(),
+            geo(g2) as i64,
+            0,
+            -2000,
+            0,
+            None,
+        ),
+        // FreeCAD's simple (edge) Tangent: both slots empty.
+        Constraint::Tangent { g1, g2 } => (
+            5,
+            geo(g1) as i64,
+            0,
+            geo(g2) as i64,
+            0,
+            -2000,
+            0,
+            None,
+        ),
+        // FreeCAD's Symmetric: Third is the mirror line (ThirdPos
+        // 0) or the symmetry point (ThirdPos = the point's slot).
+        Constraint::Symmetric {
+            g1,
+            pos1,
+            g2,
+            pos2,
+            g3,
+            pos3,
+        } => (
+            14,
+            geo(g1) as i64,
+            pos1.ordinal(),
+            geo(g2) as i64,
+            pos2.ordinal(),
+            geo(g3) as i64,
+            pos3.map(|p| p.ordinal()).unwrap_or(0),
+            None,
+        ),
+        // FreeCAD's Block: a bare First reference.
+        Constraint::Block { g } => (17, geo(g) as i64, 0, -2000, 0, -2000, 0, None),
+    };
+    let value = value.unwrap_or(0.0);
+    xml.push_str(&format!(
+        "      <Constrain Name=\"\" MetaData=\"\" Type=\"{ty}\" Orientation=\"0\" \
+         Value=\"{value:?}\" LabelDistance=\"0.0\" LabelPosition=\"0.0\" \
+         IsDriving=\"1\" IsInVirtualSpace=\"0\" IsVisible=\"1\" IsActive=\"1\" \
+         First=\"{first}\" FirstPos=\"{firstpos}\" Second=\"{second}\" \
+         SecondPos=\"{secondpos}\" Third=\"{third}\" ThirdPos=\"{thirdpos}\"/>\n",
+    ));
 }
 
 /// Computed geometry of a part feature, if any: primitives carry their
@@ -667,7 +1099,38 @@ pub fn load_document_with_hook(
 
     let mut report = LoadReport::default();
     let mut doc = Document::new("untitled");
-    parse_document(&xml_bytes, &mut zip, &mut doc, &mut report, mutate)?;
+    // Entries the parse claimed (Document.xml + every shape payload read
+    // — modeled or preserved per-object). The sweep below preserves the
+    // rest verbatim: GuiDocument.xml, thumbnails, anything else a real
+    // FreeCAD wrote that this model has no vocabulary for.
+    let mut consumed: BTreeSet<String> = BTreeSet::from(["Document.xml".to_string()]);
+    parse_document(&xml_bytes, &mut zip, &mut doc, &mut report, mutate, &mut consumed)?;
+
+    // The preservation sweep: every archive entry nobody claimed keeps
+    // its raw bytes and storage form for verbatim re-emission on save.
+    // (Directory entries — names ending in '/' — carry no data themselves;
+    // the writer re-creates the directory hierarchy when it writes the
+    // entries that live in them.)
+    for i in 0..zip.len() {
+        let mut entry = match zip.by_index(i) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let name = entry.name().to_string();
+        if consumed.contains(&name) || name.ends_with('/') {
+            continue;
+        }
+        let stored = entry.compression() == zip::CompressionMethod::Stored;
+        let mut data = Vec::new();
+        if entry.read_to_end(&mut data).is_err() {
+            continue;
+        }
+        doc.preservation_mut().zip_entries.push(PreservedZipEntry {
+            name,
+            data,
+            stored,
+        });
+    }
 
     Ok((doc, report))
 }
@@ -722,12 +1185,22 @@ enum PropValue {
         fragment: String,
         geo_remap: Vec<Option<u32>>,
         geo_kinds: Vec<Option<&'static str>>,
+        /// The sketch's preservation shadow for this geometry list
+        /// (skipped-geometry raws, per-slot `id` attributes,
+        /// `<GeoExtensions>` blocks, the file's geometry count).
+        preserved: SketchPreservation,
     },
     /// The raw inner XML of FreeCAD 1.0's `Constraints` property
-    /// (`Sketcher::PropertyConstraintList`, `<ConstraintList …>`), held
-    /// until the object is fully parsed — the geometry (and its remap)
-    /// is known then, whatever the file's property order.
-    SketchConstraints(String),
+    /// (`Sketcher::PropertyConstraintList`, `<ConstraintList …>`), its
+    /// `count` attribute, and any raw trailing content after
+    /// `</ConstraintList>` — held until the object is fully parsed (the
+    /// geometry — and its remap — is known then, whatever the file's
+    /// property order).
+    SketchConstraints {
+        inner: String,
+        count: usize,
+        trailing: Option<String>,
+    },
 }
 
 /// The pull-parser state we need between helper calls.
@@ -817,20 +1290,47 @@ fn skip_element(reader: &mut XmlReader<'_>, buf: &mut Vec<u8>) -> Result<(), Fcs
     }
 }
 
+/// Attributes of an element beyond the `consumed` set, in file order
+/// (quick-xml yields them in source order). What a parser reads is live
+/// state; the rest is preservation — re-emitted verbatim on save.
+fn extra_attrs(
+    e: &BytesStart<'_>,
+    consumed: &[&str],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for a in e.attributes().flatten() {
+        let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
+        if consumed.contains(&key.as_str()) {
+            continue;
+        }
+        if let Ok(v) = a.unescape_value() {
+            out.push((key, v.into_owned()));
+        }
+    }
+    out
+}
+
 /// Parse the whole `Document.xml` into `doc`/`report`, reading shape
-/// payloads from `zip`.
+/// payloads from `zip`. `consumed` collects the archive entries the
+/// parse actually read (modeled or preserved per-object): the load's
+/// final sweep preserves every other entry verbatim.
 fn parse_document(
     xml: &[u8],
     zip: &mut zip::ZipArchive<std::fs::File>,
     doc: &mut Document,
     report: &mut LoadReport,
     mut mutate: Option<&mut ObjectHook<'_>>,
+    consumed: &mut BTreeSet<String>,
 ) -> Result<(), FcstdError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
 
     // Locate the <Document> root (skipping declaration / DOCTYPE / comments).
+    // The root's own attributes are preservation except the regenerated
+    // trio (`SchemaVersion`/`ProgramVersion`/`FileVersion` — every writer
+    // stamps its own, FreeCAD included).
+    let root_attrs: Vec<(String, String)>;
     loop {
         match next_event(&mut reader, &mut buf)? {
             Event::Start(e) => {
@@ -840,6 +1340,7 @@ fn parse_document(
                         String::from_utf8_lossy(e.name().as_ref())
                     )));
                 }
+                root_attrs = extra_attrs(&e, &["SchemaVersion", "ProgramVersion", "FileVersion"]);
                 break;
             }
             Event::Eof => {
@@ -848,6 +1349,7 @@ fn parse_document(
             _ => continue,
         }
     }
+    doc.preservation_mut().root_attributes = root_attrs;
 
     // Objects built from the <Objects> table, in FILE order. They are
     // completed (properties, status, geometry) before being added to the
@@ -865,16 +1367,60 @@ fn parse_document(
         match next_event(&mut reader, &mut buf)? {
             Event::Start(e) => match e.name().as_ref() {
                 b"Properties" => {
+                    doc.preservation_mut().properties_attrs =
+                        extra_attrs(&e, &["Count", "TransientCount"]);
                     parse_document_properties(&mut reader, &mut buf, xml, doc, report)?
                 }
-                b"Objects" => parse_objects_section(&mut reader, &mut buf, &mut built, report)?,
-                b"ObjectData" => {
-                    parse_object_data_section(&mut reader, &mut buf, xml, &mut built, zip, report)?
+                b"Objects" => {
+                    doc.preservation_mut().objects_attrs = extra_attrs(&e, &["Count"]);
+                    let mut deps: Vec<(String, String)> = Vec::new();
+                    parse_objects_section(
+                        &mut reader,
+                        &mut buf,
+                        xml,
+                        &mut built,
+                        report,
+                        &mut deps,
+                    )?;
+                    for (name, raw) in deps {
+                        doc.preservation_mut().object_deps.insert(name, raw);
+                    }
                 }
-                _ => skip_element(&mut reader, &mut buf)?,
+                b"ObjectData" => {
+                    doc.preservation_mut().objectdata_attrs = extra_attrs(&e, &["Count"]);
+                    parse_object_data_section(
+                        &mut reader,
+                        &mut buf,
+                        xml,
+                        &mut built,
+                        zip,
+                        report,
+                        consumed,
+                    )?
+                }
+                // Anything else inside <Document> is not modeled (e.g.
+                // FreeCAD 1.0's <StringHasher/>): the raw element is
+                // preserved verbatim — the honest alternative to dropping
+                // data the document model has no vocabulary for.
+                _ => {
+                    let after_start = reader.buffer_position() as usize;
+                    let raw = raw_element_and_skip(xml, &mut reader, &mut buf, after_start)?;
+                    doc.preservation_mut().raw_elements.push(raw);
+                }
             },
             // Self-closing sections: nothing to read inside them.
-            Event::Empty(_) => {}
+            Event::Empty(e) => {
+                // A self-closing non-property child of <Document> (e.g.
+                // FreeCAD's <StringHasher …/>) is preserved verbatim.
+                let pos = reader.buffer_position() as usize;
+                if let Some(start) = tag_start(xml, pos) {
+                    let raw = String::from_utf8_lossy(&xml[start..pos]).into_owned();
+                    if !raw.starts_with("<Document") {
+                        doc.preservation_mut().raw_elements.push(raw);
+                    }
+                }
+                let _ = e;
+            }
             Event::End(e) if e.name().as_ref() == b"Document" => break,
             Event::Eof => {
                 return Err(FcstdError::Xml(
@@ -948,8 +1494,9 @@ fn parse_document(
     Ok(())
 }
 
-/// Document-level `<Properties>`: we persist Label/Creator/CreationDate;
-/// other metadata (Uid, Company, ...) is not modeled and ignored.
+/// Document-level `<Properties>`: we model Label/Creator/CreationDate;
+/// every other property (Uid, Company, License, ...) is not modeled and
+/// preserved verbatim for round-trip.
 fn parse_document_properties(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
@@ -962,6 +1509,10 @@ fn parse_document_properties(
             Event::Start(e) if e.name().as_ref() == b"Property" => {
                 let map = attrs_of(&e);
                 let name = map.get("name").cloned().unwrap_or_default();
+                // The element's source span: from the tag's own '<' to
+                // the position after '</Property>' (parse_property_value
+                // consumes exactly that far).
+                let after_start = reader.buffer_position() as usize;
                 let value =
                     parse_property_value(reader, buf, xml, "document", &name, &map, report)?;
                 match (name.as_str(), value) {
@@ -974,8 +1525,55 @@ fn parse_document_properties(
                         report.warnings.push(format!(
                             "document property '{n}': not a string value — skipped"
                         ));
+                        // A malformed value of a modeled property: the
+                        // raw element is still the only copy of the data
+                        // — preserve it (a recompute-free fallback the
+                        // model itself cannot offer).
+                        if let Some(start) = tag_start(xml, after_start) {
+                            let end = reader.buffer_position() as usize;
+                            let raw = String::from_utf8_lossy(&xml[start..end]).into_owned();
+                            doc.preservation_mut().properties.push((name.clone(), raw));
+                        }
                     }
-                    _ => {}
+                    // An unmodeled document property (Uid, Company,
+                    // License, ... — or a malformed one): the raw element
+                    // is preserved verbatim, so the re-saved file still
+                    // carries it.
+                    (_, _) => {
+                        if let (Some(start), Some(end)) =
+                            (tag_start(xml, after_start), Some(reader.buffer_position() as usize))
+                        {
+                            let raw = String::from_utf8_lossy(&xml[start..end]).into_owned();
+                            let key = if name.is_empty() {
+                                format!("<unnamed #{}>", doc.preservation().properties.len())
+                            } else {
+                                name.clone()
+                            };
+                            doc.preservation_mut().properties.push((key, raw));
+                        }
+                    }
+                }
+            }
+            // FreeCAD's transient document properties (`<_Property …/>`,
+            // e.g. FileName/Tip/TransientDir): value-less markers whose
+            // `TransientCount` attribute on the section promises their
+            // presence — preserved verbatim so a re-save keeps its word.
+            Event::Start(e) if e.name().as_ref() == b"_Property" => {
+                let after_start = reader.buffer_position() as usize;
+                let raw = raw_element_and_skip(xml, reader, buf, after_start)?;
+                let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
+                if !name.is_empty() {
+                    doc.preservation_mut().transient_properties.push((name, raw));
+                }
+            }
+            Event::Empty(e) if e.name().as_ref() == b"_Property" => {
+                let pos = reader.buffer_position() as usize;
+                if let Some(start) = tag_start(xml, pos) {
+                    let raw = String::from_utf8_lossy(&xml[start..pos]).into_owned();
+                    let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
+                    if !name.is_empty() {
+                        doc.preservation_mut().transient_properties.push((name, raw));
+                    }
                 }
             }
             Event::End(e) if e.name().as_ref() == b"Properties" => return Ok(()),
@@ -990,15 +1588,48 @@ fn parse_document_properties(
 }
 
 /// The `<Objects>` table: type/name/id triplets, plus status dialects.
-/// Builds the objects immediately (they get their data later).
+/// Builds the objects immediately (they get their data later). Unknown
+/// types load as opaque `ForeignObject`s (raw data preserved verbatim);
+/// unknown `Part::` family members keep the v0.1.2 parameter-container
+/// treatment (their geometry payloads preserve on top of it).
 fn parse_objects_section(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
+    xml: &[u8],
     built: &mut Vec<(String, Option<Box<dyn DocumentObject>>)>,
     report: &mut LoadReport,
+    deps: &mut Vec<(String, String)>,
 ) -> Result<(), FcstdError> {
+    // FreeCAD's `<ObjectDeps>` rows are self-keyed (their `Name`
+    // attribute names the object they belong to) and ALL precede the
+    // `<Object>` rows — collected keyed by that name, emitted by the
+    // writer right before the matching row.
     loop {
         match next_event(reader, buf)? {
+            Event::Start(e) if e.name().as_ref() == b"ObjectDeps" => {
+                let name = attrs_of(&e).get("Name").cloned().unwrap_or_default();
+                let after_start = reader.buffer_position() as usize;
+                let raw = raw_element_and_skip(xml, reader, buf, after_start)?;
+                if !name.is_empty() {
+                    deps.push((name, raw));
+                }
+            }
+            // FreeCAD's rows are self-closing (`<ObjectDeps Name="…"
+            // Count="0"/>`): an Empty event, captured with its exact
+            // source span (the `Dependencies="1"` section attribute
+            // promises their presence — a re-save must keep its word).
+            Event::Empty(e) if e.name().as_ref() == b"ObjectDeps" => {
+                let name = attrs_of(&e).get("Name").cloned().unwrap_or_default();
+                let pos = reader.buffer_position() as usize;
+                if !name.is_empty() {
+                    if let Some(start) = tag_start(xml, pos) {
+                        deps.push((
+                            name,
+                            String::from_utf8_lossy(&xml[start..pos]).into_owned(),
+                        ));
+                    }
+                }
+            }
             Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"Object" => {
                 let map = attrs_of(&e);
                 let type_id = map.get("type").cloned().unwrap_or_default();
@@ -1014,9 +1645,24 @@ fn parse_objects_section(
                     continue;
                 }
                 let status = parse_status(&map);
+                // Attributes beyond the modeled set (name/type/id/status
+                // dialect) — preserved verbatim for the writer to re-emit.
+                let object_attrs: Vec<(String, String)> = map
+                    .iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            "type" | "name" | "id" | "Touched" | "Invalid" | "status" | "Error"
+                        )
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 let object = match build_object(&type_id, &name) {
                     Some(mut object) => {
                         object.set_status(status);
+                        if let Some(p) = object.preservation_mut() {
+                            p.object_attrs = object_attrs;
+                        }
                         report.objects += 1;
                         Some(object)
                     }
@@ -1037,15 +1683,27 @@ fn parse_objects_section(
                             .container
                             .set("TypeId", Property::String(type_id.clone()));
                         object.set_status(status);
+                        if let Some(p) = object.preservation_mut() {
+                            p.object_attrs = object_attrs;
+                        }
                         report.objects += 1;
                         Some(Box::new(object) as Box<dyn DocumentObject>)
                     }
+                    // Any other unknown type: an opaque `ForeignObject`
+                    // under the file's real name and type — raw
+                    // `<ObjectData>` preserved verbatim, links to it
+                    // resolve, nothing recomputed. The lossless
+                    // alternative to skipping it.
                     None => {
-                        report.skipped += 1;
+                        report.foreign += 1;
                         report.warnings.push(format!(
-                            "object '{name}': unknown type '{type_id}' — skipped"
+                            "object '{name}': unknown type '{type_id}' — preserved verbatim \
+                             (opaque ForeignObject, raw data round-trips)"
                         ));
-                        None
+                        let mut object = ForeignObject::new(&name, &type_id);
+                        object.object_attrs = object_attrs;
+                        object.set_status(status);
+                        Some(Box::new(object) as Box<dyn DocumentObject>)
                     }
                 };
                 built.push((name, object));
@@ -1070,6 +1728,7 @@ fn parse_object_data_section(
     built: &mut Vec<(String, Option<Box<dyn DocumentObject>>)>,
     zip: &mut zip::ZipArchive<std::fs::File>,
     report: &mut LoadReport,
+    consumed: &mut BTreeSet<String>,
 ) -> Result<(), FcstdError> {
     loop {
         match next_event(reader, buf)? {
@@ -1087,7 +1746,62 @@ fn parse_object_data_section(
                     Some(i) => {
                         let owner = built[i].0.clone();
                         if let Some(object) = built[i].1.as_mut() {
-                            parse_object_properties(reader, buf, xml, object, &owner, zip, report)?;
+                            // A foreign object's data is one opaque blob:
+                            // capture the raw inner XML of the whole
+                            // `<Object>` entry — the model has no
+                            // vocabulary for it, and the bytes are the
+                            // only truthful representation.
+                            if object
+                                .as_any()
+                                .downcast_ref::<ForeignObject>()
+                                .is_some()
+                            {
+                                let foreign =
+                                    object.as_any_mut().downcast_mut::<ForeignObject>().unwrap();
+                                // Extra attributes of the ObjectData row
+                                // (beyond `name`) join the preservation
+                                // attrs (dedup: the Objects-table row
+                                // is the primary source).
+                                for (k, v) in map.iter() {
+                                    if k == "name" {
+                                        continue;
+                                    }
+                                    if !foreign
+                                        .object_attrs
+                                        .iter()
+                                        .any(|(fk, _)| fk == k)
+                                    {
+                                        foreign.object_attrs.push((k.clone(), v.clone()));
+                                    }
+                                }
+                                foreign.raw_object_data =
+                                    Some(raw_inner_xml(xml, reader, buf, b"Object")?);
+                                continue;
+                            }
+                            // Extra attributes of the `<Object>` row
+                            // beyond `name` — preserved for verbatim
+                            // re-emission (FreeCAD's e.g.
+                            // Extensions="True").
+                            for (k, v) in map.iter() {
+                                if k == "name" {
+                                    continue;
+                                }
+                                if let Some(p) = object.preservation_mut() {
+                                    if !p.object_attrs.iter().any(|(pk, _)| pk == k) {
+                                        p.object_attrs.push((k.clone(), v.clone()));
+                                    }
+                                }
+                            }
+                            parse_object_properties(
+                                reader,
+                                buf,
+                                xml,
+                                object,
+                                &owner,
+                                zip,
+                                report,
+                                consumed,
+                            )?;
                         }
                         // An object that failed to build was already reported
                         // (with its skip) in the <Objects> section.
@@ -1115,7 +1829,10 @@ fn parse_object_data_section(
 /// Consume one `<Object>`'s properties (called after its Start event;
 /// returns at its End event). `xml` is the whole Document.xml source —
 /// needed to extract `<Sketch>` fragments byte-exactly (they are object
-/// data, not `<Property>` elements).
+/// data, not `<Property>` elements) and to preserve unmodeled property
+/// elements verbatim. `consumed` tracks the archive entries read, so the
+/// load's final sweep preserves every entry nobody claimed.
+#[allow(clippy::too_many_arguments)] // pull-parser plumbing + the preservation channels
 fn parse_object_properties(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
@@ -1124,22 +1841,73 @@ fn parse_object_properties(
     owner: &str,
     zip: &mut zip::ZipArchive<std::fs::File>,
     report: &mut LoadReport,
+    consumed: &mut BTreeSet<String>,
 ) -> Result<(), FcstdError> {
     // FreeCAD 1.0's `Constraints` payload, held until the object is
     // fully parsed (the geometry — and its GeoId remap — may arrive
     // after the constraints, whatever the file's property order).
     let mut constraint_inner: Option<String> = None;
+    // The `ConstraintList` count attribute (the file's constraint
+    // total — the preservation shadow's slot count).
+    let mut constraint_count: usize = 0;
+    // Raw content after `</ConstraintList>` inside the `Constraints`
+    // property (e.g. a `<ConstraintExtensions>` block).
+    let mut constraint_extensions: Option<String> = None;
     // The geometry-index remap from a `Geometry` property; `None`
     // while no geometry property has been seen (the legacy `<Sketch>`
     // fragment path needs no remap — its indices are already ours).
     let mut geo_remap: Option<Vec<Option<u32>>> = None;
     let mut geo_kinds: Option<Vec<Option<&'static str>>> = None;
+    // The sketch's preservation shadow (built by the `Geometry` and
+    // `Constraints` properties; attached to the SketchObject at the
+    // object's End event).
+    let mut sketch_preserved: Option<SketchPreservation> = None;
     loop {
         match next_event(reader, buf)? {
+            // The object's `<Properties Count=… TransientCount=…>`
+            // header: the attrs beyond our regenerated pair are
+            // preserved for verbatim re-emission.
+            Event::Start(e) if e.name().as_ref() == b"Properties" => {
+                if let Some(p) = object.preservation_mut() {
+                    p.properties_attrs = extra_attrs(&e, &["Count", "TransientCount"]);
+                }
+            }
+            // FreeCAD's transient object properties (`<_Property …/>`):
+            // value-less markers, preserved verbatim (the document-level
+            // ones carry FileName/Tip/TransientDir; objects carry their
+            // own transient set).
+            Event::Start(e) if e.name().as_ref() == b"_Property" => {
+                let after_start = reader.buffer_position() as usize;
+                let raw = raw_element_and_skip(xml, reader, buf, after_start)?;
+                let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
+                if !name.is_empty() {
+                    if let Some(p) = object.preservation_mut() {
+                        p.transient_properties.push((name, raw));
+                    }
+                }
+            }
+            Event::Empty(e) if e.name().as_ref() == b"_Property" => {
+                let pos = reader.buffer_position() as usize;
+                if let Some(start) = tag_start(xml, pos) {
+                    let raw = String::from_utf8_lossy(&xml[start..pos]).into_owned();
+                    let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
+                    if !name.is_empty() {
+                        if let Some(p) = object.preservation_mut() {
+                            p.transient_properties.push((name, raw));
+                        }
+                    }
+                }
+            }
             Event::Start(e) if e.name().as_ref() == b"Property" => {
                 let map = attrs_of(&e);
                 let name = map.get("name").cloned().unwrap_or_default();
-                let value = parse_property_value(reader, buf, xml, owner, &name, &map, report)?;
+                // The property element's source span: from the tag's own
+                // '<' (buffer_position is past the start tag) to wherever
+                // the value parser stops (always at `</Property>`).
+                let after_start = reader.buffer_position() as usize;
+                let value =
+                    parse_property_value(reader, buf, xml, owner, &name, &map, report)?;
+                let after_end = reader.buffer_position() as usize;
                 match (name.is_empty(), value) {
                     (false, Some(PropValue::Value(v))) => {
                         object.properties_mut().insert(name, v);
@@ -1150,25 +1918,55 @@ fn parse_object_properties(
                             fragment,
                             geo_remap: remap,
                             geo_kinds: kinds,
+                            preserved,
                         }),
                     ) => {
                         // FreeCAD 1.0's `Geometry` property, already
                         // translated into our `<Sketch>` fragment form
-                        // (with its GeoId remap).
+                        // (with its GeoId remap) — and its preservation
+                        // shadow (skipped geometry raws, GeoExtensions,
+                        // the file's `id` attributes).
                         store_sketch_fragment(object, &fragment, owner, report);
                         geo_remap = Some(remap);
                         geo_kinds = Some(kinds);
+                        if sketch_preserved.is_none() {
+                            sketch_preserved = Some(preserved);
+                        }
                     }
-                    (false, Some(PropValue::SketchConstraints(inner))) => {
+                    (false, Some(PropValue::SketchConstraints { inner, count, trailing })) => {
                         constraint_inner = Some(inner);
+                        constraint_count = count;
+                        constraint_extensions = trailing;
                     }
                     (false, Some(PropValue::Shape(shape_ref))) => {
-                        match load_shape_payload(zip, &shape_ref, owner, report)? {
+                        let (shape, preserved) =
+                            load_shape_payload(zip, &shape_ref, owner, report, consumed)?;
+                        match shape {
                             Some(shape) => attach_shape(object, shape, owner, report),
-                            // Geometry not restorable: keep the parameters
-                            // and stay Touched so recompute regenerates
-                            // what it can.
-                            None => object.set_status(ObjectStatus::Touched),
+                            // Geometry not restorable: keep the parameters,
+                            // stay Touched so recompute regenerates what it
+                            // can — and preserve the payload verbatim when
+                            // the file still carries one (OCCT BRep,
+                            // unknown formats: the only copy of the data).
+                            None => {
+                                if let Some((entry, data, stored)) = preserved {
+                                    if let Some(start) = tag_start(xml, after_start) {
+                                        let raw_property =
+                                            String::from_utf8_lossy(&xml[start..after_end])
+                                                .into_owned();
+                                        if let Some(p) = object.preservation_mut() {
+                                            p.payloads.push(PreservedShape {
+                                                property: name.clone(),
+                                                raw_property,
+                                                entry,
+                                                data,
+                                                stored,
+                                            });
+                                        }
+                                    }
+                                }
+                                object.set_status(ObjectStatus::Touched);
+                            }
                         }
                     }
                     (true, _) => {
@@ -1177,15 +1975,39 @@ fn parse_object_properties(
                             .warnings
                             .push(format!("{owner}: property without a name — skipped"));
                     }
-                    (false, None) => {}
+                    // A named property that produced no modeled value
+                    // (unknown type, malformed payload): the raw element is
+                    // the only truthful copy — preserved verbatim. The
+                    // inner parser's warning (which ends with the
+                    // preservation note) already names the gap.
+                    (false, None) => {
+                        if let Some(start) = tag_start(xml, after_start) {
+                            let raw =
+                                String::from_utf8_lossy(&xml[start..after_end]).into_owned();
+                            if let Some(p) = object.preservation_mut() {
+                                p.properties.push((name.clone(), raw));
+                            }
+                        }
+                    }
                 }
             }
             Event::Empty(e) if e.name().as_ref() == b"Property" => {
-                let name = attrs_of(&e).get("name").cloned().unwrap_or_default();
+                let map = attrs_of(&e);
+                let name = map.get("name").cloned().unwrap_or_default();
+                let pos = reader.buffer_position() as usize;
                 if name.is_empty() {
                     report.skipped_properties.push(format!("{owner}.<unnamed>"));
                 } else {
                     report.skipped_properties.push(format!("{owner}.{name}"));
+                    // A property element with no value at all: preserve the
+                    // raw element (it may carry attributes a re-save
+                    // should keep).
+                    if let Some(start) = tag_start(xml, pos) {
+                        let raw = String::from_utf8_lossy(&xml[start..pos]).into_owned();
+                        if let Some(p) = object.preservation_mut() {
+                            p.properties.push((name.clone(), raw));
+                        }
+                    }
                 }
                 report
                     .warnings
@@ -1202,6 +2024,31 @@ fn parse_object_properties(
                 } else if let Some(expressions) = object.expressions_mut() {
                     expressions.insert(path, expression);
                 }
+            }
+            // FreeCAD's attach-extension block (App::ExtensionContainer
+            // data, e.g. Part::AttachExtension): raw, preserved verbatim —
+            // re-emitted first inside the object's entry on save.
+            Event::Start(e) if e.name().as_ref() == b"Extensions" => {
+                let after_start = reader.buffer_position() as usize;
+                let raw = raw_element_and_skip(xml, reader, buf, after_start)?;
+                if let Some(p) = object.preservation_mut() {
+                    if p.extensions.is_none() {
+                        p.extensions = Some(raw);
+                    }
+                }
+                let _ = e;
+            }
+            Event::Empty(e) if e.name().as_ref() == b"Extensions" => {
+                let pos = reader.buffer_position() as usize;
+                if let Some(start) = tag_start(xml, pos) {
+                    let raw = String::from_utf8_lossy(&xml[start..pos]).into_owned();
+                    if let Some(p) = object.preservation_mut() {
+                        if p.extensions.is_none() {
+                            p.extensions = Some(raw);
+                        }
+                    }
+                }
+                let _ = e;
             }
             // The sketch content of a `Sketcher::SketchObject`: a
             // `<Sketch>` fragment that is object data, not a `<Property>`
@@ -1221,6 +2068,9 @@ fn parse_object_properties(
                     constraint_inner.as_deref(),
                     geo_remap.as_deref(),
                     geo_kinds.as_deref(),
+                    sketch_preserved.take(),
+                    constraint_count,
+                    constraint_extensions.take(),
                     owner,
                     report,
                 );
@@ -1265,15 +2115,28 @@ fn parse_object_properties(
 /// constraint (a bad one is skipped alone, never fails the splice).
 fn freecad_geometrylist_to_fragment(
     inner: &str,
+    count: usize,
     owner: &str,
     report: &mut LoadReport,
-) -> (String, Vec<Option<u32>>, Vec<Option<&'static str>>) {
+) -> (
+    String,
+    Vec<Option<u32>>,
+    Vec<Option<&'static str>>,
+    SketchPreservation,
+) {
     let mut fragment = String::from("<Sketch>\n");
     // geometry-index translation: FreeCAD's `i` → our index, `None` if skipped
     let mut remap: Vec<Option<u32>> = Vec::new();
     // geometry kind per FreeCAD index ("point"/"line"/"circle"/"arc",
     // `None` if skipped) — for per-constraint form validation.
     let mut kinds: Vec<Option<&'static str>> = Vec::new();
+    // The sketch's preservation shadow: per-slot raw `id` attributes,
+    // `<GeoExtensions>` blocks of modeled geometry, the raw blocks of
+    // skipped geometry, the file's geometry count.
+    let mut preserved = SketchPreservation {
+        geometry_count: count,
+        ..SketchPreservation::default()
+    };
     let mut i = 0usize;
     let mut index = 0usize;
     while let Some(start) = inner[i..].find("<Geometry ") {
@@ -1281,19 +2144,48 @@ fn freecad_geometrylist_to_fragment(
         let Some(len) = inner[start..].find("</Geometry>") else {
             break;
         };
+        // The raw block INCLUDING its closing tag and original indentation
+        // (the preservation shadow re-emits the file's own bytes). The
+        // backtrack is spaces/tabs only — packed single-line lists keep
+        // each block to itself.
+        let mut line_start = start;
+        let bytes = inner.as_bytes();
+        while line_start > 0 && (bytes[line_start - 1] == b' ' || bytes[line_start - 1] == b'\t') {
+            line_start -= 1;
+        }
+        let raw_block = &inner[line_start..start + len + "</Geometry>".len()];
         let block = &inner[start..start + len];
         i = start + len;
 
         let kind = attr_of_str(block, "type").unwrap_or_default();
+        // Per-slot preservation: the file's `id` attribute and the raw
+        // `<GeoExtensions>` block (present on modeled geometry too —
+        // re-emitted verbatim on save).
+        let slot = index as u32;
+        if let Some(id) = attr_of_str(block, "id") {
+            preserved.geo_ids.insert(slot, id.to_string());
+        }
+        if let Some(geo_start) = block.find("<GeoExtensions") {
+            if let Some(geo_len) = block[geo_start..].find("</GeoExtensions>") {
+                preserved.geo_extensions.insert(
+                    slot,
+                    block[geo_start..geo_start + geo_len + "</GeoExtensions>".len()].to_string(),
+                );
+            } else if let Some(empty_len) = block[geo_start..].find("/>") {
+                preserved.geo_extensions
+                    .insert(slot, block[geo_start..geo_start + empty_len + 2].to_string());
+            }
+        }
         // The fragment index this geometry takes when it maps — computed
         // before any push (remap entries pair with their geometry).
         let ours = fragment.matches("<Geometry ").count() as u32;
         if block.contains("<Construction value=\"1\"/>") {
             report.warnings.push(format!(
-                "{owner}: geometry #{index} ({kind}) is construction — skipped"
+                "{owner}: geometry #{index} ({kind}) is construction — skipped, preserved verbatim"
             ));
             remap.push(None);
             kinds.push(None);
+            preserved.skipped_geometry.insert(slot, raw_block.to_string());
             index += 1;
             continue;
         }
@@ -1312,7 +2204,8 @@ fn freecad_geometrylist_to_fragment(
                 }
                 _ => {
                     report.warnings.push(format!(
-                        "{owner}: geometry #{index} (point) off the XY plane or malformed — skipped"
+                        "{owner}: geometry #{index} (point) off the XY plane or malformed — skipped, \
+                         preserved verbatim"
                     ));
                     // Every FreeCAD geometry owns exactly one remap/kinds
                     // slot — a skipped one is `None`, so later GeoIds stay
@@ -1320,6 +2213,7 @@ fn freecad_geometrylist_to_fragment(
                     // reference onto the wrong geometry).
                     remap.push(None);
                     kinds.push(None);
+                    preserved.skipped_geometry.insert(slot, raw_block.to_string());
                 }
             },
             "Part::GeomLineSegment" => {
@@ -1342,10 +2236,12 @@ fn freecad_geometrylist_to_fragment(
                     }
                     _ => {
                         report.warnings.push(format!(
-                            "{owner}: geometry #{index} (line) off the XY plane or malformed — skipped"
+                            "{owner}: geometry #{index} (line) off the XY plane or malformed — \
+                             skipped, preserved verbatim"
                         ));
                         remap.push(None);
                         kinds.push(None);
+                        preserved.skipped_geometry.insert(slot, raw_block.to_string());
                     }
                 }
             }
@@ -1396,33 +2292,42 @@ fn freecad_geometrylist_to_fragment(
                         }
                         _ => {
                             report.warnings.push(format!(
-                                "{owner}: geometry #{index} (arc) malformed angles — skipped"
+                                "{owner}: geometry #{index} (arc) malformed angles — skipped, \
+                                 preserved verbatim"
                             ));
                             remap.push(None);
                             kinds.push(None);
+                            preserved.skipped_geometry.insert(slot, raw_block.to_string());
                         }
                     },
                     _ => {
                         report.warnings.push(format!(
-                            "{owner}: geometry #{index} ({kind}) off the XY plane or malformed — skipped"
+                            "{owner}: geometry #{index} ({kind}) off the XY plane or malformed — \
+                             skipped, preserved verbatim"
                         ));
                         remap.push(None);
                         kinds.push(None);
+                        preserved.skipped_geometry.insert(slot, raw_block.to_string());
                     }
                 }
             }
             other => {
                 report.warnings.push(format!(
-                    "{owner}: geometry #{index} type '{other}' not modeled — skipped"
+                    "{owner}: geometry #{index} type '{other}' not modeled — skipped, \
+                     preserved verbatim"
                 ));
                 remap.push(None);
                 kinds.push(None);
+                preserved.skipped_geometry.insert(slot, raw_block.to_string());
             }
         }
         index += 1;
     }
     fragment.push_str("</Sketch>");
-    (fragment, remap, kinds)
+    // The remap the writer inverts back to the file's GeoIds (see
+    // `sketch_geometrylist_xml`).
+    preserved.geo_remap = remap.clone();
+    (fragment, remap, kinds, preserved)
 }
 
 /// `key="value"` extraction on a raw XML block (first match, exact case).
@@ -1438,18 +2343,47 @@ fn attr_of_str<'a>(block: &'a str, key: &str) -> Option<&'a str> {
 /// is parsed — the geometry (and its GeoId remap) is known then. Only a
 /// `Sketcher::SketchObject` accepts constraints; anything else gets one
 /// honest warning.
+#[allow(clippy::too_many_arguments)] // the sketch's parse state converges here by design
 fn apply_freecad_constraints(
     object: &mut Box<dyn DocumentObject>,
     inner: Option<&str>,
     geo_remap: Option<&[Option<u32>]>,
     geo_kinds: Option<&[Option<&'static str>]>,
+    mut preserved: Option<SketchPreservation>,
+    constraint_count: usize,
+    constraint_extensions: Option<String>,
     owner: &str,
     report: &mut LoadReport,
 ) {
-    let Some(inner) = inner else { return };
+    let Some(inner) = inner else {
+        // No `Constraints` property arrived: a geometry property alone
+        // still built a preservation shadow (skipped geometry raws,
+        // ids, GeoExtensions) — attach it, so the geometry round-trips
+        // even when the sketch carries no constraints.
+        if let Some(sketch_object) = object.as_any_mut().downcast_mut::<SketchObject>() {
+            if sketch_object.preserved.is_none() {
+                sketch_object.preserved = preserved;
+            }
+        }
+        return;
+    };
+    // The constraint-side shadow fields (raw unmappable elements,
+    // the file's counts) — merged into whatever the geometry built.
+    let mut raws: BTreeMap<usize, String> = BTreeMap::new();
     let lines =
-        freecad_constraintlist_to_fragment_lines(inner, geo_remap, geo_kinds, owner, report);
+        freecad_constraintlist_to_fragment_lines(inner, geo_remap, geo_kinds, owner, report, &mut raws);
+    let shadow = preserved.get_or_insert_with(SketchPreservation::default);
+    shadow.constraint_count = constraint_count;
+    shadow.raw_constraints = raws;
+    shadow.constraint_extensions = constraint_extensions;
     if lines.is_empty() {
+        // Even with no mappable constraint, the shadow rides along (the
+        // geometry and the raw constraints still round-trip).
+        if let Some(sketch_object) = object.as_any_mut().downcast_mut::<SketchObject>() {
+            if sketch_object.preserved.is_none() {
+                sketch_object.preserved = preserved;
+            }
+        }
         return;
     }
     // The constraint lines are our fragment dialect; splicing them into
@@ -1467,7 +2401,15 @@ fn apply_freecad_constraints(
         };
         let combined = format!("{body}{lines}</Sketch>\n");
         match fc_sketcher::xml::from_xml(&combined) {
-            Ok(sk) => sketch_object.restore_sketch(sk),
+            Ok(sk) => {
+                sketch_object.restore_sketch(sk);
+                // Attached after the restore: `restore_sketch` is the
+                // loader's non-touching path and keeps the shadow (only
+                // `replace_sketch` drops it).
+                if sketch_object.preserved.is_none() {
+                    sketch_object.preserved = preserved;
+                }
+            }
             Err(err) => {
                 report.warnings.push(format!(
                     "{owner}: malformed Constraints property: {err} — constraints skipped"
@@ -1529,6 +2471,7 @@ fn freecad_constraintlist_to_fragment_lines(
     geo_kinds: Option<&[Option<&'static str>]>,
     owner: &str,
     report: &mut LoadReport,
+    raws: &mut BTreeMap<usize, String>,
 ) -> String {
     /// FreeCAD's own `ConstraintType` names, for honest warnings.
     fn freecad_kind(ty: i64) -> &'static str {
@@ -1567,25 +2510,39 @@ fn freecad_constraintlist_to_fragment_lines(
         let Some(len) = inner[start..].find("/>") else {
             break;
         };
-        let block = &inner[start..start + len + 2];
+        // The raw element with its original indentation (the preservation
+        // shadow re-emits the file's own bytes). The backtrack stops at
+        // the first non-space: an element sharing its line with a sibling
+        // keeps its own span (a newline search would swallow the sibling
+        // and every attribute lookup would hit the wrong element).
+        let mut line_start = start;
+        let bytes = inner.as_bytes();
+        while line_start > 0 && (bytes[line_start - 1] == b' ' || bytes[line_start - 1] == b'\t') {
+            line_start -= 1;
+        }
+        let block = &inner[line_start..start + len + 2];
         i = start + len + 2;
 
-        let skip = |report: &mut LoadReport, why: &str| {
+        // Skipped constraints keep their raw element at the original
+        // list position (the solver loses the equation; the file keeps
+        // its bytes).
+        let skip = |report: &mut LoadReport, raws: &mut BTreeMap<usize, String>, why: &str| {
             report.warnings.push(format!(
-                "{owner}: constraint #{index} ({}): {why} — skipped",
+                "{owner}: constraint #{index} ({}): {why} — skipped, preserved verbatim",
                 attr_of_str(block, "Type").unwrap_or("?")
             ));
+            raws.insert(index, block.to_string());
         };
 
         // Reference constraints (`IsDriving="0"`) are measurements, not
         // equations — this solver has no reference vocabulary.
         if attr_of_str(block, "IsDriving") == Some("0") {
-            skip(report, "reference (IsDriving=0)");
+            skip(report, raws, "reference (IsDriving=0)");
             index += 1;
             continue;
         }
         let Some(ty) = attr_of_str(block, "Type").and_then(|v| v.trim().parse::<i64>().ok()) else {
-            skip(report, "missing or non-numeric Type");
+            skip(report, raws, "missing or non-numeric Type");
             index += 1;
             continue;
         };
@@ -1612,9 +2569,11 @@ fn freecad_constraintlist_to_fragment_lines(
             17 => 15,
             other => {
                 report.warnings.push(format!(
-                    "{owner}: constraint #{index}: FreeCAD kind {} ({other}) has no counterpart in this kernel — skipped",
+                    "{owner}: constraint #{index}: FreeCAD kind {} ({other}) has no counterpart in this \
+                     kernel — skipped, preserved verbatim",
                     freecad_kind(other)
                 ));
+                raws.insert(index, block.to_string());
                 index += 1;
                 continue;
             }
@@ -1646,6 +2605,7 @@ fn freecad_constraintlist_to_fragment_lines(
         if frag_ty == 13 && !(first_pos == 0 && second_pos == 0 && third < 0) {
             skip(
                 report,
+                raws,
                 "Tangent in a point form (tangent-via-point / endpoint-to-endpoint) or with a third reference — only the simple edge form maps",
             );
             index += 1;
@@ -1654,7 +2614,7 @@ fn freecad_constraintlist_to_fragment_lines(
         // Symmetric always carries its third element reference in
         // FreeCAD; without it the constraint is malformed.
         if frag_ty == 14 && third < 0 {
-            skip(report, "Symmetric without its third element reference");
+            skip(report, raws, "Symmetric without its third element reference");
             index += 1;
             continue;
         }
@@ -1679,6 +2639,7 @@ fn freecad_constraintlist_to_fragment_lines(
         if !form_ok {
             skip(
                 report,
+                raws,
                 "a form this kernel does not model (point slots on an edge-kind, or vice versa)",
             );
             index += 1;
@@ -1694,7 +2655,7 @@ fn freecad_constraintlist_to_fragment_lines(
                 // About a line: Third must be a line segment.
                 if let Some(k) = third_kind {
                     if k != "line" {
-                        skip(report, "Symmetric about something that is not a line");
+                        skip(report, raws, "Symmetric about something that is not a line");
                         index += 1;
                         continue;
                     }
@@ -1713,6 +2674,7 @@ fn freecad_constraintlist_to_fragment_lines(
                     if !slot_ok {
                         skip(
                             report,
+                            raws,
                             "Symmetric about a point slot that geometry does not carry",
                         );
                         index += 1;
@@ -1721,7 +2683,7 @@ fn freecad_constraintlist_to_fragment_lines(
                 }
                 symmetric_about_point = true;
             } else {
-                skip(report, "Symmetric with an out-of-range ThirdPos");
+                skip(report, raws, "Symmetric with an out-of-range ThirdPos");
                 index += 1;
                 continue;
             }
@@ -1729,7 +2691,7 @@ fn freecad_constraintlist_to_fragment_lines(
             // For every other kind a third reference means a form we do
             // not carry (e.g. angle-via-point) — only FreeCAD's GeoUndef
             // (-2000) is expected.
-            skip(report, "carries a third element reference");
+            skip(report, raws, "carries a third element reference");
             index += 1;
             continue;
         }
@@ -1749,6 +2711,7 @@ fn freecad_constraintlist_to_fragment_lines(
         let Some(first) = first.filter(|v| *v >= 0).and_then(map_geo) else {
             skip(
                 report,
+                raws,
                 "references geometry that is an axis, root point, external, or was skipped",
             );
             index += 1;
@@ -1758,6 +2721,7 @@ fn freecad_constraintlist_to_fragment_lines(
             let Some(second) = second.filter(|v| *v >= 0).and_then(map_geo) else {
                 skip(
                     report,
+                    raws,
                     "references geometry that is an axis, root point, external, or was skipped",
                 );
                 index += 1;
@@ -1775,6 +2739,7 @@ fn freecad_constraintlist_to_fragment_lines(
                 None => {
                     skip(
                         report,
+                        raws,
                         "references geometry that is an axis, root point, external, or was skipped",
                     );
                     index += 1;
@@ -1788,7 +2753,7 @@ fn freecad_constraintlist_to_fragment_lines(
         // Valued kinds require their datum.
         let valued = matches!(frag_ty, 5..=9 | 11);
         let Some(value) = (if valued { value } else { Some(0.0) }) else {
-            skip(report, "missing Value for a datum constraint");
+            skip(report, raws, "missing Value for a datum constraint");
             index += 1;
             continue;
         };
@@ -1962,9 +2927,13 @@ fn parse_property_value(
                 // collector only sees names+attributes one level down, so
                 // the raw XML is captured and translated instead.
                 if element_name == b"GeometryList" && prop == "Geometry" {
+                    let count = attrs_of(&e)
+                        .get("count")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
                     let inner = raw_inner_xml(xml, reader, buf, b"GeometryList")?;
-                    let (fragment, geo_remap, geo_kinds) =
-                        freecad_geometrylist_to_fragment(&inner, owner, report);
+                    let (fragment, geo_remap, geo_kinds, preserved) =
+                        freecad_geometrylist_to_fragment(&inner, count, owner, report);
                     return finish_property(
                         reader,
                         buf,
@@ -1972,6 +2941,7 @@ fn parse_property_value(
                             fragment,
                             geo_remap,
                             geo_kinds,
+                            preserved,
                         }),
                     );
                 }
@@ -1979,17 +2949,61 @@ fn parse_property_value(
                 // (`Sketcher::PropertyConstraintList`, on
                 // `Sketcher::SketchObject`): the raw payload is held —
                 // constraint references are resolved after the object's
-                // geometry is known, whatever the property order.
+                // geometry is known, whatever the property order. The
+                // `count` attribute and any trailing raw content after
+                // `</ConstraintList>` (e.g. a `<ConstraintExtensions>`
+                // block, inside the property element) ride along.
                 if element_name == b"ConstraintList" {
+                    let count = attrs_of(&e)
+                        .get("count")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
                     let inner = raw_inner_xml(xml, reader, buf, b"ConstraintList")?;
-                    return finish_property(reader, buf, Some(PropValue::SketchConstraints(inner)));
+                    // Trailing siblings inside the `<Property>` element
+                    // (between `</ConstraintList>` and `</Property>`):
+                    // captured raw, one per element.
+                    let mut trailing: Option<String> = None;
+                    loop {
+                        match next_event(reader, buf)? {
+                            Event::End(end) if end.name().as_ref() == b"Property" => break,
+                            Event::Start(_) => {
+                                let after_start = reader.buffer_position() as usize;
+                                let raw = raw_element_and_skip(xml, reader, buf, after_start)?;
+                                trailing
+                                    .get_or_insert_with(String::new)
+                                    .push_str(&format!("{raw}\n"));
+                            }
+                            Event::Empty(_) => {
+                                let pos = reader.buffer_position() as usize;
+                                if let Some(start) = tag_start(xml, pos) {
+                                    let raw =
+                                        String::from_utf8_lossy(&xml[start..pos]).into_owned();
+                                    trailing
+                                        .get_or_insert_with(String::new)
+                                        .push_str(&format!("{raw}\n"));
+                                }
+                            }
+                            Event::Eof => {
+                                return Err(FcstdError::Xml(
+                                    "unterminated <Property> element".to_string(),
+                                ));
+                            }
+                            _ => continue,
+                        }
+                    }
+                    return Ok(Some(PropValue::SketchConstraints {
+                        inner,
+                        count,
+                        trailing,
+                    }));
                 }
                 if element_name == b"GeometryList" {
                     // `ExternalGeo` (the sketch's datum axes): the generic
                     // path would warn per-element; one honest note.
                     let _ = raw_inner_xml(xml, reader, buf, b"GeometryList")?;
                     report.warnings.push(format!(
-                        "{owner}: property '{prop}': external geometry not modeled — skipped"
+                        "{owner}: property '{prop}': external geometry not modeled — skipped, \
+                         preserved verbatim for round-trip"
                     ));
                     report.skipped_properties.push(format!("{owner}.{prop}"));
                     return finish_property(reader, buf, None);
@@ -2085,13 +3099,28 @@ fn parse_value_element(
     macro_rules! skip_warn {
         ($($arg:tt)*) => {{
             report.skipped_properties.push(format!("{owner}.{prop}"));
-            report.warnings.push(format!($($arg)*));
+            // Every skip here keeps the raw element verbatim (the caller
+            // preserves it): the warning names the modeling gap AND the
+            // fact that no data was lost.
+            report.warnings.push(format!(
+                "{}, preserved verbatim for round-trip",
+                format!($($arg)*)
+            ));
             return Ok(None);
         }};
     }
 
     let element = String::from_utf8_lossy(e.name().as_ref()).into_owned();
     let map = attrs_of(e);
+    // Enumerations carry their value AND their legal-values list
+    // (`CustomEnum` + `<CustomEnumList>`): modeling the value as an
+    // Integer would silently drop the list. The raw element
+    // round-trips verbatim instead — an honest modeling gap, not a loss.
+    if prop_type == "App::PropertyEnumeration" {
+        skip_warn!(
+            "{owner}: property '{prop}': enumeration (value + custom list) not modeled — skipped"
+        );
+    }
     match element.as_str() {
         "Bool" => match parse_bool(map.get("value").map_or("", String::as_str)) {
             Some(v) => Ok(Some(PropValue::Value(Property::Bool(v)))),
@@ -2434,6 +3463,23 @@ fn parse_placement(map: &BTreeMap<String, String>) -> Option<Placement> {
 }
 
 /// Re-normalize a quaternion read from a file (FreeCAD normalizes on
+/// restore; matching that here keeps our canonical form stable).
+/// The `(axis, angle-radians)` view FreeCAD 1.0 serializes as A/Ox/Oy/Oz:
+/// identity canonicalizes to `((0,0,1), 0)`, exactly FreeCAD's own
+/// writer's choice (verified against r39109's serialization).
+fn placement_axis_angle(rotation: &Rotation) -> (Vector3, f64) {
+    let len = (rotation.x * rotation.x + rotation.y * rotation.y + rotation.z * rotation.z).sqrt();
+    if len < 1e-12 {
+        return (Vector3::Z, 0.0);
+    }
+    let angle = 2.0 * len.atan2(rotation.w);
+    (
+        Vector3::new(rotation.x / len, rotation.y / len, rotation.z / len),
+        angle,
+    )
+}
+
+/// Re-normalize a quaternion read from a file (FreeCAD normalizes on
 /// restore; near-unit inputs are unchanged).
 fn normalized_rotation(r: Rotation) -> Rotation {
     let len = (r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w).sqrt();
@@ -2449,59 +3495,77 @@ fn normalized_rotation(r: Rotation) -> Rotation {
     }
 }
 
-/// Resolve a `<Part>` reference into a shape: read the side file from the
-/// zip (or the inline payload), probe its format and parse ours.
+/// The preserved form of a shape payload: the zip entry name (empty for
+/// inline payloads), the raw bytes, and the entry's original storage
+/// form (`true` = stored).
+type PreservedPayload = (String, Vec<u8>, bool);
+
+/// Load a shape payload. Returns the parsed shape (`None` when the
+/// file's geometry could not be restored) and, when the payload's bytes
+/// are worth keeping, the raw preservation triple (zip entry name —
+/// empty for inline payloads — bytes, and the entry's storage form):
+/// OCCT BRep, unknown formats and malformed FCBREP payloads all ride
+/// back out of a re-save verbatim under their original entry names.
+/// `consumed` records archive entries read (the load's final sweep
+/// preserves every unclaimed entry).
 fn load_shape_payload(
     zip: &mut zip::ZipArchive<std::fs::File>,
     shape_ref: &ShapeRef,
     owner: &str,
     report: &mut LoadReport,
-) -> Result<Option<TopoShape>, FcstdError> {
-    let bytes: Vec<u8> = if let Some(file) = &shape_ref.file {
+    consumed: &mut BTreeSet<String>,
+) -> Result<(Option<TopoShape>, Option<PreservedPayload>), FcstdError> {
+    let bytes: (Vec<u8>, Option<(String, bool)>) = if let Some(file) = &shape_ref.file {
         match zip.by_name(file) {
             Ok(mut entry) => {
+                let stored = entry.compression() == zip::CompressionMethod::Stored;
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
-                bytes
+                consumed.insert(file.clone());
+                (bytes, Some((file.clone(), stored)))
             }
             Err(zip::result::ZipError::FileNotFound) => {
                 report.warnings.push(format!(
                     "{owner}: shape file '{file}' missing from archive — geometry skipped (parameters kept)"
                 ));
-                return Ok(None);
+                return Ok((None, None));
             }
             Err(e) => return Err(zip_err(e)),
         }
     } else if !shape_ref.inline.is_empty() {
-        shape_ref.inline.clone()
+        (shape_ref.inline.clone(), Some((String::new(), false)))
     } else {
         // An empty <Part/> is FreeCAD's marker for "no computed shape".
         // Returning None leaves the object Touched (uniform with the other
         // no-geometry paths), so recompute can regenerate it.
-        return Ok(None);
+        return Ok((None, None));
     };
+    let (bytes, provenance) = bytes;
 
     match brep::probe_format(&bytes) {
         BrpFormat::FcBrep => match brep::read_shape_bytes(&bytes) {
-            Ok(shape) => Ok(Some(shape)),
+            Ok(shape) => Ok((Some(shape), None)),
             Err(e) => {
                 report.warnings.push(format!(
-                    "{owner}: malformed FCBREP payload: {e} — geometry skipped (parameters kept)"
+                    "{owner}: malformed FCBREP payload: {e} — geometry skipped (parameters kept), \
+                     payload preserved verbatim for round-trip"
                 ));
-                Ok(None)
+                Ok((None, provenance.map(|(entry, stored)| (entry, bytes, stored))))
             }
         },
         BrpFormat::OcctBrep => {
             report.warnings.push(format!(
-                "{owner}: OCCT BRep shape not supported — geometry skipped (parameters kept)"
+                "{owner}: OCCT BRep shape not modeled — geometry skipped (parameters kept), \
+                 payload preserved verbatim for round-trip"
             ));
-            Ok(None)
+            Ok((None, provenance.map(|(entry, stored)| (entry, bytes, stored))))
         }
         BrpFormat::Unknown => {
             report.warnings.push(format!(
-                "{owner}: unknown shape payload format — geometry skipped (parameters kept)"
+                "{owner}: unknown shape payload format — geometry skipped (parameters kept), \
+                 payload preserved verbatim for round-trip"
             ));
-            Ok(None)
+            Ok((None, provenance.map(|(entry, stored)| (entry, bytes, stored))))
         }
     }
 }
@@ -2672,6 +3736,17 @@ impl DocumentObject for LoadContainer {
     }
     fn expressions_mut(&mut self) -> Option<&mut BTreeMap<String, String>> {
         Some(&mut self.expressions)
+    }
+    // The preservation bag rides in the container, exactly like the
+    // macro-built features: a parameter container is the one object
+    // family whose OCCT shape payloads (`Part::Feature` imports) and
+    // unmodeled properties MUST round-trip verbatim — they are the
+    // object's only data.
+    fn preservation(&self) -> &fc_app::ObjectPreservation {
+        &self.container.preserved
+    }
+    fn preservation_mut(&mut self) -> Option<&mut fc_app::ObjectPreservation> {
+        Some(&mut self.container.preserved)
     }
     fn execute(&mut self, _doc: &Document) -> Result<(), String> {
         // Parameter containers have nothing to execute.
@@ -2896,8 +3971,9 @@ mod sketch_persistence_tests {
         assert!(geometry_start < properties_end, "{xml}");
         // …and the legacy `<Sketch>` object-data fragment is gone.
         assert!(!xml.contains("<Sketch>\n"), "{xml}");
-        // The property count accounts for both.
-        assert!(xml.contains("<Properties Count=\"4\">"), "{xml}");
+        // The property count accounts for both (plus the transient
+        // count FreeCAD's header always carries).
+        assert!(xml.contains("<Properties Count=\"4\" TransientCount=\"0\">"), "{xml}");
 
         std::fs::remove_file(&path).ok();
     }

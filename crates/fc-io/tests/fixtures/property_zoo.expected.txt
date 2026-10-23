@@ -6,7 +6,6 @@ Part::Box Zoo Touched
   ALength = 12.5
   AMatrix = 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
   AnAngle = 45
-  AnEnum = ThroughAll
   AnIntList = 1 2 3
   AStringList = alpha beta gamma
   AStringListEntries = one two three

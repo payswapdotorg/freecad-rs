@@ -30,6 +30,11 @@ pub struct Document {
     creator: String,
     /// RFC 3339 UTC creation timestamp.
     created: String,
+    /// Round-trip preservation bag (see [`crate::preservation`]): raw
+    /// file data the model does not capture but the writer re-emits
+    /// verbatim. Fills only on `.FCStd` load; API-created documents
+    /// start empty.
+    preservation: crate::preservation::DocumentPreservation,
     objects: BTreeMap<ObjectId, Box<dyn DocumentObject>>,
     /// Creation order for stable listings.
     order: Vec<ObjectId>,
@@ -58,6 +63,7 @@ impl Document {
             label: label.into(),
             creator: String::new(),
             created: rfc3339_now(),
+            preservation: crate::preservation::DocumentPreservation::default(),
             objects: BTreeMap::new(),
             order: Vec::new(),
             index: BTreeMap::new(),
@@ -100,6 +106,17 @@ impl Document {
     /// restores the persisted value).
     pub fn set_created(&mut self, created: String) {
         self.created = created;
+    }
+
+    /// The document's round-trip preservation bag (see
+    /// [`crate::preservation`]): loader-set, writer-consumed raw data.
+    pub fn preservation(&self) -> &crate::preservation::DocumentPreservation {
+        &self.preservation
+    }
+
+    /// Mutable access to the preservation bag (loader use).
+    pub fn preservation_mut(&mut self) -> &mut crate::preservation::DocumentPreservation {
+        &mut self.preservation
     }
 
     /// Insert an object. The document assigns the id, keeps the object's

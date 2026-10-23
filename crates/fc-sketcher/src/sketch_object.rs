@@ -41,6 +41,16 @@
 //! re-solve on open); the solve info itself is re-derived by the next
 //! recompute that touches the sketch.
 //!
+//! # Round-trip preservation
+//!
+//! A sketch loaded from a FreeCAD-native file keeps a
+//! [`SketchPreservation`] shadow (see [`SketchObject::preserved`]): the
+//! raw elements the solver vocabulary cannot express (construction
+//! geometry, unmodeled curve kinds, SnellsLaw-style constraints,
+//! `<GeoExtensions>`), re-emitted verbatim on save with the GeoId remap
+//! inverted. Replacing the content ([`SketchObject::replace_sketch`])
+//! drops the shadow — new content has no file past.
+//!
 //! # v1 scope, honestly stated
 //!
 //! - The `Placement` property is registered and persisted exactly like the
@@ -53,6 +63,7 @@
 use fc_app::{impl_document_object, Document, Property, PropertyContainer};
 use fc_base::Placement;
 
+use crate::preservation::SketchPreservation;
 use crate::Sketch;
 
 /// The outcome of the last successful solve (FreeCAD's
@@ -83,6 +94,12 @@ pub struct SketchObject {
     /// successful execute, and cleared again whenever a solve fails or
     /// the sketch content is replaced.
     pub solved: Option<SolveInfo>,
+    /// Round-trip preservation (loader-set, writer-consumed): the raw
+    /// FreeCAD elements the solver vocabulary does not express, kept
+    /// for verbatim re-emission — see [`crate::preservation`]. `None`
+    /// for fresh and for replaced content; never consulted by the
+    /// solver.
+    pub preserved: Option<SketchPreservation>,
 }
 
 impl SketchObject {
@@ -96,6 +113,7 @@ impl SketchObject {
             container,
             sketch: Sketch::new(),
             solved: None,
+            preserved: None,
         }
     }
 
@@ -110,11 +128,15 @@ impl SketchObject {
     /// Swap in new sketch content. The previous solve (if any) described
     /// the *old* content, so it is dropped, and the object is touched —
     /// the next recompute re-solves the new geometry (FreeCAD's
-    /// "editing a sketch touches it" semantics). There is deliberately no
-    /// way to swap content without the touch.
+    /// "editing a sketch touches it" semantics). The round-trip
+    /// preservation shadow is dropped with it: it described the file
+    /// the old content came from, and re-emitting it alongside new
+    /// content would attribute foreign elements to this sketch. There
+    /// is deliberately no way to swap content without the touch.
     pub fn replace_sketch(&mut self, sketch: Sketch) {
         self.sketch = sketch;
         self.solved = None;
+        self.preserved = None;
         // PropertyContainer::touch: the whole point of this method —
         // content changed, so the object must re-solve.
         self.container.touch();
@@ -126,9 +148,12 @@ impl SketchObject {
     /// solved keeps `Valid`, exactly like every other object kind and
     /// like FreeCAD, which stores solved geometry); the solve *info* is
     /// still dropped (it is a recompute product, not persisted data) and
-    /// re-derived by the next recompute. Only the `.FCStd` loader calls
-    /// this; everything user-facing goes through [`Self::replace_sketch`]
-    /// and its touch.
+    /// re-derived by the next recompute. The preservation shadow is
+    /// *kept*, not cleared: the loader restores the content and the
+    /// shadow in one pass (the `Geometry` property first, then the
+    /// `Constraints` splice — both through this method). Only the
+    /// `.FCStd` loader calls this; everything user-facing goes through
+    /// [`Self::replace_sketch`] and its touch.
     pub fn restore_sketch(&mut self, sketch: Sketch) {
         self.sketch = sketch;
         self.solved = None;

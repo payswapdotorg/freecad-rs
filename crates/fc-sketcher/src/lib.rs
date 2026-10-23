@@ -25,6 +25,8 @@
 //! - [`sketch_object`] — the document-object wrapper
 //!   ([`SketchObject`], mirroring FreeCAD `Sketcher::SketchObject`;
 //!   depends on `fc-app`, just like Mod/Sketcher depends on App)
+//! - [`preservation`] — the raw round-trip shadow of a loaded sketch
+//!   ([`SketchPreservation`])
 //!
 //! # v1 scope, honestly stated
 //!
@@ -68,12 +70,14 @@
 
 pub mod constraint;
 pub mod geometry;
+pub mod preservation;
 pub mod sketch_object;
 pub mod solver;
 pub mod xml;
 
 pub use constraint::{Constraint, ConstraintId, PointPos};
 pub use geometry::{GeoId, Geometry, Point, PointId, Sketch};
+pub use preservation::SketchPreservation;
 pub use sketch_object::{SketchObject, SolveInfo};
 pub use solver::SolveResult;
 

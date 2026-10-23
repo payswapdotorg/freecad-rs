@@ -373,7 +373,10 @@ fn load_report_is_sensible_for_imperfect_archives() {
     cleanup(&path);
 
     assert_eq!(report.objects, 2, "the two Part::Box objects load");
-    assert_eq!(report.skipped, 1, "the unknown type is skipped");
+    // Unknown types are no longer dropped: the object loads as an opaque
+    // ForeignObject (raw data preserved verbatim) and is counted there.
+    assert_eq!(report.skipped, 0, "nothing is dropped outright anymore");
+    assert_eq!(report.foreign, 1, "the unknown type is preserved as foreign");
     assert!(
         report
             .warnings
@@ -386,7 +389,7 @@ fn load_report_is_sensible_for_imperfect_archives() {
         report
             .warnings
             .iter()
-            .any(|w| w.contains("OCCT BRep shape not supported")),
+            .any(|w| w.contains("OCCT BRep shape not modeled")),
         "warnings: {:?}",
         report.warnings
     );
@@ -399,11 +402,11 @@ fn load_report_is_sensible_for_imperfect_archives() {
         report.warnings
     );
 
-    // The skipped object is really absent; the surviving ones are
-    // geometry-less but Touched, so a recompute regenerates them from
-    // their (default) parameters.
-    assert_eq!(doc.object_count(), 2);
-    assert!(doc.get_by_name("Mystery").is_none());
+    // The foreign object is present under its real name and type (raw
+    // data preserved); the surviving ones are geometry-less but Touched,
+    // so a recompute regenerates them from their (default) parameters.
+    assert_eq!(doc.object_count(), 3);
+    assert!(doc.get_by_name("Mystery").is_some());
     for name in ["OcctBox", "LostBox"] {
         let obj = doc.get_by_name(name).expect("box exists");
         assert!(
@@ -532,13 +535,14 @@ fn empty_document_round_trip() {
 }
 
 // Reference the LoadReport type once more so its full shape (warnings,
-// objects, skipped, skipped_properties, quantity_properties) is part of
-// this file's compiled contract.
+// objects, skipped, foreign, skipped_properties, quantity_properties) is
+// part of this file's compiled contract.
 #[test]
 fn load_report_has_the_documented_fields() {
     let report = LoadReport::default();
     assert_eq!(report.objects, 0);
     assert_eq!(report.skipped, 0);
+    assert_eq!(report.foreign, 0);
     assert!(report.warnings.is_empty());
     assert!(report.skipped_properties.is_empty());
     assert!(report.quantity_properties.is_empty());
@@ -546,11 +550,13 @@ fn load_report_has_the_documented_fields() {
         warnings: vec!["w".to_string()],
         objects: 3,
         skipped: 1,
+        foreign: 2,
         skipped_properties: vec!["Obj.Prop".to_string()],
         quantity_properties: vec!["Obj.Angle (unit deg)".to_string()],
     };
     assert_eq!(report.objects, 3);
     assert_eq!(report.skipped, 1);
+    assert_eq!(report.foreign, 2);
     assert_eq!(report.warnings.len(), 1);
     assert_eq!(report.skipped_properties, vec!["Obj.Prop".to_string()]);
     assert_eq!(

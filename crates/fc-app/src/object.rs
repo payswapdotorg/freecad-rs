@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use fc_base::{Placement, Vector3};
 
 use crate::document::Document;
+use crate::preservation::ObjectPreservation;
 use crate::property::Property;
 
 /// Stable object identifier inside a document (FreeCAD `getID`).
@@ -47,6 +48,10 @@ pub struct PropertyContainer {
     /// distilled): property name → expression text. Evaluated at
     /// recompute time, dependencies first.
     pub expressions: BTreeMap<String, String>,
+    /// Round-trip preservation bag (loader-set, writer-consumed):
+    /// raw data the model does not capture but re-emits verbatim.
+    /// Empty for every object the API creates — it fills only on load.
+    pub preserved: ObjectPreservation,
     status: ObjectStatus,
 }
 
@@ -56,6 +61,7 @@ impl PropertyContainer {
             name: name.into(),
             properties: BTreeMap::new(),
             expressions: BTreeMap::new(),
+            preserved: ObjectPreservation::default(),
             status: ObjectStatus::Touched,
         }
     }
@@ -135,8 +141,11 @@ impl PropertyContainer {
 /// linked objects can be inspected; the executing object is temporarily
 /// taken out of the map, so aliasing is impossible.
 pub trait DocumentObject: Send {
-    /// C++ class name equivalent, e.g. `Part::Box`.
-    fn type_name(&self) -> &'static str;
+    /// C++ class name equivalent, e.g. `Part::Box`. The lifetime is
+    /// tied to the object: [`crate::ForeignObject`] answers with its
+    /// stored source TypeId (a runtime string, exactly like FreeCAD's
+    /// `getTypeId`), not a compile-time literal.
+    fn type_name(&self) -> &str;
 
     /// Unique internal name (FreeCAD `Name`): ASCII, assigned at creation
     /// by the document, never renamed.
@@ -159,6 +168,20 @@ pub trait DocumentObject: Send {
     }
 
     fn expressions_mut(&mut self) -> Option<&mut BTreeMap<String, String>> {
+        None
+    }
+
+    /// The object's round-trip preservation bag (see [`crate::preservation`]).
+    /// Objects without container-backed storage have nothing preserved.
+    fn preservation(&self) -> &ObjectPreservation {
+        static EMPTY: std::sync::OnceLock<ObjectPreservation> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(ObjectPreservation::default)
+    }
+
+    /// Mutable access to the preservation bag; `None` for objects
+    /// without container-backed storage (nothing can be preserved on
+    /// them, so the loader never needs it).
+    fn preservation_mut(&mut self) -> Option<&mut ObjectPreservation> {
         None
     }
 
@@ -206,6 +229,12 @@ macro_rules! impl_document_object {
                 &mut self,
             ) -> Option<&mut std::collections::BTreeMap<String, String>> {
                 Some(&mut self.container.expressions)
+            }
+            fn preservation(&self) -> &$crate::preservation::ObjectPreservation {
+                &self.container.preserved
+            }
+            fn preservation_mut(&mut self) -> Option<&mut $crate::preservation::ObjectPreservation> {
+                Some(&mut self.container.preserved)
             }
             fn execute(&mut self, doc: &$crate::Document) -> Result<(), String> {
                 self.execute_impl(doc)

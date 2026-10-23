@@ -403,6 +403,16 @@ impl DocumentObject for BooleanFeature {
     fn expressions_mut(&mut self) -> Option<&mut std::collections::BTreeMap<String, String>> {
         Some(&mut self.container.expressions)
     }
+    // Same container-backed preservation as the macro-built features:
+    // a boolean feature loaded from a real FreeCAD file carries its
+    // last-good OCCT shape (the errored-feature case) and unmodeled
+    // properties that must round-trip verbatim.
+    fn preservation(&self) -> &fc_app::ObjectPreservation {
+        &self.container.preserved
+    }
+    fn preservation_mut(&mut self) -> Option<&mut fc_app::ObjectPreservation> {
+        Some(&mut self.container.preserved)
+    }
     fn execute(&mut self, doc: &Document) -> Result<(), String> {
         self.execute_impl(doc)
     }
@@ -635,6 +645,15 @@ impl DocumentObject for MeshFeature {
     }
     fn expressions_mut(&mut self) -> Option<&mut std::collections::BTreeMap<String, String>> {
         Some(&mut self.container.expressions)
+    }
+    // The preservation bag rides in the container: an imported
+    // `Part::Feature`'s OCCT shape payload and its unmodeled properties
+    // are the object's only data — they must round-trip verbatim.
+    fn preservation(&self) -> &fc_app::ObjectPreservation {
+        &self.container.preserved
+    }
+    fn preservation_mut(&mut self) -> Option<&mut fc_app::ObjectPreservation> {
+        Some(&mut self.container.preserved)
     }
     fn execute(&mut self, _doc: &Document) -> Result<(), String> {
         // Imported geometry is data, not a derivation: validate only.
