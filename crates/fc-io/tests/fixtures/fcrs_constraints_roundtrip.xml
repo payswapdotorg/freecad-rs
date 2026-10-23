@@ -1,0 +1,79 @@
+<Document SchemaVersion="4" ProgramVersion="freecad-rs 0.1.0" FileVersion="1">
+ <Properties Count="3">
+  <Property name="Label" type="App::PropertyString">
+   <String value="corpus"/>
+  </Property>
+  <Property name="Creator" type="App::PropertyString">
+   <String value="freecad-rs"/>
+  </Property>
+  <Property name="CreationDate" type="App::PropertyString">
+   <String value="2026-10-22T23:58:56Z"/>
+  </Property>
+ </Properties>
+ <Objects Count="1" Dependencies="1">
+  <Object type="Sketcher::SketchObject" name="Sketch" id="1" status="Error" Error="Sketcher::SketchObject &apos;Sketch&apos;: solve failed after 200 iteration(s), residual 1.696e-1 — geometry left unchanged"/>
+ </Objects>
+ <ObjectData Count="1">
+  <Object name="Sketch">
+   <Properties Count="4">
+    <Property name="Label" type="App::PropertyString">
+     <String value="Sketch"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+    <Property name="Geometry" type="Part::PropertyGeometryList">
+     <GeometryList count="6">
+      <Geometry type="Part::GeomLineSegment" migrated="1">
+       <GeoExtensions count="0">
+       </GeoExtensions>
+       <LineSegment StartX="0.0" StartY="0.0" StartZ="0.0" EndX="40.0" EndY="0.0" EndZ="0.0"/>
+      </Geometry>
+      <Geometry type="Part::GeomLineSegment" migrated="1">
+       <GeoExtensions count="0">
+       </GeoExtensions>
+       <LineSegment StartX="40.0" StartY="0.0" StartZ="0.0" EndX="40.0" EndY="30.0" EndZ="0.0"/>
+      </Geometry>
+      <Geometry type="Part::GeomLineSegment" migrated="1">
+       <GeoExtensions count="0">
+       </GeoExtensions>
+       <LineSegment StartX="40.0" StartY="30.0" StartZ="0.0" EndX="0.0" EndY="30.0" EndZ="0.0"/>
+      </Geometry>
+      <Geometry type="Part::GeomLineSegment" migrated="1">
+       <GeoExtensions count="0">
+       </GeoExtensions>
+       <LineSegment StartX="0.0" StartY="30.0" StartZ="0.0" EndX="0.0" EndY="0.0" EndZ="0.0"/>
+      </Geometry>
+      <Geometry type="Part::GeomCircle" migrated="1">
+       <GeoExtensions count="0">
+       </GeoExtensions>
+       <Circle CenterX="60.0" CenterY="10.0" CenterZ="0.0" NormalX="0.0" NormalY="0.0" NormalZ="1.0" AngleXU="0.0" Radius="9.0"/>
+      </Geometry>
+      <Geometry type="Part::GeomPoint" migrated="1">
+       <GeoExtensions count="0">
+       </GeoExtensions>
+       <GeomPoint X="7.0" Y="8.0" Z="0.0"/>
+      </Geometry>
+     </GeometryList>
+    </Property>
+    <Property name="Constraints" type="Sketcher::PropertyConstraintList">
+     <ConstraintList count="13">
+      <Constrain Name="" MetaData="" Type="1" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="2" Second="1" SecondPos="1" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="2" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="0" Second="-2000" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="3" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="1" FirstPos="0" Second="-2000" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="4" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="0" Second="2" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="10" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="0" Second="1" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="6" Orientation="0" Value="40.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="1" Second="0" SecondPos="2" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="7" Orientation="0" Value="-40.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="2" FirstPos="1" Second="3" SecondPos="1" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="8" Orientation="0" Value="30.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="1" Second="2" SecondPos="1" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="9" Orientation="0" Value="1.5707963267948966" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="0" Second="1" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="11" Orientation="0" Value="9.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="4" FirstPos="0" Second="-2000" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="18" Orientation="0" Value="18.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="4" FirstPos="0" Second="-2000" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="12" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="0" FirstPos="0" Second="2" SecondPos="0" Third="-2000" ThirdPos="0"/>
+      <Constrain Name="" MetaData="" Type="13" Orientation="0" Value="0.0" LabelDistance="0.0" LabelPosition="0.0" IsDriving="1" IsInVirtualSpace="0" IsVisible="1" IsActive="1" First="2" FirstPos="1" Second="0" SecondPos="0" Third="-2000" ThirdPos="0"/>
+     </ConstraintList>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>

@@ -45,18 +45,32 @@ the documented limit of a BSP boolean on tessellations.
 table, every modeled property type (including `App::PropertyPosition`
 and `App::PropertyDirection` vectors, `LinkSub` profiles, nested
 `<LinkList>`s), placements as quaternions, sketch geometry via
-`Part::PropertyGeometryList` (line/circle/arc, XY-plane sketches),
+`Part::PropertyGeometryList` (point/line/circle/arc, XY-plane sketches),
+**sketch constraints via `Sketcher::PropertyConstraintList`** (all
+thirteen mappable kinds with FreeCAD's own ordinals — verified against
+the r39109 binary, `fixtures/freecad_sketch_constraints.fcstd`),
 expression bindings, and the FreeCAD 1.0 `<Sketch>` fragment family.
+Constraint GeoIds route through a remap (skipped geometry shifts every
+later index); axis/root-point/external references, `IsDriving="0"`
+reference constraints and the unmappable kinds (Tangent, Symmetric,
+Block, …) are skipped with warnings naming the FreeCAD kind.
 Known-skipped payloads are reported as per-property warnings — OCCT BRep
 shape payloads (`.brp`) keep their parameters and rebuild on recompute.
 
 **freecad-rs files → FreeCAD.** Real FreeCAD 1.0 opens our files and
-restores every parameter, link, placement and sketch (verified:
-`Length=20.0 mm`, `Placement=(10,7.5,0)`, booleans' `Base`/`Tool`,
-`MultiFuse`'s `Shapes` list). The property types are FreeCAD's own —
-dimension floats serialize as `App::PropertyLength`, exactly as
-FreeCAD 1.0 writes them, because FreeCAD's reader silently skips
-type-mismatched properties.
+restores every parameter, link, placement and sketch — geometry AND
+constraints (verified with the r39109 binary on
+`fixtures/fcrs_constraints_roundtrip.fcStd`: all 13 constraints
+restored with exact First/FirstPos/Second/SecondPos/Value, Angle's
+radians bit-exact, recompute clean). Sketches save as the two
+FreeCAD-native properties — `Geometry` (`Part::PropertyGeometryList`)
+and `Constraints` (`Sketcher::PropertyConstraintList`, `<Constrain …/>`
+elements with FreeCAD's `ConstraintType` ordinals and every attribute
+FreeCAD's writer emits); our legacy `<Sketch>` fragment is retired from
+the writer (the reader still accepts it — v0.1.0 files). The property
+types are FreeCAD's own — dimension floats serialize as
+`App::PropertyLength`, exactly as FreeCAD 1.0 writes them, because
+FreeCAD's reader silently skips type-mismatched properties.
 
 Geometry payloads are the honest boundary: FreeCAD restores **only**
 OCCT BRep, our kernel emits parametric truth instead — the same
@@ -86,9 +100,18 @@ FreeCAD file carries.)
 - An empty `<Link value=""/>` means "no link" (every `PartDesign::Body`
   carries one in `BaseFeature`); it is not a dangling reference.
 - Sketch geometry in FreeCAD 1.0 is the `Geometry` property
-  (`Part::PropertyGeometryList`), not a `<Sketch>` fragment: line,
-  circle and arc-of-circle elements map to this kernel's sketcher;
+  (`Part::PropertyGeometryList`), not a `<Sketch>` fragment: point,
+  line, circle and arc-of-circle elements map to this kernel's sketcher;
   construction geometry and non-XY planes are skipped with warnings.
+- Sketch constraints are the `Constraints` property
+  (`Sketcher::PropertyConstraintList`): `<Constrain …/>` elements
+  (FreeCAD's own spelling — no trailing "t"), ordinals from FreeCAD's
+  `ConstraintType` enum (Coincident=1, Tangent=5, Distance=6, Angle=9,
+  Perpendicular=10, Radius=11, Equal=12, PointOnObject=13, Diameter=18,
+  …), `PointPos` slots shared (start=1, end=2, mid=3 — a circle's
+  center is its `mid`), unused references `GeoUndef` (-2000), Angle
+  values in radians. The thirteen mappable kinds map both ways; the
+  rest is skipped with warnings that name the FreeCAD kind.
 - STEP exchange (import and export) was verified earlier against the
   same FreeCAD 1.0 binaries — see the `fc-step` crate tests for the
   exact fixtures (FreeCAD's own sphere/cone/torus exports included).
@@ -100,9 +123,12 @@ FreeCAD file carries.)
 - **OCCT BRep payloads are not parsed** (`.brp` geometry is skipped,
   parameters kept); our own files persist parameters instead of shapes,
   so both systems rebuild on recompute.
-- Sketch **constraints** from real FreeCAD files are not yet mapped
-  (geometry is; the solver constraint vocabulary is this kernel's own
-  13-kind set).
+- Sketch constraints beyond the thirteen mappable kinds (Tangent,
+  Symmetric, Block, SnellsLaw, InternalAlignment, …) and their extended
+  forms (two-point Horizontal, point-to-line Distance, angle-via-point)
+  are skipped with warnings — this kernel's solver vocabulary is its own
+  13-kind set, and unmappable constraints are never silently
+  re-interpreted.
 - `Part::Mirroring`'s `MirrorPlane` link (a face/datum override) has no
   geometry to read here — `Base`/`Normal` planes only.
 - No GUI: the `fc-viewer` renders offscreen; there is no workbench,

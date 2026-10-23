@@ -20,7 +20,7 @@ placements, sketches) — lives in
 > FreeCAD code is used or included. License: MIT.
 
 **Verified baseline** — `main` @ the FC-14 mirrored-seam &
-tangency-sliver closures (2026-10-21): nine crates, **441 tests, 0 failed** (`cargo
+constraint-verified parity (2026-10-22): nine crates, **453 tests, 0 failed** (`cargo
 build` / `cargo test --workspace --locked`), `clippy --workspace
 --all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
 clean. PartDesign v1, curved-seam boolean robustness (now on mixed

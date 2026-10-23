@@ -13,6 +13,8 @@ use fc_part::features::{
 };
 use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
+use fc_sketcher::constraint::Constraint;
+use fc_sketcher::geometry::Geometry;
 use fc_sketcher::SketchObject;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -195,6 +197,18 @@ fn build_document_xml(
             ))
         })?;
         let props = obj.properties();
+        // Sketch content goes out as the FreeCAD-native property pair
+        // (`Geometry` + `Constraints`) — the exact forms a real FreeCAD
+        // writes and restores, so the whole sketch — geometry and
+        // constraints — survives the trip into the real program. Our
+        // old `<Sketch>` object-data fragment is retired from the
+        // writer; the reader still accepts it (files from v0.1.0).
+        let sketch_props = obj.as_any().downcast_ref::<SketchObject>().map(|so| {
+            (
+                sketch_geometrylist_xml(&so.sketch),
+                sketch_constraintlist_xml(&so.sketch),
+            )
+        });
         // Shape payloads go to exactly the objects FreeCAD's own files
         // give them: imported data (`Part::Feature` meshes) and the
         // **last-good geometry of an errored feature** (FreeCAD keeps
@@ -210,12 +224,26 @@ fn build_document_xml(
         } else {
             None
         };
-        let count = props.len() + usize::from(shape.is_some());
+        let count =
+            props.len() + usize::from(shape.is_some()) + usize::from(sketch_props.is_some()) * 2;
 
         xml.push_str(&format!("  <Object name=\"{}\">\n", escape_attr(&o.name)));
         xml.push_str(&format!("   <Properties Count=\"{}\">\n", count));
         for (key, value) in props {
             push_property(&mut xml, 4, key, value, &o.type_name);
+        }
+        // The sketch's own content: one `Part::PropertyGeometryList`
+        // and one `Sketcher::PropertyConstraintList`, exactly where
+        // FreeCAD's writer puts them (after the plain properties).
+        if let Some((geometry_xml, constraints_xml)) = sketch_props {
+            xml.push_str("    <Property name=\"Geometry\" type=\"Part::PropertyGeometryList\">\n");
+            xml.push_str(&geometry_xml);
+            xml.push_str("    </Property>\n");
+            xml.push_str(
+                "    <Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\">\n",
+            );
+            xml.push_str(&constraints_xml);
+            xml.push_str("    </Property>\n");
         }
         // Computed geometry goes last, as one referenced FCBREP side file.
         if let Some(shape) = shape {
@@ -228,18 +256,6 @@ fn build_document_xml(
             side_files.push((file, bytes));
         }
         xml.push_str("   </Properties>\n");
-        // Sketch content (`Sketcher::SketchObject`): geometry and
-        // constraints are object data, not properties — FreeCAD keeps them
-        // on the object itself, and so do we, as one `<Sketch>` fragment
-        // (the exact element `Sketch::to_xml()` produces) emitted as a
-        // child of `<Object>`, next to `<Properties>`. The fragment's own
-        // two-space child indent is preserved relative to the 3-space
-        // `<Object>` child base, so it nests consistently with the
-        // surrounding one-space-per-level writer style (see
-        // `push_indented_fragment`).
-        if let Some(fragment) = sketch_fragment(obj) {
-            push_indented_fragment(&mut xml, &fragment, 3);
-        }
         // Expression bindings (FreeCAD persists them as children of the
         // <Object> element, after the properties).
         for (path, expression) in obj.expressions() {
@@ -353,32 +369,167 @@ fn property_xml(value: &Property) -> (&'static str, String) {
     }
 }
 
-/// The `<Sketch>` fragment of a sketch object, if it is one (`None` for
-/// every other object type). Save-side counterpart of the load-side
-/// `store_sketch_fragment`.
-fn sketch_fragment(obj: &dyn DocumentObject) -> Option<String> {
-    obj.as_any()
-        .downcast_ref::<SketchObject>()
-        .map(|sketch_object| sketch_object.sketch.to_xml())
+/// A sketch's geometry as FreeCAD 1.0's `Part::PropertyGeometryList`
+/// value (`<GeometryList>`): one `<Geometry type="Part::Geom…"
+/// migrated="1">` block per element, each carrying its kind's own child
+/// element with the parameters — the byte shapes of
+/// `GeomPoint::Save`/`GeomLineSegment::Save`/`GeomCircle::Save`/
+/// `GeomArcOfCircle::Save` in the FreeCAD source. Everything is
+/// XY-plane (`Z="0"`, `Normal="0 0 1"`, `AngleXU="0"`), exactly the
+/// subset this kernel's 2D sketcher models.
+fn sketch_geometrylist_xml(sketch: &fc_sketcher::Sketch) -> String {
+    let mut xml = format!(
+        "     <GeometryList count=\"{}\">\n",
+        sketch.geometry().len()
+    );
+    for g in sketch.geometry() {
+        match *g {
+            Geometry::Point { x, y } => {
+                xml.push_str("      <Geometry type=\"Part::GeomPoint\" migrated=\"1\">\n");
+                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
+                xml.push_str(&format!(
+                    "       <GeomPoint X=\"{x:?}\" Y=\"{y:?}\" Z=\"0.0\"/>\n"
+                ));
+                xml.push_str("      </Geometry>\n");
+            }
+            Geometry::LineSegment { start, end } => {
+                xml.push_str("      <Geometry type=\"Part::GeomLineSegment\" migrated=\"1\">\n");
+                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
+                xml.push_str(&format!(
+                    "       <LineSegment StartX=\"{:?}\" StartY=\"{:?}\" StartZ=\"0.0\" \
+                     EndX=\"{:?}\" EndY=\"{:?}\" EndZ=\"0.0\"/>\n",
+                    start.x, start.y, end.x, end.y
+                ));
+                xml.push_str("      </Geometry>\n");
+            }
+            Geometry::Circle { center, radius } => {
+                xml.push_str("      <Geometry type=\"Part::GeomCircle\" migrated=\"1\">\n");
+                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
+                xml.push_str(&format!(
+                    "       <Circle CenterX=\"{:?}\" CenterY=\"{:?}\" CenterZ=\"0.0\" \
+                     NormalX=\"0.0\" NormalY=\"0.0\" NormalZ=\"1.0\" AngleXU=\"0.0\" \
+                     Radius=\"{radius:?}\"/>\n",
+                    center.x, center.y
+                ));
+                xml.push_str("      </Geometry>\n");
+            }
+            Geometry::ArcOfCircle {
+                center,
+                radius,
+                start_angle,
+                end_angle,
+            } => {
+                xml.push_str("      <Geometry type=\"Part::GeomArcOfCircle\" migrated=\"1\">\n");
+                xml.push_str("       <GeoExtensions count=\"0\">\n       </GeoExtensions>\n");
+                xml.push_str(&format!(
+                    "       <ArcOfCircle CenterX=\"{:?}\" CenterY=\"{:?}\" CenterZ=\"0.0\" \
+                     NormalX=\"0.0\" NormalY=\"0.0\" NormalZ=\"1.0\" AngleXU=\"0.0\" \
+                     Radius=\"{radius:?}\" StartAngle=\"{start_angle:?}\" \
+                     EndAngle=\"{end_angle:?}\"/>\n",
+                    center.x, center.y
+                ));
+                xml.push_str("      </Geometry>\n");
+            }
+        }
+    }
+    xml.push_str("     </GeometryList>\n");
+    xml
 }
 
-/// Append a `<Sketch>` fragment at `base_indent` spaces. The fragment's
-/// internal indentation is uniform (0 for the `<Sketch>`/`</Sketch>`
-/// lines, 2 for each child), so re-emitting every non-blank line at
-/// `base_indent + <its own leading spaces>` preserves the fragment's
-/// relative shape exactly — the sketch parser is whitespace-tolerant and
-/// the result nests cleanly inside `<Object>`.
-fn push_indented_fragment(xml: &mut String, fragment: &str, base_indent: usize) {
-    for line in fragment.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let relative = line.len() - trimmed.len();
-        xml.push_str(&" ".repeat(base_indent + relative));
-        xml.push_str(trimmed);
-        xml.push('\n');
+/// A sketch's constraints as FreeCAD 1.0's
+/// `Sketcher::PropertyConstraintList` value (`<ConstraintList>`): one
+/// `<Constrain …/>` element per constraint — the missing final "t" is
+/// FreeCAD's own spelling (`Constraint::Save` in the FreeCAD source) —
+/// carrying every attribute FreeCAD's writer emits, so FreeCAD's
+/// `Constraint::Restore` finds its required set (`Name`, `Type`,
+/// `Value`, the `First`/`Second`/`Third` triple) plus the presentation
+/// flags. `Type` uses FreeCAD's `ConstraintType` ordinals
+/// (Coincident=1 … Diameter=18), NOT our fragment dialect's. `Value`
+/// carries radians for `Angle` and millimetres for the datum kinds,
+/// matching FreeCAD's internal storage.
+fn sketch_constraintlist_xml(sketch: &fc_sketcher::Sketch) -> String {
+    let mut xml = format!(
+        "     <ConstraintList count=\"{}\">\n",
+        sketch.constraints().len()
+    );
+    for c in sketch.constraints() {
+        // FreeCAD's element references: a used slot is (GeoId, pos
+        // ordinal — shared numbering: start=1, end=2, mid=3), an unused
+        // one is GeoUndef (-2000) with pos 0.
+        let (ty, first, firstpos, second, secondpos, value) = match *c {
+            Constraint::Coincident { g1, pos1, g2, pos2 } => (
+                1,
+                g1.0 as i64,
+                pos1.ordinal(),
+                g2.0 as i64,
+                pos2.ordinal(),
+                None,
+            ),
+            Constraint::Horizontal { g } => (2, g.0 as i64, 0, -2000, 0, None),
+            Constraint::Vertical { g } => (3, g.0 as i64, 0, -2000, 0, None),
+            Constraint::Parallel { g1, g2 } => (4, g1.0 as i64, 0, g2.0 as i64, 0, None),
+            Constraint::Perpendicular { g1, g2 } => (10, g1.0 as i64, 0, g2.0 as i64, 0, None),
+            Constraint::Distance {
+                g1,
+                pos1,
+                g2,
+                pos2,
+                value,
+            } => (
+                6,
+                g1.0 as i64,
+                pos1.ordinal(),
+                g2.0 as i64,
+                pos2.ordinal(),
+                Some(value),
+            ),
+            Constraint::DistanceX {
+                g1,
+                pos1,
+                g2,
+                pos2,
+                value,
+            } => (
+                7,
+                g1.0 as i64,
+                pos1.ordinal(),
+                g2.0 as i64,
+                pos2.ordinal(),
+                Some(value),
+            ),
+            Constraint::DistanceY {
+                g1,
+                pos1,
+                g2,
+                pos2,
+                value,
+            } => (
+                8,
+                g1.0 as i64,
+                pos1.ordinal(),
+                g2.0 as i64,
+                pos2.ordinal(),
+                Some(value),
+            ),
+            Constraint::Radius { g, value } => (11, g.0 as i64, 0, -2000, 0, Some(value)),
+            Constraint::Diameter { g, value } => (18, g.0 as i64, 0, -2000, 0, Some(value)),
+            Constraint::Equal { g1, g2 } => (12, g1.0 as i64, 0, g2.0 as i64, 0, None),
+            Constraint::Angle { g1, g2, value } => (9, g1.0 as i64, 0, g2.0 as i64, 0, Some(value)),
+            Constraint::PointOnObject { g1, pos1, g2 } => {
+                (13, g1.0 as i64, pos1.ordinal(), g2.0 as i64, 0, None)
+            }
+        };
+        let value = value.unwrap_or(0.0);
+        xml.push_str(&format!(
+            "      <Constrain Name=\"\" MetaData=\"\" Type=\"{ty}\" Orientation=\"0\" \
+             Value=\"{value:?}\" LabelDistance=\"0.0\" LabelPosition=\"0.0\" \
+             IsDriving=\"1\" IsInVirtualSpace=\"0\" IsVisible=\"1\" IsActive=\"1\" \
+             First=\"{first}\" FirstPos=\"{firstpos}\" Second=\"{second}\" \
+             SecondPos=\"{secondpos}\" Third=\"-2000\" ThirdPos=\"0\"/>\n",
+        ));
     }
+    xml.push_str("     </ConstraintList>\n");
+    xml
 }
 
 /// Computed geometry of a part feature, if any: primitives carry their
@@ -513,9 +664,20 @@ enum PropValue {
     Shape(ShapeRef),
     /// A sketch translated from FreeCAD 1.0's `Geometry` property
     /// (`Part::PropertyGeometryList`) into our `<Sketch>` fragment
-    /// form — applied via `store_sketch_fragment`, like the writer's
-    /// own `<Sketch>` object data.
-    Sketch(String),
+    /// form — applied via `store_sketch_fragment`. `geo_remap` is the
+    /// geometry-index translation: entry `i` is the fragment's index
+    /// for the FreeCAD file's geometry `i`, or `None` when that
+    /// geometry was skipped (off-plane, construction, unmodeled
+    /// kind) — later `Constraints` references route through it.
+    Sketch {
+        fragment: String,
+        geo_remap: Vec<Option<u32>>,
+    },
+    /// The raw inner XML of FreeCAD 1.0's `Constraints` property
+    /// (`Sketcher::PropertyConstraintList`, `<ConstraintList …>`), held
+    /// until the object is fully parsed — the geometry (and its remap)
+    /// is known then, whatever the file's property order.
+    SketchConstraints(String),
 }
 
 /// The pull-parser state we need between helper calls.
@@ -913,6 +1075,14 @@ fn parse_object_properties(
     zip: &mut zip::ZipArchive<std::fs::File>,
     report: &mut LoadReport,
 ) -> Result<(), FcstdError> {
+    // FreeCAD 1.0's `Constraints` payload, held until the object is
+    // fully parsed (the geometry — and its GeoId remap — may arrive
+    // after the constraints, whatever the file's property order).
+    let mut constraint_inner: Option<String> = None;
+    // The geometry-index remap from a `Geometry` property; `None`
+    // while no geometry property has been seen (the legacy `<Sketch>`
+    // fragment path needs no remap — its indices are already ours).
+    let mut geo_remap: Option<Vec<Option<u32>>> = None;
     loop {
         match next_event(reader, buf)? {
             Event::Start(e) if e.name().as_ref() == b"Property" => {
@@ -923,10 +1093,21 @@ fn parse_object_properties(
                     (false, Some(PropValue::Value(v))) => {
                         object.properties_mut().insert(name, v);
                     }
-                    (false, Some(PropValue::Sketch(fragment))) => {
+                    (
+                        false,
+                        Some(PropValue::Sketch {
+                            fragment,
+                            geo_remap: remap,
+                        }),
+                    ) => {
                         // FreeCAD 1.0's `Geometry` property, already
-                        // translated into our `<Sketch>` fragment form.
+                        // translated into our `<Sketch>` fragment form
+                        // (with its GeoId remap).
                         store_sketch_fragment(object, &fragment, owner, report);
+                        geo_remap = Some(remap);
+                    }
+                    (false, Some(PropValue::SketchConstraints(inner))) => {
+                        constraint_inner = Some(inner);
                     }
                     (false, Some(PropValue::Shape(shape_ref))) => {
                         match load_shape_payload(zip, &shape_ref, owner, report)? {
@@ -981,7 +1162,16 @@ fn parse_object_properties(
                 // A self-closing `<Sketch/>` is an empty sketch.
                 store_sketch_fragment(object, "<Sketch/>", owner, report);
             }
-            Event::End(e) if e.name().as_ref() == b"Object" => return Ok(()),
+            Event::End(e) if e.name().as_ref() == b"Object" => {
+                apply_freecad_constraints(
+                    object,
+                    constraint_inner.as_deref(),
+                    geo_remap.as_deref(),
+                    owner,
+                    report,
+                );
+                return Ok(());
+            }
             Event::Eof => {
                 return Err(FcstdError::Xml("unterminated <Object> element".to_string()));
             }
@@ -1013,8 +1203,14 @@ fn parse_object_properties(
 /// this kernel's 2D sketcher; construction geometry and other curve
 /// types are skipped with per-element warnings — the honest-policy
 /// record of what did not survive the trip.
-fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadReport) -> String {
+fn freecad_geometrylist_to_fragment(
+    inner: &str,
+    owner: &str,
+    report: &mut LoadReport,
+) -> (String, Vec<Option<u32>>) {
     let mut fragment = String::from("<Sketch>\n");
+    // geometry-index translation: FreeCAD's `i` → our index, `None` if skipped
+    let mut remap: Vec<Option<u32>> = Vec::new();
     let mut i = 0usize;
     let mut index = 0usize;
     while let Some(start) = inner[i..].find("<Geometry ") {
@@ -1026,14 +1222,33 @@ fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadR
         i = start + len;
 
         let kind = attr_of_str(block, "type").unwrap_or_default();
+        // The fragment index this geometry takes when it maps — computed
+        // before any push (remap entries pair with their geometry).
+        let ours = fragment.matches("<Geometry ").count() as u32;
         if block.contains("<Construction value=\"1\"/>") {
             report.warnings.push(format!(
                 "{owner}: geometry #{index} ({kind}) is construction — skipped"
             ));
+            remap.push(None);
             index += 1;
             continue;
         }
         match kind {
+            "Part::GeomPoint" => match (
+                attr_of_f64(block, "X"),
+                attr_of_f64(block, "Y"),
+                attr_of_f64(block, "Z"),
+            ) {
+                (Some(x), Some(y), Some(z)) if z.abs() < 1e-9 => {
+                    fragment.push_str(&format!(
+                        "  <Geometry type=\"0\" x=\"{x:?}\" y=\"{y:?}\"/>\n"
+                    ));
+                    remap.push(Some(ours));
+                }
+                _ => report.warnings.push(format!(
+                    "{owner}: geometry #{index} (point) off the XY plane or malformed — skipped"
+                )),
+            },
             "Part::GeomLineSegment" => {
                 match (
                     attr_of_f64(block, "StartX"),
@@ -1049,6 +1264,7 @@ fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadR
                         fragment.push_str(&format!(
                             "  <Geometry type=\"1\" startx=\"{sx:?}\" starty=\"{sy:?}\" endx=\"{ex:?}\" endy=\"{ey:?}\"/>\n"
                         ));
+                        remap.push(Some(ours));
                     }
                     _ => report.warnings.push(format!(
                         "{owner}: geometry #{index} (line) off the XY plane or malformed — skipped"
@@ -1082,6 +1298,7 @@ fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadR
                         fragment.push_str(&format!(
                             "  <Geometry type=\"2\" centerx=\"{cx:?}\" centery=\"{cy:?}\" radius=\"{radius:?}\"/>\n"
                         ));
+                        remap.push(Some(ours));
                     }
                     (true, Some(radius), _) => match (
                         attr_of_f64(block, "StartAngle"),
@@ -1095,6 +1312,7 @@ fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadR
                             fragment.push_str(&format!(
                                 "  <Geometry type=\"3\" centerx=\"{cx:?}\" centery=\"{cy:?}\" radius=\"{radius:?}\" startangle=\"{start_angle:?}\" endangle=\"{end_angle:?}\"/>\n"
                             ));
+                            remap.push(Some(ours));
                         }
                         _ => report.warnings.push(format!(
                             "{owner}: geometry #{index} (arc) malformed angles — skipped"
@@ -1114,7 +1332,7 @@ fn freecad_geometrylist_to_fragment(inner: &str, owner: &str, report: &mut LoadR
         index += 1;
     }
     fragment.push_str("</Sketch>");
-    fragment
+    (fragment, remap)
 }
 
 /// `key="value"` extraction on a raw XML block (first match, exact case).
@@ -1123,6 +1341,295 @@ fn attr_of_str<'a>(block: &'a str, key: &str) -> Option<&'a str> {
     let start = block.find(&needle)? + needle.len();
     let end = block[start..].find('"')? + start;
     Some(&block[start..end])
+}
+
+/// Apply FreeCAD 1.0's `Constraints` property payload (raw inner XML
+/// of a `<ConstraintList>` element) to the object once the whole object
+/// is parsed — the geometry (and its GeoId remap) is known then. Only a
+/// `Sketcher::SketchObject` accepts constraints; anything else gets one
+/// honest warning.
+fn apply_freecad_constraints(
+    object: &mut Box<dyn DocumentObject>,
+    inner: Option<&str>,
+    geo_remap: Option<&[Option<u32>]>,
+    owner: &str,
+    report: &mut LoadReport,
+) {
+    let Some(inner) = inner else { return };
+    let lines = freecad_constraintlist_to_fragment_lines(inner, geo_remap, owner, report);
+    if lines.is_empty() {
+        return;
+    }
+    // The constraint lines are our fragment dialect; splicing them into
+    // the object's already-restored geometry (its own `to_xml()`) makes
+    // one complete sketch that the existing strict parser can check as
+    // a whole — every constraint reference is resolved against the real
+    // geometry list, exactly as `from_xml` does for our own files.
+    if let Some(sketch_object) = object.as_any_mut().downcast_mut::<SketchObject>() {
+        let body = sketch_object.sketch.to_xml();
+        let Some(body) = body.strip_suffix("</Sketch>\n") else {
+            report.warnings.push(format!(
+                "{owner}: internal: sketch fragment without closing tag — constraints skipped"
+            ));
+            return;
+        };
+        let combined = format!("{body}{lines}</Sketch>\n");
+        match fc_sketcher::xml::from_xml(&combined) {
+            Ok(sk) => sketch_object.restore_sketch(sk),
+            Err(err) => {
+                report.warnings.push(format!(
+                    "{owner}: malformed Constraints property: {err} — constraints skipped"
+                ));
+            }
+        }
+    } else {
+        report.warnings.push(format!(
+            "{owner}: Constraints property on a non-sketch object — ignored"
+        ));
+    }
+}
+
+/// Translate FreeCAD 1.0's `Constraints` payload (raw inner XML of a
+/// `<ConstraintList>` element) into our `<Sketch>`-fragment `<Constraint
+/// …/>` lines. FreeCAD's `<Constrain …/>` elements (the missing final
+/// "t" is FreeCAD's own spelling) carry the FreeCAD `ConstraintType`
+/// ordinals; the mappable subset translates onto this kernel's 13
+/// kinds, everything else is skipped with a warning naming the FreeCAD
+/// kind — the honest-policy record.
+///
+/// FreeCAD type → fragment type (both directions mirrored in
+/// [`sketch_constraintlist_xml`]):
+///
+/// | FreeCAD (ordinal) | name           | ours (ordinal) |
+/// |------------------|----------------|----------------|
+/// | 1  | Coincident    | 0 (Coincident) |
+/// | 2  | Horizontal    | 1 (Horizontal, edge form only) |
+/// | 3  | Vertical      | 2 (Vertical, edge form only) |
+/// | 4  | Parallel      | 3 (Parallel) |
+/// | 6  | Distance      | 5 (Distance, two-point form) |
+/// | 7  | DistanceX     | 6 (DistanceX) |
+/// | 8  | DistanceY      | 7 (DistanceY) |
+/// | 9  | Angle         | 11 (Angle, edge form, radians) |
+/// | 10 | Perpendicular | 4 (Perpendicular, edge form) |
+/// | 11 | Radius        | 8 (Radius) |
+/// | 12 | Equal         | 10 (Equal) |
+/// | 13 | PointOnObject | 12 (PointOnObject) |
+/// | 18 | Diameter      | 9 (Diameter) |
+///
+/// Skipped with warnings: `Tangent` (5), `Symmetric` (14),
+/// `InternalAlignment` (15), `SnellsLaw` (16), `Block` (17), `Weight`
+/// (19), `Group` (20), `Text` (21) — no counterpart in this kernel's
+/// solver vocabulary; axis/root-point/external references (`GeoId < 0`)
+/// — no such geometries here; reference constraints (`IsDriving="0"`)
+/// — measurements, not equations; the extended forms FreeCAD can express
+/// but this solver cannot (two-point Horizontal/Vertical, point-to-line
+/// Distance, angle-via-point) — skipped instead of silently
+/// re-interpreted. GeoIds route through the geometry remap: skipped
+/// geometry shifts every later index.
+fn freecad_constraintlist_to_fragment_lines(
+    inner: &str,
+    geo_remap: Option<&[Option<u32>]>,
+    owner: &str,
+    report: &mut LoadReport,
+) -> String {
+    /// FreeCAD's own `ConstraintType` names, for honest warnings.
+    fn freecad_kind(ty: i64) -> &'static str {
+        match ty {
+            0 => "None",
+            1 => "Coincident",
+            2 => "Horizontal",
+            3 => "Vertical",
+            4 => "Parallel",
+            5 => "Tangent",
+            6 => "Distance",
+            7 => "DistanceX",
+            8 => "DistanceY",
+            9 => "Angle",
+            10 => "Perpendicular",
+            11 => "Radius",
+            12 => "Equal",
+            13 => "PointOnObject",
+            14 => "Symmetric",
+            15 => "InternalAlignment",
+            16 => "SnellsLaw",
+            17 => "Block",
+            18 => "Diameter",
+            19 => "Weight",
+            20 => "Group",
+            21 => "Text",
+            _ => "unknown",
+        }
+    }
+
+    let mut lines = String::new();
+    let mut i = 0usize;
+    let mut index = 0usize;
+    while let Some(start) = inner[i..].find("<Constrain ") {
+        let start = i + start;
+        let Some(len) = inner[start..].find("/>") else {
+            break;
+        };
+        let block = &inner[start..start + len + 2];
+        i = start + len + 2;
+
+        let skip = |report: &mut LoadReport, why: &str| {
+            report.warnings.push(format!(
+                "{owner}: constraint #{index} ({}): {why} — skipped",
+                attr_of_str(block, "Type").unwrap_or("?")
+            ));
+        };
+
+        // Reference constraints (`IsDriving="0"`) are measurements, not
+        // equations — this solver has no reference vocabulary.
+        if attr_of_str(block, "IsDriving") == Some("0") {
+            skip(report, "reference (IsDriving=0)");
+            index += 1;
+            continue;
+        }
+        let Some(ty) = attr_of_str(block, "Type").and_then(|v| v.trim().parse::<i64>().ok()) else {
+            skip(report, "missing or non-numeric Type");
+            index += 1;
+            continue;
+        };
+        // Our fragment ordinal for the FreeCAD kind.
+        let frag_ty: u32 = match ty {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            10 => 4,
+            6 => 5,
+            7 => 6,
+            8 => 7,
+            11 => 8,
+            18 => 9,
+            12 => 10,
+            9 => 11,
+            13 => 12,
+            other => {
+                report.warnings.push(format!(
+                    "{owner}: constraint #{index}: FreeCAD kind {} ({other}) has no counterpart in this kernel — skipped",
+                    freecad_kind(other)
+                ));
+                index += 1;
+                continue;
+            }
+        };
+        let first = attr_of_str(block, "First").and_then(|v| v.trim().parse::<i64>().ok());
+        let first_pos = attr_of_str(block, "FirstPos")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let second = attr_of_str(block, "Second").and_then(|v| v.trim().parse::<i64>().ok());
+        let second_pos = attr_of_str(block, "SecondPos")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let third = attr_of_str(block, "Third")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(-2000);
+        let value = attr_of_f64(block, "Value");
+
+        // Form validation: which slots each of our kinds can express.
+        // - edge-form kinds want pos 0 on both references;
+        // - the two-point kinds want pos 1..=3 on both;
+        // - PointOnObject wants a point first, an edge second.
+        let form_ok = match frag_ty {
+            0 | 5 | 6 | 7 => (1..=3).contains(&first_pos) && (1..=3).contains(&second_pos),
+            1 | 2 | 3 | 4 | 10 | 11 => first_pos == 0 && second_pos == 0,
+            8 | 9 => first_pos == 0,
+            12 => (1..=3).contains(&first_pos) && second_pos == 0,
+            _ => unreachable!("fragment ordinals cover our 13 kinds"),
+        };
+        if !form_ok {
+            skip(
+                report,
+                "a form this kernel does not model (point slots on an edge-kind, or vice versa)",
+            );
+            index += 1;
+            continue;
+        }
+        // A third reference means a form we do not carry (e.g. a
+        // symmetry point) — only FreeCAD's GeoUndef (-2000) is expected.
+        if third >= 0 {
+            skip(report, "carries a third element reference");
+            index += 1;
+            continue;
+        }
+
+        // Map GeoIds through the geometry remap. Negative ids are the
+        // axes / root point / external geometry — no such things here.
+        let map_geo = |orig: i64| -> Option<u32> {
+            if orig < 0 {
+                return None;
+            }
+            match geo_remap {
+                Some(m) => m.get(orig as usize).copied().flatten(),
+                None => Some(orig as u32),
+            }
+        };
+        let needs_second = !matches!(frag_ty, 1 | 2 | 8 | 9);
+        let Some(first) = first.filter(|v| *v >= 0).and_then(map_geo) else {
+            skip(
+                report,
+                "references geometry that is an axis, root point, external, or was skipped",
+            );
+            index += 1;
+            continue;
+        };
+        let second_v = if needs_second {
+            let Some(second) = second.filter(|v| *v >= 0).and_then(map_geo) else {
+                skip(
+                    report,
+                    "references geometry that is an axis, root point, external, or was skipped",
+                );
+                index += 1;
+                continue;
+            };
+            second
+        } else {
+            0
+        };
+
+        // Valued kinds require their datum.
+        let valued = matches!(frag_ty, 5..=9 | 11);
+        let Some(value) = (if valued { value } else { Some(0.0) }) else {
+            skip(report, "missing Value for a datum constraint");
+            index += 1;
+            continue;
+        };
+
+        let line = match frag_ty {
+            0 => format!(
+                "  <Constraint type=\"0\" first=\"{first}\" firstpos=\"{first_pos}\" \
+                 second=\"{second_v}\" secondpos=\"{second_pos}\"/>\n"
+            ),
+            1 => format!("  <Constraint type=\"1\" first=\"{first}\"/>\n"),
+            2 => format!("  <Constraint type=\"2\" first=\"{first}\"/>\n"),
+            3 => format!("  <Constraint type=\"3\" first=\"{first}\" second=\"{second_v}\"/>\n"),
+            4 => format!("  <Constraint type=\"4\" first=\"{first}\" second=\"{second_v}\"/>\n"),
+            5..=7 => {
+                let t = frag_ty;
+                format!(
+                    "  <Constraint type=\"{t}\" first=\"{first}\" firstpos=\"{first_pos}\" \
+                     second=\"{second_v}\" secondpos=\"{second_pos}\" value=\"{value:?}\"/>\n"
+                )
+            }
+            8 => format!("  <Constraint type=\"8\" first=\"{first}\" value=\"{value:?}\"/>\n"),
+            9 => format!("  <Constraint type=\"9\" first=\"{first}\" value=\"{value:?}\"/>\n"),
+            10 => format!("  <Constraint type=\"10\" first=\"{first}\" second=\"{second_v}\"/>\n"),
+            11 => format!(
+                "  <Constraint type=\"11\" first=\"{first}\" second=\"{second_v}\" \
+                 value=\"{value:?}\"/>\n"
+            ),
+            12 => format!(
+                "  <Constraint type=\"12\" first=\"{first}\" firstpos=\"{first_pos}\" \
+                 second=\"{second_v}\"/>\n"
+            ),
+            _ => unreachable!("frag_ty validated above"),
+        };
+        lines.push_str(&line);
+        index += 1;
+    }
+    lines
 }
 
 fn attr_of_f64(block: &str, key: &str) -> Option<f64> {
@@ -1240,8 +1747,25 @@ fn parse_property_value(
                 // the raw XML is captured and translated instead.
                 if element_name == b"GeometryList" && prop == "Geometry" {
                     let inner = raw_inner_xml(xml, reader, buf, b"GeometryList")?;
-                    let fragment = freecad_geometrylist_to_fragment(&inner, owner, report);
-                    return finish_property(reader, buf, Some(PropValue::Sketch(fragment)));
+                    let (fragment, geo_remap) =
+                        freecad_geometrylist_to_fragment(&inner, owner, report);
+                    return finish_property(
+                        reader,
+                        buf,
+                        Some(PropValue::Sketch {
+                            fragment,
+                            geo_remap,
+                        }),
+                    );
+                }
+                // FreeCAD 1.0's `Constraints` property
+                // (`Sketcher::PropertyConstraintList`, on
+                // `Sketcher::SketchObject`): the raw payload is held —
+                // constraint references are resolved after the object's
+                // geometry is known, whatever the property order.
+                if element_name == b"ConstraintList" {
+                    let inner = raw_inner_xml(xml, reader, buf, b"ConstraintList")?;
+                    return finish_property(reader, buf, Some(PropValue::SketchConstraints(inner)));
                 }
                 if element_name == b"GeometryList" {
                     // `ExternalGeo` (the sketch's datum axes): the generic
@@ -2105,7 +2629,7 @@ mod sketch_persistence_tests {
     }
 
     #[test]
-    fn document_xml_embeds_the_sketch_fragment_as_object_data() {
+    fn document_xml_carries_the_sketch_as_freecad_native_properties() {
         let path = temp_path("embed");
         let mut doc = Document::new("test");
         doc.add(Box::new(SketchObject::with_sketch(
@@ -2116,19 +2640,47 @@ mod sketch_persistence_tests {
         save_document(&doc, &path).unwrap();
 
         let xml = read_document_xml(&path);
-        // One <Sketch> element, indented as a child of <Object> (3 spaces),
-        // with its own children kept at the fragment's relative indent.
-        assert!(xml.contains("   <Sketch>\n"), "{xml}");
-        assert!(xml.contains("     <Geometry type=\"1\" "), "{xml}");
-        assert!(xml.contains("     <Constraint type=\"0\" "), "{xml}");
-        assert!(xml.contains("   </Sketch>\n"), "{xml}");
-        // It sits after the object's <Properties> (it is object data, not
-        // a property) and is not itself wrapped in a <Property> element.
+        // The geometry property: FreeCAD's `Part::PropertyGeometryList`
+        // form — `<GeometryList>` wrapper, one `<Geometry type=… migrated="1">`
+        // block per element, the kind's own child element carrying the
+        // parameters.
+        assert!(
+            xml.contains("<Property name=\"Geometry\" type=\"Part::PropertyGeometryList\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("<GeometryList count=\""), "{xml}");
+        assert!(
+            xml.contains("<Geometry type=\"Part::GeomLineSegment\" migrated=\"1\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("<LineSegment StartX="), "{xml}");
+        // The constraints property: FreeCAD's
+        // `Sketcher::PropertyConstraintList` form — `<ConstraintList>`
+        // wrapper, one `<Constrain …/>` per constraint (FreeCAD's own
+        // spelling), with FreeCAD's `ConstraintType` ordinals
+        // (Coincident=1, not our dialect's 0).
+        assert!(
+            xml.contains(
+                "<Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\">"
+            ),
+            "{xml}"
+        );
+        assert!(xml.contains("<ConstraintList count=\""), "{xml}");
+        assert!(xml.contains("<Constrain Name=\"\" "), "{xml}");
+        assert!(
+            xml.contains("Type=\"1\"") && xml.contains("FirstPos=\""),
+            "{xml}"
+        );
+        // Both live inside the object's <Properties> (they are
+        // properties, exactly where FreeCAD's own writer puts them)…
         let object_section = xml.split("<Object name=\"Sketch\">").nth(1).unwrap();
         let properties_end = object_section.find("</Properties>").unwrap();
-        let sketch_start = object_section.find("<Sketch>").unwrap();
-        assert!(properties_end < sketch_start);
-        assert!(!xml.contains("<Property name=\"Sketch\""));
+        let geometry_start = object_section.find("<Property name=\"Geometry\"").unwrap();
+        assert!(geometry_start < properties_end, "{xml}");
+        // …and the legacy `<Sketch>` object-data fragment is gone.
+        assert!(!xml.contains("<Sketch>\n"), "{xml}");
+        // The property count accounts for both.
+        assert!(xml.contains("<Properties Count=\"4\">"), "{xml}");
 
         std::fs::remove_file(&path).ok();
     }

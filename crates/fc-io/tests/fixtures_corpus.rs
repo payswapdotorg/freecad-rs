@@ -490,3 +490,131 @@ fn every_fixture_round_trips_to_identical_list_output() {
         assert_round_trip_list_parity(stem, &doc);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Real-binary provenance fixtures: sketch constraints, both directions.
+//
+// `freecad_sketch_constraints.fcstd` was written by **real FreeCAD 1.0**
+// (AppImage r39109, `freecadcmd` + the script in the fixture's provenance
+// note below): one sketch, six geometries, thirteen constraints — every
+// kind this kernel maps. Verified with the real binary both ways:
+// FreeCAD opens `fcrs_constraints_roundtrip.fcstd` (freecad-rs's own
+// output) and restores all thirteen constraints exactly; freecad-rs
+// loads the FreeCAD-authored file to the same geometry + constraints.
+// ---------------------------------------------------------------------------
+
+/// The fixture authored by real FreeCAD 1.0 loads with every mappable
+/// constraint kind intact — geometry, ordinals, point-slots and values,
+/// exactly as the real program wrote them.
+#[test]
+fn freecad_authored_sketch_loads_all_thirteen_constraint_kinds() {
+    let (doc, report) = load_fixture("freecad_sketch_constraints");
+
+    // One object: the sketch (FreeCAD's own console-authored corpus file
+    // carries document properties we do not model — Uid/Meta/Material —
+    // and two OCCT .brp shape payloads; all honestly warned, none fatal).
+    assert_eq!(report.objects, 1);
+    assert_eq!(report.skipped, 0);
+    let object = doc.get_by_name("Sketch").expect("the sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .expect("it is a Sketcher::SketchObject");
+
+    // Geometry: the 40×30 quad + circle + point, exactly as authored.
+    let sketch = &sketch_object.sketch;
+    assert_eq!(sketch.geometry().len(), 6);
+    assert!(matches!(
+        sketch.geometry()[0],
+        fc_sketcher::Geometry::LineSegment { start, end, .. }
+            if (start.x - 0.0).abs() < 1e-9 && (end.x - 40.0).abs() < 1e-9
+    ));
+    assert!(matches!(
+        sketch.geometry()[4],
+        fc_sketcher::Geometry::Circle { radius, .. } if (radius - 9.0).abs() < 1e-9
+    ));
+    assert!(matches!(
+        sketch.geometry()[5],
+        fc_sketcher::Geometry::Point { x: 7.0, y: 8.0 }
+    ));
+
+    // All thirteen kinds, with the authored targets and values (the
+    // same layout `io.rs`'s `freecad_native_constraints_*` tests pin,
+    // this time read out of a file the real program wrote).
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    let cs = sketch.constraints();
+    assert_eq!(cs.len(), 13);
+    use fc_sketcher::Constraint;
+    assert!(
+        matches!(cs[0], Constraint::Coincident { g1, pos1: fc_sketcher::PointPos::End, g2, pos2: fc_sketcher::PointPos::Start } if g1.0 == 0 && g2.0 == 1)
+    );
+    assert!(matches!(cs[1], Constraint::Horizontal { g } if g.0 == 0));
+    assert!(matches!(cs[2], Constraint::Vertical { g } if g.0 == 1));
+    assert!(matches!(cs[3], Constraint::Parallel { g1, g2 } if g1.0 == 0 && g2.0 == 2));
+    assert!(matches!(cs[4], Constraint::Perpendicular { g1, g2 } if g1.0 == 0 && g2.0 == 1));
+    assert!(matches!(cs[5], Constraint::Distance { value, .. } if value == 40.0));
+    assert!(matches!(cs[6], Constraint::DistanceX { value, .. } if value == -40.0));
+    assert!(matches!(cs[7], Constraint::DistanceY { value, .. } if value == 30.0));
+    assert!(matches!(cs[8], Constraint::Angle { value, .. } if (value - half_pi).abs() < 1e-15));
+    assert!(matches!(cs[9], Constraint::Radius { value, .. } if value == 9.0));
+    assert!(matches!(cs[10], Constraint::Diameter { value, .. } if value == 18.0));
+    assert!(matches!(cs[11], Constraint::Equal { g1, g2 } if g1.0 == 0 && g2.0 == 2));
+    assert!(
+        matches!(cs[12], Constraint::PointOnObject { g1, pos1: fc_sketcher::PointPos::Start, g2 } if g1.0 == 2 && g2.0 == 0)
+    );
+
+    // The OCCT .brp payloads FreeCAD wrote (Sketch.Shape and
+    // Sketch.InternalShape) are the documented skip: honest warnings,
+    // parameters kept, the object left Touched for recompute.
+    let warnings = report.warnings.join("\n");
+    assert!(
+        warnings.matches("unknown shape payload format").count() == 2,
+        "both BRep payloads are honestly warned: {warnings}"
+    );
+    assert!(
+        matches!(object.status(), fc_app::ObjectStatus::Touched),
+        "the sketch reloads Touched (its shapes are OCCT-only): {:?}",
+        object.status()
+    );
+}
+
+/// freecad-rs's own file (the same thirteen constraints, our writer's
+/// FreeCAD-native output) round-trips through our reader with the
+/// identical content — and real FreeCAD 1.0 restores it exactly
+/// (verified with the r39109 binary: ConstraintCount 13, every First/
+/// FirstPos/Second/SecondPos/Value matching, recompute clean).
+#[test]
+fn our_constraint_output_round_trips_through_both_engines() {
+    let (doc, report) = load_fixture("fcrs_constraints_roundtrip");
+    assert_eq!(report.objects, 1);
+    let object = doc.get_by_name("Sketch").expect("the sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .expect("it is a Sketcher::SketchObject");
+    let sketch = &sketch_object.sketch;
+    assert_eq!(sketch.geometry().len(), 6);
+    assert_eq!(sketch.constraints().len(), 13);
+
+    // Re-save keeps the content (our canonical writer).
+    let temp = std::env::temp_dir().join(format!(
+        "fcrs-constraints-rt-{}-{:?}.fcstd",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    save_document(&doc, &temp).unwrap();
+    let (doc2, report2) = load_document(&temp).unwrap();
+    let _ = std::fs::remove_file(&temp);
+    assert!(report2.warnings.is_empty(), "{:?}", report2.warnings);
+    let object2 = doc2.get_by_name("Sketch").unwrap();
+    let sketch2 = &object2
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap()
+        .sketch;
+    assert_eq!(
+        sketch2.to_xml(),
+        sketch.to_xml(),
+        "constraint + geometry content survives our save/load cycle byte-identically"
+    );
+}

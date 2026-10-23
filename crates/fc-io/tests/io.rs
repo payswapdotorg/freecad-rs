@@ -598,3 +598,365 @@ fn sketch_reloads_with_persisted_status() {
     assert_eq!(sketch.sketch.geometry().len(), 1);
     cleanup(&path);
 }
+
+// ---------------------------------------------------------------------------
+// FreeCAD 1.0 native sketch properties: `Geometry`
+// (`Part::PropertyGeometryList`) + `Constraints`
+// (`Sketcher::PropertyConstraintList`) — the exact forms real FreeCAD
+// writes, verified against the FreeCAD 1.0 source
+// (`PropertyGeometryList::Save`, `Constraint::Save`). The ordinals,
+// element names (`<Constrain/>` — FreeCAD's own spelling), and the
+// GeoId/PointPos conventions come from there, not from our dialect.
+// ---------------------------------------------------------------------------
+
+/// One FreeCAD `<Constrain …/>` element with every attribute FreeCAD's
+/// own writer emits (defaults for the presentation flags).
+fn constrain(
+    ty: i64,
+    first: i64,
+    first_pos: i64,
+    second: i64,
+    second_pos: i64,
+    value: f64,
+) -> String {
+    format!(
+        "<Constrain Name=\"\" MetaData=\"\" Type=\"{ty}\" Orientation=\"0\" Value=\"{value}\" \
+         LabelDistance=\"0\" LabelPosition=\"0\" IsDriving=\"1\" IsInVirtualSpace=\"0\" \
+         IsVisible=\"1\" IsActive=\"1\" First=\"{first}\" FirstPos=\"{first_pos}\" \
+         Second=\"{second}\" SecondPos=\"{second_pos}\" Third=\"-2000\" ThirdPos=\"0\"/>"
+    )
+}
+
+/// A FreeCAD-form `Document.xml` with one sketch: a 40×30 quad (geos
+/// 0-3) + a circle (geo 4) + a point (geo 5), plus `constraints`
+/// appended verbatim into the `<ConstraintList>` payload.
+fn freecad_sketch_document(constraints: &str, count: usize) -> String {
+    let mut geometry = String::new();
+    for (a, b) in [
+        ((0, 0), (40, 0)),
+        ((40, 0), (40, 30)),
+        ((40, 30), (0, 30)),
+        ((0, 30), (0, 0)),
+    ] {
+        geometry.push_str(&format!(
+            "<Geometry type=\"Part::GeomLineSegment\" migrated=\"1\">\
+             <GeoExtensions count=\"0\"></GeoExtensions>\
+             <LineSegment StartX=\"{}\" StartY=\"{}\" StartZ=\"0\" \
+             EndX=\"{}\" EndY=\"{}\" EndZ=\"0\"/></Geometry>",
+            a.0, a.1, b.0, b.1
+        ));
+    }
+    geometry.push_str(
+        "<Geometry type=\"Part::GeomCircle\" migrated=\"1\">\
+         <GeoExtensions count=\"0\"></GeoExtensions>\
+         <Circle CenterX=\"60\" CenterY=\"10\" CenterZ=\"0\" NormalX=\"0\" NormalY=\"0\" \
+         NormalZ=\"1\" AngleXU=\"0\" Radius=\"9\"/></Geometry>",
+    );
+    geometry.push_str(
+        "<Geometry type=\"Part::GeomPoint\" migrated=\"1\">\
+         <GeoExtensions count=\"0\"></GeoExtensions>\
+         <GeomPoint X=\"7\" Y=\"8\" Z=\"0\"/></Geometry>",
+    );
+    format!(
+        "<Document SchemaVersion=\"4\" ProgramVersion=\"FreeCAD 1.0\" FileVersion=\"1\">\
+         <Properties Count=\"1\">\
+         <Property name=\"Label\" type=\"App::PropertyString\"><String value=\"doc\"/></Property>\
+         </Properties>\
+         <Objects Count=\"1\" Dependencies=\"1\">\
+         <Object type=\"Sketcher::SketchObject\" name=\"Sketch\" id=\"1\"/>\
+         </Objects>\
+         <ObjectData Count=\"1\">\
+         <Object name=\"Sketch\">\
+         <Properties Count=\"4\">\
+         <Property name=\"Label\" type=\"App::PropertyString\"><String value=\"Sketch\"/></Property>\
+         <Property name=\"Placement\" type=\"App::PropertyPlacement\">\
+         <PropertyPlacement Px=\"0\" Py=\"0\" Pz=\"0\" Q0=\"0\" Q1=\"0\" Q2=\"0\" Q3=\"1\"/>\
+         </Property>\
+         <Property name=\"Geometry\" type=\"Part::PropertyGeometryList\">\
+         <GeometryList count=\"6\">{geometry}</GeometryList>\
+         </Property>\
+         <Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\">\
+         <ConstraintList count=\"{count}\">{constraints}</ConstraintList>\
+         </Property>\
+         </Properties>\
+         </Object>\
+         </ObjectData>\
+         </Document>"
+    )
+}
+
+#[test]
+fn freecad_native_constraints_all_thirteen_kinds_load() {
+    let path = temp_path("fc-constraints");
+    cleanup(&path);
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    // One `<Constrain>` per mappable kind (FreeCAD ordinals; point-slots
+    // 1=start, 2=end, 3=mid-as-center):
+    let constraints = [
+        constrain(1, 0, 2, 1, 1, 0.0),       // Coincident (0-end ↔ 1-start)
+        constrain(2, 0, 0, -2000, 0, 0.0),   // Horizontal on line 0
+        constrain(3, 1, 0, -2000, 0, 0.0),   // Vertical on line 1
+        constrain(4, 0, 0, 2, 0, 0.0),       // Parallel 0 ∥ 2
+        constrain(10, 0, 0, 1, 0, 0.0),      // Perpendicular 0 ⊥ 1
+        constrain(6, 0, 1, 0, 2, 40.0),      // Distance |line 0| = 40
+        constrain(7, 2, 1, 3, 1, -40.0),     // DistanceX start(2)→start(3)
+        constrain(8, 0, 1, 2, 1, 30.0),      // DistanceY start(0)→start(2)
+        constrain(9, 0, 0, 1, 0, half_pi),   // Angle line0→line1 = 90°
+        constrain(11, 4, 0, -2000, 0, 9.0),  // Radius of circle
+        constrain(18, 4, 0, -2000, 0, 18.0), // Diameter of circle
+        constrain(12, 0, 0, 2, 0, 0.0),      // Equal length 0 == 2
+        constrain(13, 2, 1, 0, 0, 0.0),      // PointOnObject start(2) on line 0
+    ]
+    .join("");
+    craft_fcstd(&path, &freecad_sketch_document(&constraints, 13), &[]);
+
+    let (doc, report) = load_document(&path).unwrap();
+    assert!(
+        report.warnings.is_empty(),
+        "every mappable kind loads without warnings: {:?}",
+        report.warnings
+    );
+    let object = doc.get_by_name("Sketch").expect("sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap();
+    let sketch = &sketch_object.sketch;
+    // Geometry: 4 lines + circle + point, all XY.
+    assert_eq!(sketch.geometry().len(), 6);
+    assert!(matches!(
+        sketch.geometry()[5],
+        fc_sketcher::Geometry::Point { x: 7.0, y: 8.0 }
+    ));
+    assert!(matches!(
+        sketch.geometry()[4],
+        fc_sketcher::Geometry::Circle { radius, .. } if (radius - 9.0).abs() < 1e-12
+    ));
+    // All 13 kinds mapped, with the right values and targets.
+    let cs = sketch.constraints();
+    assert_eq!(cs.len(), 13);
+    assert!(matches!(cs[0], fc_sketcher::Constraint::Coincident { .. }));
+    assert!(matches!(cs[1], fc_sketcher::Constraint::Horizontal { g } if g.0 == 0));
+    assert!(matches!(cs[2], fc_sketcher::Constraint::Vertical { g } if g.0 == 1));
+    assert!(matches!(cs[3], fc_sketcher::Constraint::Parallel { .. }));
+    assert!(matches!(
+        cs[4],
+        fc_sketcher::Constraint::Perpendicular { .. }
+    ));
+    assert!(matches!(cs[5], fc_sketcher::Constraint::Distance { value, .. } if value == 40.0));
+    assert!(matches!(cs[6], fc_sketcher::Constraint::DistanceX { value, .. } if value == -40.0));
+    assert!(matches!(cs[7], fc_sketcher::Constraint::DistanceY { value, .. } if value == 30.0));
+    assert!(
+        matches!(cs[8], fc_sketcher::Constraint::Angle { value, .. } if (value - half_pi).abs() < 1e-15)
+    );
+    assert!(matches!(cs[9], fc_sketcher::Constraint::Radius { value, .. } if value == 9.0));
+    assert!(matches!(cs[10], fc_sketcher::Constraint::Diameter { value, .. } if value == 18.0));
+    assert!(matches!(cs[11], fc_sketcher::Constraint::Equal { .. }));
+    assert!(matches!(
+        cs[12],
+        fc_sketcher::Constraint::PointOnObject { .. }
+    ));
+    cleanup(&path);
+}
+
+#[test]
+fn freecad_native_constraints_skip_unmappable_with_honest_warnings() {
+    let path = temp_path("fc-constraints-skip");
+    cleanup(&path);
+    let constraints = [
+        constrain(5, 0, 0, 4, 0, 0.0),      // Tangent — no counterpart
+        constrain(14, 0, 1, 1, 1, 0.0),     // Symmetric — no counterpart
+        constrain(17, 0, 0, -2000, 0, 0.0), // Block — no counterpart
+        constrain(1, -1, 1, 0, 2, 0.0),     // Coincident on the root point
+        constrain(2, 0, 1, 1, 1, 0.0),      // two-point Horizontal form
+        constrain(11, 4, 0, -2000, 0, 9.0), // Radius — mappable, must load
+    ]
+    .join("");
+    craft_fcstd(&path, &freecad_sketch_document(&constraints, 6), &[]);
+
+    let (doc, report) = load_document(&path).unwrap();
+    let warnings = report.warnings.join("\n");
+    // Every unmappable case is named honestly.
+    assert!(warnings.contains("Tangent"), "{warnings}");
+    assert!(warnings.contains("Symmetric"), "{warnings}");
+    assert!(warnings.contains("Block"), "{warnings}");
+    assert!(
+        warnings.contains("axis, root point, external"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("form this kernel does not model"),
+        "{warnings}"
+    );
+    // And the mappable one still loads.
+    let object = doc.get_by_name("Sketch").expect("sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap();
+    let cs = sketch_object.sketch.constraints();
+    assert_eq!(cs.len(), 1);
+    assert!(matches!(cs[0], fc_sketcher::Constraint::Radius { value, .. } if value == 9.0));
+    cleanup(&path);
+}
+
+#[test]
+fn freecad_native_constraints_reference_constraints_and_driven_flags_skip() {
+    let path = temp_path("fc-constraints-driven");
+    cleanup(&path);
+    // IsDriving=0: a reference (measurement), not an equation.
+    let constraints =
+        "<Constrain Name=\"\" MetaData=\"\" Type=\"6\" Orientation=\"0\" Value=\"40\" \
+         LabelDistance=\"0\" LabelPosition=\"0\" IsDriving=\"0\" IsInVirtualSpace=\"0\" \
+         IsVisible=\"1\" IsActive=\"1\" First=\"0\" FirstPos=\"1\" \
+         Second=\"0\" SecondPos=\"2\" Third=\"-2000\" ThirdPos=\"0\"/>";
+    craft_fcstd(&path, &freecad_sketch_document(constraints, 1), &[]);
+
+    let (doc, report) = load_document(&path).unwrap();
+    let warnings = report.warnings.join("\n");
+    assert!(warnings.contains("reference (IsDriving=0)"), "{warnings}");
+    let object = doc.get_by_name("Sketch").expect("sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap();
+    assert!(sketch_object.sketch.constraints().is_empty());
+    cleanup(&path);
+}
+
+#[test]
+fn freecad_native_constraints_remap_through_skipped_geometry() {
+    let path = temp_path("fc-constraints-remap");
+    cleanup(&path);
+    // A construction line between two real geometries: FreeCAD keeps it
+    // in the geometry list (GeoId 1) — a constraint on the circle
+    // (FreeCAD GeoId 2) must land on OUR GeoId 1 after the skip.
+    // Real line (FreeCAD geo 0) → construction line (geo 1, skipped) →
+    // circle (geo 2): the constraint on FreeCAD's geo 2 must land on
+    // OUR geo 1 after the skip.
+    let geometry = "<Geometry type=\"Part::GeomLineSegment\" migrated=\"1\">\
+        <GeoExtensions count=\"0\"></GeoExtensions>\
+        <LineSegment StartX=\"0\" StartY=\"0\" StartZ=\"0\" EndX=\"40\" EndY=\"0\" EndZ=\"0\"/>\
+        </Geometry>\
+        <Geometry type=\"Part::GeomLineSegment\" migrated=\"1\">\
+        <GeoExtensions count=\"0\"></GeoExtensions>\
+        <LineSegment StartX=\"0\" StartY=\"0\" StartZ=\"0\" EndX=\"40\" EndY=\"0\" EndZ=\"0\"/>\
+        <Construction value=\"1\"/>\
+        </Geometry>\
+        <Geometry type=\"Part::GeomCircle\" migrated=\"1\">\
+        <GeoExtensions count=\"0\"></GeoExtensions>\
+        <Circle CenterX=\"60\" CenterY=\"10\" CenterZ=\"0\" NormalX=\"0\" NormalY=\"0\" \
+        NormalZ=\"1\" AngleXU=\"0\" Radius=\"9\"/></Geometry>";
+    let document = format!(
+        "<Document SchemaVersion=\"4\" ProgramVersion=\"FreeCAD 1.0\" FileVersion=\"1\">\
+         <Objects Count=\"1\" Dependencies=\"1\">\
+         <Object type=\"Sketcher::SketchObject\" name=\"Sketch\" id=\"1\"/>\
+         </Objects>\
+         <ObjectData Count=\"1\">\
+         <Object name=\"Sketch\">\
+         <Properties Count=\"4\">\
+         <Property name=\"Label\" type=\"App::PropertyString\"><String value=\"Sketch\"/></Property>\
+         <Property name=\"Placement\" type=\"App::PropertyPlacement\">\
+         <PropertyPlacement Px=\"0\" Py=\"0\" Pz=\"0\" Q0=\"0\" Q1=\"0\" Q2=\"0\" Q3=\"1\"/>\
+         </Property>\
+         <Property name=\"Geometry\" type=\"Part::PropertyGeometryList\">\
+         <GeometryList count=\"3\">{geometry}</GeometryList>\
+         </Property>\
+         <Property name=\"Constraints\" type=\"Sketcher::PropertyConstraintList\">\
+         <ConstraintList count=\"1\">{}</ConstraintList>\
+         </Property>\
+         </Properties>\
+         </Object>\
+         </ObjectData>\
+         </Document>",
+        constrain(11, 2, 0, -2000, 0, 9.0) // Radius on FreeCAD's geo 2
+    );
+    craft_fcstd(&path, &document, &[]);
+
+    let (doc, report) = load_document(&path).unwrap();
+    let warnings = report.warnings.join("\n");
+    assert!(warnings.contains("construction"), "{warnings}");
+    let object = doc.get_by_name("Sketch").expect("sketch loads");
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap();
+    let sketch = &sketch_object.sketch;
+    assert_eq!(
+        sketch.geometry().len(),
+        2,
+        "the construction line was skipped"
+    );
+    let cs = sketch.constraints();
+    assert_eq!(cs.len(), 1);
+    // FreeCAD GeoId 2 → our GeoId 1 (the circle), not 2 (out of range).
+    assert!(
+        matches!(cs[0], fc_sketcher::Constraint::Radius { g, value } if g.0 == 1 && value == 9.0),
+        "the constraint followed the remap: {:?}",
+        cs[0]
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn our_writer_emits_freecad_native_constraint_ordinals() {
+    // The writer side of the interop: what `save_document` writes must
+    // be the FreeCAD form — `<Constrain …/>` elements with FreeCAD's
+    // `ConstraintType` ordinals — so real FreeCAD restores them.
+    let path = temp_path("writer-constrain");
+    cleanup(&path);
+    let fragment = "<Sketch>\
+        <Geometry type=\"1\" startx=\"0\" starty=\"0\" endx=\"40\" endy=\"0\"/>\
+        <Geometry type=\"1\" startx=\"40\" starty=\"0\" endx=\"40\" endy=\"30\"/>\
+        <Geometry type=\"2\" centerx=\"60\" centery=\"10\" radius=\"9\"/>\
+        <Constraint type=\"0\" first=\"0\" firstpos=\"2\" second=\"1\" secondpos=\"1\"/>\
+        <Constraint type=\"1\" first=\"0\"/>\
+        <Constraint type=\"8\" first=\"2\" value=\"9.0\"/>\
+        <Constraint type=\"11\" first=\"0\" second=\"1\" value=\"1.5707963267948966\"/>\
+        </Sketch>";
+    let sketch = fc_sketcher::xml::from_xml(fragment).unwrap();
+    let mut doc = Document::new("t");
+    doc.add(Box::new(fc_sketcher::SketchObject::with_sketch(
+        "Sketch", sketch,
+    )));
+    save_document(&doc, &path).unwrap();
+
+    let file = std::fs::File::open(&path).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("Document.xml").unwrap(), &mut xml).unwrap();
+    // Coincident (ours 0) → FreeCAD 1, with the point slots.
+    assert!(
+        xml.contains("<Constrain Name=\"\" MetaData=\"\" Type=\"1\" ")
+            && xml.contains("First=\"0\" FirstPos=\"2\" Second=\"1\" SecondPos=\"1\""),
+        "{xml}"
+    );
+    // Horizontal (ours 1) → FreeCAD 2, edge form (pos 0, unused -2000).
+    assert!(
+        xml.contains("Type=\"2\"") && xml.contains("First=\"0\" FirstPos=\"0\""),
+        "{xml}"
+    );
+    // Radius (ours 8) → FreeCAD 11.
+    assert!(
+        xml.contains("Type=\"11\"") && xml.contains("Value=\"9.0\""),
+        "{xml}"
+    );
+    // Angle (ours 11) → FreeCAD 9, radians.
+    assert!(xml.contains("Type=\"9\""), "{xml}");
+    // The full attribute set FreeCAD's Restore requires/prefers.
+    assert!(
+        xml.contains("IsDriving=\"1\"") && xml.contains("Third=\"-2000\" ThirdPos=\"0\""),
+        "{xml}"
+    );
+    // And the whole thing round-trips back through our reader.
+    let (doc, report) = load_document(&path).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let object = doc.get_by_name("Sketch").unwrap();
+    let sketch_object = object
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .unwrap();
+    assert_eq!(sketch_object.sketch.constraints().len(), 4);
+    assert_eq!(sketch_object.sketch.geometry().len(), 3);
+    cleanup(&path);
+}
