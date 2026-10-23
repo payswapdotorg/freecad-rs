@@ -86,6 +86,20 @@ load→save cycle never destroys data a real FreeCAD wrote:
   the fixture survive identically.
 - **Document metadata** (Uid, Company, License, `StringHasher`, root
   attributes, `ObjectDeps`) round-trips verbatim.
+- **A round-trip injects nothing either.** The no-inversion of
+  preservation: the document-level property *set* comes back exactly as
+  the file carried it. The loader records which of the modeled document
+  trio (`Label`/`Creator`/`CreationDate`) the source actually wrote, and
+  the writer re-emits exactly that subset (fresh documents — never
+  loaded from a file — still write all three). FreeCAD 1.0 writes no
+  doc-level `Creator` (it moved to `CreatedBy`), so its files must not
+  gain one; older FreeCAD files that carry both keep both. Verified with
+  the real r39109 binary both directions: our re-save of a 1.0 file has
+  the identical 20-name property set, FreeCAD's own re-save of our file
+  has no `Creator` (with the injection, it would have materialized as a
+  dynamic document property and contaminated every later save), and
+  every object's property set round-trips exactly (17/7/23 properties
+  on the lossless fixture's three objects).
 - **Sketch constructs the solver cannot express** — construction
   geometry, off-plane/unmodeled curve kinds, `SnellsLaw`-style
   constraints — keep their raw elements at their original GeoId/list

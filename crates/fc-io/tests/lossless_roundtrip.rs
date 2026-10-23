@@ -275,4 +275,87 @@ fn fresh_document_saves_without_preservation_noise() {
         "a fresh file round-trips warning-free: {:?}",
         report.warnings
     );
+    // The fresh-authoring path keeps writing the full modeled trio —
+    // the no-injection rule applies to round-trips of foreign files,
+    // not to documents this kernel itself originates.
+    let xml = String::from_utf8(zip_entries(&temp)["Document.xml"].clone()).unwrap();
+    let doc_props = doc_property_names(&xml);
+    for expected in ["Label", "Creator", "CreationDate"] {
+        assert!(
+            doc_props.contains(&expected.to_string()),
+            "fresh document writes {expected}"
+        );
+    }
+    std::fs::remove_file(&temp).ok();
+}
+
+/// The names of the document-level `<Property>`/`<_Property>` elements of
+/// `Document.xml` (the section before `<Objects`), as a sorted set.
+fn doc_property_names(xml: &str) -> Vec<String> {
+    let split = xml.find("<Objects").expect("object table present");
+    let section = &xml[..split];
+    let mut names: Vec<String> = section
+        .match_indices("<Property name=\"")
+        .map(|(i, _)| i + "<Property name=\"".len())
+        .map(|i| {
+            let rest = &section[i..];
+            rest[..rest.find('"').expect("quoted")].to_string()
+        })
+        .collect();
+    names.extend(
+        section
+            .match_indices("<_Property name=\"")
+            .map(|(i, _)| i + "<_Property name=\"".len())
+            .map(|i| {
+                let rest = &section[i..];
+                rest[..rest.find('"').expect("quoted")].to_string()
+            }),
+    );
+    names.sort();
+    names
+}
+
+/// A round-trip injects no document property the source did not carry —
+/// and drops none it did. FreeCAD 1.0 writes no doc-level `Creator`
+/// (it moved to `CreatedBy`); the re-saved file must not gain one, and
+/// the full property set must come back equal.
+#[test]
+fn round_trip_injects_no_document_property() {
+    let src = fixture_path("freecad_lossless_full.fcstd");
+    let before_names =
+        doc_property_names(&String::from_utf8(zip_entries(&src)["Document.xml"].clone()).unwrap());
+
+    let (doc, _) = load_document(&src).expect("fixture loads");
+    let temp = std::env::temp_dir().join(format!(
+        "fcrs-noinject-{}-{:?}.fcstd",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    save_document(&doc, &temp).expect("re-save works");
+
+    let after_names =
+        doc_property_names(&String::from_utf8(zip_entries(&temp)["Document.xml"].clone()).unwrap());
+    assert_eq!(
+        before_names, after_names,
+        "the document property set survives the round-trip exactly"
+    );
+    // The regression this test pins: no doc-level `Creator` appears.
+    assert!(
+        !after_names.contains(&"Creator".to_string()),
+        "FreeCAD 1.0 files gain no Creator: {after_names:?}"
+    );
+
+    // Fixed point: the second generation is byte-identical — the bag
+    // records our own trio (Label + CreationDate, no Creator) and the
+    // writer keeps emitting exactly that.
+    let (doc2, _) = load_document(&temp).expect("re-saved file loads");
+    let temp2 = temp.with_extension("gen2.fcstd");
+    save_document(&doc2, &temp2).expect("generation 2 saves");
+    assert_eq!(
+        zip_entries(&temp)["Document.xml"],
+        zip_entries(&temp2)["Document.xml"],
+        "generation 2 is a fixed point"
+    );
+    std::fs::remove_file(&temp).ok();
+    std::fs::remove_file(&temp2).ok();
 }

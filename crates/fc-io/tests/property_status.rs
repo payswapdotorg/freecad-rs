@@ -127,7 +127,9 @@ fn property_status_bits_round_trip() {
         status_of(&doc_section, "CreationDate").as_deref(),
         Some("16777217")
     );
-    // `Creator` carried no status in the fixture; absent stays absent.
+    // FreeCAD 1.0 writes no doc-level `Creator` — and the round-trip
+    // injects none (the re-save omits the property entirely).
+    assert!(!doc_section.contains("<Property name=\"Creator\""));
     assert_eq!(status_of(&doc_section, "Creator"), None);
 
     // --- Unmodeled properties keep theirs inside the raw element: -----

@@ -217,13 +217,28 @@ fn build_document_xml(
         xml.push_str(&format!(" {raw}\n"));
     }
 
-    // Document-level properties: the modeled three (Label / Creator /
-    // CreationDate), then every unmodeled one verbatim (Uid, Company,
-    // License, LicenseURL, Material, Meta, ... — and FreeCAD's transient
-    // `_Property` entries).
+    // Document-level properties: the modeled trio — written in full for
+    // a fresh document, or exactly the subset the source file carried
+    // for a loaded one (a round-trip injects nothing: FreeCAD 1.0 files
+    // have no doc-level `Creator`, and must not gain one) — then every
+    // unmodeled one verbatim (Uid, Company, License, LicenseURL,
+    // Material, Meta, ... — and FreeCAD's transient `_Property`
+    // entries).
+    let trio: [(&str, String); 3] = [
+        ("Label", doc.label().to_string()),
+        ("Creator", doc.creator().to_string()),
+        ("CreationDate", doc.created().to_string()),
+    ];
+    let emitted_trio: Vec<&(&str, String)> = match &pres.modeled_doc_properties {
+        None => trio.iter().collect(),
+        Some(present) => trio
+            .iter()
+            .filter(|(name, _)| present.iter().any(|p| p == name))
+            .collect(),
+    };
     xml.push_str(&format!(
         " <Properties Count=\"{}\" TransientCount=\"{}\"",
-        3 + pres.properties.len(),
+        emitted_trio.len() + pres.properties.len(),
         pres.transient_properties.len()
     ));
     for (key, value) in &pres.properties_attrs {
@@ -235,30 +250,16 @@ fn build_document_xml(
     for (_, raw) in &pres.transient_properties {
         xml.push_str(&format!(" {raw}\n"));
     }
-    push_property(
-        &mut xml,
-        2,
-        "Label",
-        &Property::String(doc.label().to_string()),
-        "App::Document",
-        doc_status(&pres.property_status, "Label"),
-    );
-    push_property(
-        &mut xml,
-        2,
-        "Creator",
-        &Property::String(doc.creator().to_string()),
-        "App::Document",
-        doc_status(&pres.property_status, "Creator"),
-    );
-    push_property(
-        &mut xml,
-        2,
-        "CreationDate",
-        &Property::String(doc.created().to_string()),
-        "App::Document",
-        doc_status(&pres.property_status, "CreationDate"),
-    );
+    for (name, value) in emitted_trio {
+        push_property(
+            &mut xml,
+            2,
+            name,
+            &Property::String(value.clone()),
+            "App::Document",
+            doc_status(&pres.property_status, name),
+        );
+    }
     for (_, raw) in &pres.properties {
         xml.push_str(&format!(" {raw}\n"));
     }
@@ -1511,6 +1512,10 @@ fn parse_document_properties(
     doc: &mut Document,
     report: &mut LoadReport,
 ) -> Result<(), FcstdError> {
+    // This document comes from a file: from here on, the modeled trio is
+    // written back exactly as the file carried it (below) — a fresh
+    // document's `None` keeps the write-all-three default.
+    doc.preservation_mut().modeled_doc_properties = Some(Vec::new());
     loop {
         match next_event(reader, buf)? {
             Event::Start(e) if e.name().as_ref() == b"Property" => {
@@ -1526,14 +1531,29 @@ fn parse_document_properties(
                     ("Label", Some(PropValue::Value(Property::String(s)))) => {
                         doc.set_label(&s);
                         record_doc_status(doc, &name, &map);
+                        doc.preservation_mut()
+                            .modeled_doc_properties
+                            .as_mut()
+                            .expect("initialized above")
+                            .push(name.clone());
                     }
                     ("Creator", Some(PropValue::Value(Property::String(s)))) => {
                         doc.set_creator(&s);
                         record_doc_status(doc, &name, &map);
+                        doc.preservation_mut()
+                            .modeled_doc_properties
+                            .as_mut()
+                            .expect("initialized above")
+                            .push(name.clone());
                     }
                     ("CreationDate", Some(PropValue::Value(Property::String(s)))) => {
                         doc.set_created(s);
                         record_doc_status(doc, &name, &map);
+                        doc.preservation_mut()
+                            .modeled_doc_properties
+                            .as_mut()
+                            .expect("initialized above")
+                            .push(name.clone());
                     }
                     (n @ ("Label" | "Creator" | "CreationDate"), Some(_)) => {
                         report.warnings.push(format!(

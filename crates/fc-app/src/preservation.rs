@@ -153,6 +153,15 @@ pub struct DocumentPreservation {
     /// Attributes of the document `<Properties>` element beyond `Count`
     /// (e.g. FreeCAD's `TransientCount="3"`).
     pub properties_attrs: Vec<(String, String)>,
+    /// Which of the modeled document trio
+    /// (`Label`/`Creator`/`CreationDate`) the loader actually parsed as
+    /// canonical string properties, in file order. `None` — the default
+    /// of a fresh, never-loaded document — means the writer emits all
+    /// three; `Some(set)` means exactly the listed ones, so a round-trip
+    /// injects no property the source did not carry (FreeCAD 1.0 dropped
+    /// doc-level `Creator` in favor of `CreatedBy`; older files carry
+    /// both) and drops none it did.
+    pub modeled_doc_properties: Option<Vec<String>>,
     /// Unmodeled document `<Property>` elements: name → raw source, in
     /// file order. The three the model carries
     /// (`Label`/`Creator`/`CreationDate`) are live state, never here.
