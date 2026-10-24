@@ -122,8 +122,10 @@ const BACK_BIT: u8 = 2;
 /// tessellation trace of a seam against operand B's — two traces of
 /// the same mathematical curve that disagree by up to a deflection —
 /// so it must know which side of the seam each boundary edge is on.
-/// Planar seams never need this: their crossing points are bit-exact
-/// and the weld closes them without help.
+/// Planar seams never reach that machinery: their traces disagree
+/// only by construction noise (the same point computed by two
+/// arithmetic paths), and the exact weld
+/// ([`weld_exact_seams`]) closes them before it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
     A,
@@ -734,6 +736,23 @@ const HOLE_CAP_SCALE: f64 = 2.0;
 /// rejected wholesale.
 const SEAM_REPAIR_VOLUME_GUARD: f64 = 0.05;
 
+/// Construction-noise scale for the exact seam weld: two traces of
+/// the same mathematical point — an operand's own corner split onto
+/// the other operand's edge two different ways, each operand's
+/// tessellation crossings of the same plane arrangement — disagree
+/// by a few ulps of the coordinates involved, ~2⁻⁵² of their
+/// magnitude per rounding. This bound allows ~2⁴⁰ such roundings:
+/// three orders above the worst disagreement the split arithmetic
+/// produces, and six orders below the kernel's smallest honest
+/// feature separation (the one-millionth blind-spot test).
+const SEAM_TWIN_NOISE: f64 = 9.094947017729282e-13; // 2^-40
+
+/// How many exact-weld rounds (twin weld, then noise interleave)
+/// before the pass declares the seam beyond it and hands it to the
+/// tolerance machinery. Each round is idempotent on a seam it
+/// cannot help — two rounds are structural, the rest is margin.
+const EXACT_WELD_ROUNDS: usize = 4;
+
 /// Close the seams the bit-exact weld could not.
 ///
 /// # The failure this repairs
@@ -805,6 +824,61 @@ fn close_curved_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) {
     if entry_seam.is_empty() {
         return; // Already watertight: the exact-weld path, untouched.
     }
+    // The exact closure first: planar seams (and the planar stretches
+    // of mixed ones) are pairs of traces through the *same
+    // mathematical points* computed by different arithmetic — twins
+    // ulps apart, T-junctions on shared lines. Weld the twins,
+    // interleave the junctions at construction noise, and the seam
+    // closes without moving anything measurable. The tolerance
+    // machinery below must not see these seams: its consensus snap
+    // quantizes to a sampling-fraction grid, which on a seam of exact
+    // model points (an operand's corner) fabricates volume.
+    //
+    // A seam the exact pass closes *fully* is taken over
+    // wholesale: the needle caps the split fans left collapse
+    // exactly (their apexes are the split's own vertices), and a
+    // degenerate-free result returns without the tolerance machinery
+    // ever engaging. When slivers the exact pass cannot own remain
+    // (a curved seam's deflection pieces), the mesh falls through
+    // to the degenerate sweep below: the mend rounds never engage
+    // on an already-closed mesh (the loop breaks at its boundary
+    // check, so cap, snap, and interleave never touch it), while the
+    // sweep prunes the sub-bar slivers and the closers repair the
+    // reopen — the same tail every closure takes.
+    //
+    // A seam the exact pass closes only *partially* (a curved seam
+    // with planar stretches) is restored whole: the tolerance
+    // machinery is calibrated on the seam exactly as the bare weld
+    // produced it, and its behavior on that input is the proven one.
+    {
+        let original = mesh.clone();
+        let original_sides = sides.clone();
+        let volume_before = original.volume();
+        let exact_takeover = weld_exact_seams(mesh, sides)
+            && mesh_is_closed(mesh)
+            && (mesh.volume() - volume_before).abs() <= exact_weld_volume_bound(mesh) + PLANE_EPS;
+        if exact_takeover {
+            collapse_needle_caps(mesh, sides);
+            let degenerate_free = !mesh
+                .triangles
+                .iter()
+                .any(|t| triangle_area_x2(mesh, t) < 2.0 * DEGENERATE_AREA);
+            if mesh_is_closed(mesh) && degenerate_free {
+                compact_vertices(mesh);
+                return; // Closed exactly: nothing was quantized.
+            }
+            // Slivers the exact pass cannot own remain: fall through
+            // to the degenerate sweep with the exact-closed seam.
+        } else {
+            // Unreachable for a noise-bounded closure by construction
+            // (the weld only moves ulps); for the partial case it is
+            // the policy: the tolerance machinery sees the seam
+            // exactly as the bare weld produced it.
+            *mesh = original;
+            *sides = original_sides;
+        }
+    }
+    let entry_seam = boundary_edges(mesh, sides);
     let original = mesh.clone();
     let mut repaired_sides = sides.clone();
     let entry_endpoints: Vec<(u32, u32)> = entry_seam.iter().map(|((u, v), _)| (*u, *v)).collect();
@@ -1602,21 +1676,376 @@ fn snap_to_consensus(mesh: &mut Mesh, sides: &mut Vec<Side>, entry: &[(u32, u32)
     true
 }
 
-/// Insert boundary vertices of one sheet into the interior of the other
-/// sheet's boundary edges within [`SEAM_BRIDGE_SCALES`] sampling
-/// widths — the tolerance-based generalization of the T-junction
-/// stitch. Insertion splits the single triangle owning the boundary
-/// edge; nothing moves, nothing is removed, so the operation is
+/// Weld the seams whose two traces are the same mathematical points
+/// computed by different arithmetic — the planar case, and the planar
+/// stretches of any mixed seam.
+///
+/// # The failure this repairs
+///
+/// When both operands bound planar faces, every seam vertex is the
+/// intersection of two exact planes with an exact edge — a point the
+/// model *defines*, not one the tessellation estimates. But the two
+/// sheets compute those points independently: operand A's kept piece
+/// gets the corner of B split onto *its* triangle edges, while B's
+/// wall piece gets its own input vertex or its own split of A's edge;
+/// each operand's face-diagonal crossings land on the other's trace
+/// as T-junctions. The same mathematical point therefore arrives as
+/// **construction-noise twins** — bit-different by a few ulps — and
+/// the traces carry genuinely different vertex sets. The bit-exact
+/// weld of [`mesh_from_sided`] cannot see the twins; the open seams
+/// they leave are slivers one ulp wide, fanning out to real model
+/// points.
+///
+/// The tolerance machinery quantizes such seam vertices onto a
+/// sampling-fraction grid — correct where the position is the weld's
+/// *estimate* of a curved trace, fabricating volume where the
+/// position is an exact model point (an operand's corner). This pass
+/// runs first and closes the seam exactly, so the tolerance
+/// machinery never sees it:
+///
+/// 1. **Twin weld** — boundary vertices within construction noise of
+///    each other merge onto the group's lowest index. Every move is
+///    ulp-scale; the needle slits between twin pairs collapse (their
+///    two long edges become one undirected edge used by both flanking
+///    triangles, their ULP edge becomes a dropped self-loop).
+/// 2. **Noise interleave** — each sheet's remaining boundary vertex
+///    inserts into the other sheet's boundary edge it lies on within
+///    noise: the T-junction stitch at construction tolerance, placing
+///    the vertex itself (nothing moves).
+///
+/// Curved seams are untouched by construction: their traces disagree
+/// by a deflection — orders above the noise bound — so no twin pairs
+/// and no vertex lies within noise of the other trace. The pass is
+/// self-selecting; mixed seams get their planar stretches closed
+/// exactly and hand only the curved remainder to the tolerance
+/// machinery.
+///
+/// # Contract
+///
+/// * Only seam vertices (endpoints of boundary edges) participate;
+///   interior vertices keep their exact slots — an operand's honest
+///   surface is never quantized here.
+/// * Deterministic: twins union-find onto the lower index; insertions
+///   schedule in `BTreeMap` order; ties break on the far vertex.
+/// * Wholesale-or-not-at-all: the caller gates the result — a
+///   closure that moved volume beyond the noise-implied bound
+///   ([`exact_weld_volume_bound`], unreachable by construction)
+///   reverts and falls through to the tolerance machinery.
+fn weld_exact_seams(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
+    debug_assert_eq!(mesh.triangles.len(), sides.len());
+    for _ in 0..EXACT_WELD_ROUNDS {
+        let boundary = boundary_edges(mesh, sides);
+        if boundary.is_empty() {
+            return true;
+        }
+        let welded = weld_noise_twins(mesh, sides, &boundary);
+        let boundary = boundary_edges(mesh, sides);
+        if boundary.is_empty() {
+            return true;
+        }
+        let noise = seam_noise(mesh, &boundary);
+        let interleaved = interleave_edges_within(mesh, sides, &boundary, noise, noise);
+        if !welded && !interleaved {
+            // No exact progress on this seam: not this pass's to close.
+            return false;
+        }
+    }
+    boundary_edges(mesh, sides).is_empty()
+}
+
+/// Construction noise of a seam, as an absolute distance: the bound
+/// is relative to the seam's own coordinate magnitude (an ulp of 10
+/// is ten ulps of 1), floored so a seam at the origin still has a
+/// usable tolerance.
+fn seam_noise(mesh: &Mesh, boundary: &[((u32, u32), Side)]) -> f64 {
+    let magnitude = boundary
+        .iter()
+        .flat_map(|((u, v), _)| [*u, *v])
+        .flat_map(|v| {
+            let p = mesh.vertices[v as usize];
+            [p.x.abs(), p.y.abs(), p.z.abs()]
+        })
+        .fold(1.0f64, f64::max);
+    SEAM_TWIN_NOISE * magnitude
+}
+
+/// Merge the seam's construction-noise twins: boundary vertices that
+/// are the same mathematical point computed by different arithmetic.
+/// Each group keeps its lowest vertex index's position — every
+/// member is within noise of it, so nothing measurable moves —
+/// triangles remap, the repeated-index slivers the merge collapses
+/// drop, and duplicate covers fold. Returns whether anything welded.
+fn weld_noise_twins(
+    mesh: &mut Mesh,
+    sides: &mut Vec<Side>,
+    boundary: &[((u32, u32), Side)],
+) -> bool {
+    let mut eligible: Vec<u32> = boundary.iter().flat_map(|((u, v), _)| [*u, *v]).collect();
+    eligible.sort_unstable();
+    eligible.dedup();
+    if eligible.len() < 2 {
+        return false;
+    }
+    let noise = seam_noise(mesh, boundary);
+    // Union-find over the eligible slots, sweeping on x so the
+    // quadratic pass only visits the noise neighborhood.
+    let mut order: Vec<u32> = (0..eligible.len() as u32).collect();
+    order.sort_by(|&a, &b| {
+        let pa = mesh.vertices[eligible[a as usize] as usize].x;
+        let pb = mesh.vertices[eligible[b as usize] as usize].x;
+        pa.partial_cmp(&pb).expect("finite coordinates")
+    });
+    let mut parent: Vec<u32> = (0..eligible.len() as u32).collect();
+    for i in 0..order.len() {
+        for j in i + 1..order.len() {
+            let (a, b) = (eligible[order[i] as usize], eligible[order[j] as usize]);
+            let (pa, pb) = (mesh.vertices[a as usize], mesh.vertices[b as usize]);
+            if pb.x - pa.x > noise {
+                break; // x-sorted: everything further is farther still.
+            }
+            if (pb - pa).length() <= noise {
+                let (ra, rb) = (
+                    find_root(&mut parent, order[i]),
+                    find_root(&mut parent, order[j]),
+                );
+                if ra != rb {
+                    parent[rb as usize] = ra;
+                }
+            }
+        }
+    }
+    // Representative: the group's lowest vertex index.
+    let mut group_rep: BTreeMap<u32, u32> = BTreeMap::new();
+    for (slot, &v) in eligible.iter().enumerate() {
+        let r = find_root(&mut parent, slot as u32);
+        group_rep
+            .entry(r)
+            .and_modify(|m| *m = (*m).min(v))
+            .or_insert(v);
+    }
+    let mut remap: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
+    let mut changed = false;
+    for (slot, &v) in eligible.iter().enumerate() {
+        let rep = group_rep[&find_root(&mut parent, slot as u32)];
+        remap[v as usize] = rep;
+        if rep != v {
+            changed = true;
+        }
+    }
+    if !changed {
+        return false;
+    }
+    for triangle in &mut mesh.triangles {
+        for index in triangle {
+            *index = remap[*index as usize];
+        }
+    }
+    drop_repeated_index_triangles(mesh, sides);
+    collapse_duplicate_triangles(&mut mesh.triangles, sides);
+    true
+}
+
+/// Volume an exact weld may legitimately move: every twin merge moves
+/// a vertex by at most the seam's construction noise and every
+/// insertion bends an edge by the same, so the divergence volume
+/// shifts by at most noise x total surface area — with an order of
+/// margin. A closure that moved more than this did something the
+/// exact weld cannot, and the caller reverts it.
+fn exact_weld_volume_bound(mesh: &Mesh) -> f64 {
+    if mesh.triangles.is_empty() {
+        return 0.0;
+    }
+    let mut max_coord = 1.0f64;
+    for vertex in &mesh.vertices {
+        max_coord = max_coord
+            .max(vertex.x.abs())
+            .max(vertex.y.abs())
+            .max(vertex.z.abs());
+    }
+    let noise = SEAM_TWIN_NOISE * max_coord;
+    let area: f64 = mesh
+        .triangles
+        .iter()
+        .map(|t| triangle_area_x2(mesh, t) * 0.5)
+        .sum();
+    8.0 * noise * area
+}
+
+/// How many needle-cap rounds before the collapse leaves the rest to
+/// the restore path: a chain of collinear caps collapses one link
+/// per round (the healthy end first, the split piece then becomes
+/// the next link's neighbor), and real chains — a coincident-plane
+/// interlock's fan along one chord — run a dozen deep. Anything
+/// deeper than this leaves the seam to the tolerance machinery's
+/// proven path instead (the takeover aborts whole).
+const NEEDLE_CAP_ROUNDS: usize = 64;
+
+/// Collapse the zero-area needle caps an exact seam closure can
+/// carry: a triangle whose apex lies on the interior of its own
+/// longest edge — the fan a plane split placed a vertex exactly on
+/// another piece's edge. The cap is removed and the neighbor across
+/// its base is split at the apex, so every edge keeps its two users
+/// and nothing measurable moves: the cap had no area, and the split
+/// re-routes the neighbor's base through the point the cap already
+/// touched.
+///
+/// # Contract
+///
+/// * Only an **already closed** mesh takes the collapse — the base's
+///   second user must exist (an open mesh keeps its damage for the
+///   closers).
+/// * Only apex-on-interior-of-base caps collapse, with both split
+///   segments clearing [`PLANE_EPS`] (the endcap zone is the twins'
+///   and the sweep's business). A sub-bar triangle in general
+///   position — a genuine deflection sliver — is left for the
+///   degenerate sweep.
+/// * A cap whose base neighbor is itself sub-bar is deferred (a
+///   chain collapses from its healthy end, one link per round).
+/// * Deterministic: candidates visit in triangle order; the split
+///   preserves the neighbor's winding and takes its side.
+fn collapse_needle_caps(mesh: &mut Mesh, sides: &mut [Side]) -> bool {
+    debug_assert_eq!(mesh.triangles.len(), sides.len());
+    let mut any = false;
+    for _ in 0..NEEDLE_CAP_ROUNDS {
+        // (cap index, base edge (x,y) in the cap's winding, apex)
+        let mut candidates: Vec<(usize, (u32, u32), u32)> = Vec::new();
+        for (i, t) in mesh.triangles.iter().enumerate() {
+            if triangle_area_x2(mesh, t) >= 2.0 * DEGENERATE_AREA {
+                continue;
+            }
+            // The longest edge is the base; the remaining corner is
+            // the apex that sits on it.
+            let edges = [(t[0], t[1], t[2]), (t[1], t[2], t[0]), (t[2], t[0], t[1])];
+            let mut best: Option<(f64, usize)> = None;
+            for (k, &(x, y, _)) in edges.iter().enumerate() {
+                let len = (mesh.vertices[y as usize] - mesh.vertices[x as usize]).length();
+                if best.map_or(true, |(bl, _)| len > bl) {
+                    best = Some((len, k));
+                }
+            }
+            let Some((base_len, k)) = best else { continue };
+            let (x, y, apex) = edges[k];
+            if !base_len.is_finite() || base_len <= 0.0 {
+                continue;
+            }
+            // Apex strictly inside the base, both segments real edges.
+            let (px, py) = (mesh.vertices[x as usize], mesh.vertices[y as usize]);
+            let pa = mesh.vertices[apex as usize];
+            let ab = py - px;
+            let t = (pa - px).dot(&ab) / (base_len * base_len);
+            if t * base_len <= PLANE_EPS || (1.0 - t) * base_len <= PLANE_EPS {
+                continue;
+            }
+            if t <= 0.0 || t >= 1.0 {
+                continue;
+            }
+            candidates.push((i, (x, y), apex));
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        let mut collapsed_this_round = 0;
+        for (cap, (x, y), apex) in candidates {
+            // An earlier collapse this round may have rewritten the
+            // slot (the neighbor split reuses cap slots): re-verify.
+            let ct = mesh.triangles[cap];
+            if triangle_area_x2(mesh, &ct) >= 2.0 * DEGENERATE_AREA
+                || !ct.contains(&x)
+                || !ct.contains(&y)
+                || !ct.contains(&apex)
+            {
+                continue;
+            }
+            // The neighbor across the base: exactly one other user of
+            // the undirected edge, healthy (a chain link defers to a
+            // later round).
+            let key = if x < y { (x, y) } else { (y, x) };
+            let mut neighbor: Option<usize> = None;
+            let mut users = 0;
+            for (j, u) in mesh.triangles.iter().enumerate() {
+                if j == cap {
+                    continue;
+                }
+                for k in 0..3 {
+                    let (a, b) = (u[k], u[(k + 1) % 3]);
+                    let ukey = if a < b { (a, b) } else { (b, a) };
+                    if ukey == key {
+                        users += 1;
+                        neighbor = Some(j);
+                    }
+                }
+            }
+            if users != 1 {
+                continue;
+            }
+            let Some(nb) = neighbor else { continue };
+            if triangle_area_x2(mesh, &mesh.triangles[nb]) < 2.0 * DEGENERATE_AREA {
+                continue; // Chain link: collapse from the healthy end.
+            }
+            // Split the neighbor across the base at the apex,
+            // preserving its winding: its directed edge (x, y) becomes
+            // x -> apex -> y.
+            let u = mesh.triangles[nb];
+            let mut replaced = false;
+            for k in 0..3 {
+                if (u[k], u[(k + 1) % 3]) == (x, y) || (u[k], u[(k + 1) % 3]) == (y, x) {
+                    let d = u[(k + 2) % 3];
+                    mesh.triangles[nb] = [u[k], apex, d];
+                    let piece = [apex, u[(k + 1) % 3], d];
+                    // The cap is gone; the split's second piece takes
+                    // its slot in the list.
+                    mesh.triangles[cap] = piece;
+                    sides[cap] = sides[nb];
+                    replaced = true;
+                    break;
+                }
+            }
+            if replaced {
+                collapsed_this_round += 1;
+                any = true;
+            } else {
+                // The neighbor does not traverse the base as a
+                // directed edge (a repeated-index remnant): leave it.
+            }
+        }
+        if collapsed_this_round == 0 {
+            break;
+        }
+    }
+    any
+}
+
+fn interleave_traces(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
+    let boundary = boundary_edges(mesh, sides);
+    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, &boundary);
+    interleave_edges_within(mesh, sides, &boundary, reach, PLANE_EPS)
+}
+
+/// Interleave boundary vertices of one sheet into the interior of the
+/// other sheet's boundary edges within tolerance — the
+/// generalization of the T-junction stitch. Insertion splits the
+/// single triangle owning the boundary edge at the *inserted vertex
+/// itself* (nothing moves, nothing is removed), so the operation is
 /// unconditionally safe: after it, a vertex the other sheet's
 /// tessellation samples between two of this sheet's samples lies on
 /// both traces, and the traces' edge sets align wherever the seam
 /// curve is followed in the same order. Returns whether anything was
 /// inserted.
-fn interleave_traces(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
-    let boundary = boundary_edges(mesh, sides);
-    let reach = SEAM_BRIDGE_SCALES * seam_scale(mesh, &boundary);
+///
+/// The tolerance regime passes the sampling-scaled `reach`; the exact
+/// weld passes construction noise — the same operation at the scale
+/// where "lies on the edge" means "is the same point two arithmetic
+/// paths computed".
+fn interleave_edges_within(
+    mesh: &mut Mesh,
+    sides: &mut Vec<Side>,
+    boundary: &[((u32, u32), Side)],
+    reach: f64,
+    endcap: f64,
+) -> bool {
+    debug_assert!(reach > 0.0 && endcap > 0.0);
     let mut edges_of: [Vec<(u32, u32)>; 2] = [Vec::new(), Vec::new()];
-    for ((u, v), side) in &boundary {
+    for ((u, v), side) in boundary {
         edges_of[index_of(*side)].push((*u, *v));
     }
     let mut any_inserted = false;
@@ -1648,8 +2077,8 @@ fn interleave_traces(mesh: &mut Mesh, sides: &mut Vec<Side>) -> bool {
                 }
                 let t = (p - pa).dot(&ab) / (len * len);
                 // Interior foot only; the endcap zone is snapping's
-                // business.
-                if t * len <= PLANE_EPS || (1.0 - t) * len <= PLANE_EPS {
+                // business (at noise scale, the twin weld's).
+                if t * len <= endcap || (1.0 - t) * len <= endcap {
                     continue;
                 }
                 if t <= 0.0 || t >= 1.0 {
@@ -3680,19 +4109,22 @@ mod tests {
         }
     }
 
-    /// A **known, pre-existing defect**, recorded executably: a rotated
-    /// box whose boundary crosses the other operand's faces loses or
-    /// duplicates whole chunks — the planar-seam path has none of the
-    /// operand-aware repair machinery the curved-seam path carries, and
-    /// the exact rational reference (`scripts/exact_boolean_reference.py`)
-    /// makes the divergence measurable: for a 6×6×6 box rotated by
-    /// (0.6, 0.8) at (10, 8, 3.5) cut from the 10×8×6 box the truth is
-    /// `V(A − B) = 430.5` while the kernel returns ≈447.03 — bit-identical
-    /// to the tolerance regime before exact classification, so the
-    /// defect is in the seam construction, not the sides. Axis-aligned
-    /// crossings (the unrotated twin) are exact.
+    /// The crossing case — the seam construction's hardest planar
+    /// configuration, closed exactly: a rotated box whose boundary
+    /// crosses the other operand's faces in three directions at once
+    /// (through the x=10 wall, the y=8 wall, and the top z=6 face).
+    /// Every seam point is the intersection of two exact planes with
+    /// an exact edge, and the two sheets' traces of it disagree only
+    /// by construction noise — the twins the exact weld
+    /// ([`weld_exact_seams`]) merges, the T-junctions it interleaves.
+    /// The exact rational reference
+    /// (`scripts/exact_boolean_reference.py`) pins all three volumes;
+    /// axis-aligned crossings (the unrotated twin) and the
+    /// fully-interior rotated case were already exact. Before the
+    /// exact weld, the tolerance machinery quantized the seam's exact
+    /// model points onto a sampling grid and returned ≈447.03 for
+    /// the cut against the truth of 430.5.
     #[test]
-    #[ignore = "known defect: planar-seam construction drops/duplicates                 chunks when a rotated boundary crosses the other operand                 (pre-dates exact classification; see                 scripts/exact_boolean_reference.py)"]
     fn boolean_rotated_box_crossing_faces_matches_exact_reference() {
         let a = box_at(10.0, 8.0, 6.0, 0.0, 0.0, 0.0);
         let mut b = TopoShape::Box {
@@ -3714,6 +4146,7 @@ mod tests {
             ("fuse", fuse(&a, &b), 646.5),
             ("common", common(&a, &b), 49.5),
         ] {
+            assert!(mesh_is_closed(&m), "{name}: watertight");
             let got = m.volume();
             assert!(
                 (got - expected).abs() <= 1e-9,
