@@ -591,6 +591,14 @@ fn push_property(
     // are `App::PropertyLength` in FreeCAD 1.0 (verified against its
     // own files), so that is what our files must say.
     let ty = canonical_type_for(owner_type, name, default_ty);
+    // The XLink pair: the model carries it as a LinkSub, but the
+    // element must be FreeCAD's `<XLink>` form or the value silently
+    // drops on restore (see `XLINK_PROPERTIES`).
+    let body = if ty == "App::PropertyXLink" {
+        xlink_body(value)
+    } else {
+        body
+    };
     match status {
         Some(s) => xml.push_str(&format!(
             "{ind}<Property name=\"{}\" type=\"{ty}\" status=\"{}\">\n",
@@ -623,7 +631,56 @@ fn canonical_type_for<'a>(owner_type: &str, name: &str, default_ty: &'a str) -> 
             _ => default_ty,
         };
     }
+    if default_ty == "App::PropertyLinkSub" && is_xlink_property(owner_type, name) {
+        return "App::PropertyXLink";
+    }
     default_ty
+}
+
+/// FreeCAD properties declared `App::PropertyXLink` in the real program's
+/// classes (checked against r39109's serialization: an `App::Link`'s
+/// `LinkedObject`). An in-document XLink is semantically a LinkSub, but
+/// the element forms are NOT interchangeable on restore — FreeCAD's
+/// `PropertyXLink::Restore` reads only `<XLink …>` elements, and a
+/// `<LinkSub>` form silently drops the value (observed against the
+/// r39109 binary: `LinkedObject` restores as `None`). The reader maps
+/// exactly these (type, property) pairs into the model as `LinkSub`
+/// (the link graph sees them); the writer re-emits the XLink element
+/// for them. Any other XLink — on types outside this table, or pointing
+/// at another file — stays preserved verbatim (outside this kernel's
+/// model).
+const XLINK_PROPERTIES: &[(&str, &str)] = &[("App::Link", "LinkedObject")];
+
+fn is_xlink_property(owner_type: &str, prop: &str) -> bool {
+    XLINK_PROPERTIES
+        .iter()
+        .any(|(t, p)| *t == owner_type && *p == prop)
+}
+
+/// The `<XLink …>` element FreeCAD's `PropertyXLink::Save` writes
+/// (r39109): `file="" stamp="" name="…"` for in-document links, with
+/// `<Sub …/>` children when subelements are addressed.
+fn xlink_body(value: &Property) -> String {
+    let Property::LinkSub(target, subs) = value else {
+        return String::new();
+    };
+    if subs.is_empty() {
+        format!(
+            "<XLink file=\"\" stamp=\"\" name=\"{}\"/>",
+            escape_attr(target)
+        )
+    } else {
+        let mut body = format!(
+            "<XLink file=\"\" stamp=\"\" name=\"{}\" count=\"{}\">",
+            escape_attr(target),
+            subs.len()
+        );
+        for sub in subs {
+            body.push_str(&format!("<Sub value=\"{}\"/>", escape_attr(sub)));
+        }
+        body.push_str("</XLink>");
+        body
+    }
 }
 
 /// The dimension properties FreeCAD types `App::PropertyLength`
@@ -1589,7 +1646,7 @@ fn parse_document_properties(
                 // consumes exactly that far).
                 let after_start = reader.buffer_position() as usize;
                 let value =
-                    parse_property_value(reader, buf, xml, "document", &name, &map, report)?;
+                    parse_property_value(reader, buf, xml, "document", "", &name, &map, report)?;
                 match (name.as_str(), value) {
                     ("Label", Some(PropValue::Value(Property::String(s)))) => {
                         doc.set_label(&s);
@@ -2006,7 +2063,16 @@ fn parse_object_properties(
                 // '<' (buffer_position is past the start tag) to wherever
                 // the value parser stops (always at `</Property>`).
                 let after_start = reader.buffer_position() as usize;
-                let value = parse_property_value(reader, buf, xml, owner, &name, &map, report)?;
+                let value = parse_property_value(
+                    reader,
+                    buf,
+                    xml,
+                    owner,
+                    object.type_name(),
+                    &name,
+                    &map,
+                    report,
+                )?;
                 let after_end = reader.buffer_position() as usize;
                 match (name.is_empty(), value) {
                     (false, Some(PropValue::Value(v))) => {
@@ -3030,11 +3096,13 @@ fn store_sketch_fragment(
 /// Parse one `<Property>`'s value element. Called after the Property Start
 /// event; consumes through the Property End event and returns the value
 /// (or `None` after recording a warning).
+#[allow(clippy::too_many_arguments)] // pull-parser plumbing + the object-type context
 fn parse_property_value(
     reader: &mut XmlReader<'_>,
     buf: &mut Vec<u8>,
     xml: &[u8],
     owner: &str,
+    owner_type: &str,
     prop: &str,
     prop_attrs: &BTreeMap<String, String>,
     report: &mut LoadReport,
@@ -3044,7 +3112,8 @@ fn parse_property_value(
         match next_event(reader, buf)? {
             // Self-closing value element, the normal case.
             Event::Empty(e) => {
-                let value = parse_value_element(&e, None, &[], owner, prop, prop_type, report)?;
+                let value =
+                    parse_value_element(&e, None, &[], owner, owner_type, prop, prop_type, report)?;
                 return finish_property(reader, buf, value);
             }
             // Value element with content (e.g. FreeCAD's inline
@@ -3168,6 +3237,7 @@ fn parse_property_value(
                     Some(&text),
                     &children,
                     owner,
+                    owner_type,
                     prop,
                     prop_type,
                     report,
@@ -3221,11 +3291,13 @@ fn finish_property(
 /// with an optional unit and are mapped to plain floats (recorded in the
 /// report), and unknown value elements are recorded per-property in
 /// `LoadReport::skipped_properties` (never fatal).
+#[allow(clippy::too_many_arguments)] // pull-parser plumbing + the object-type context
 fn parse_value_element(
     e: &BytesStart<'_>,
     text: Option<&[u8]>,
     children: &[(String, BTreeMap<String, String>)],
     owner: &str,
+    owner_type: &str,
     prop: &str,
     prop_type: &str,
     report: &mut LoadReport,
@@ -3365,6 +3437,45 @@ fn parse_value_element(
                     .unwrap_or(subs.len()),
             );
             Ok(Some(PropValue::Value(Property::LinkSub(value, subs))))
+        }
+        // `App::PropertyXLink` — the extended link `App::Link` carries in
+        // its `LinkedObject` (r39109's form: `<XLink file="" stamp=""
+        // name="LeafBox"/>`, plus `<Sub value="…"/>` children when
+        // subelements are addressed). An in-document link (empty `file`)
+        // on a known (type, property) pair (see `XLINK_PROPERTIES`) is
+        // exactly a LinkSub semantically and maps into the model — the
+        // writer re-emits the XLink form for the pair, so FreeCAD's
+        // restore keeps the value (a `<LinkSub>` element there silently
+        // drops it). Anything else — external-file links, in-document
+        // links on unmapped types — is outside this kernel's model and
+        // preserved verbatim instead (honest skip, never a silent
+        // drop).
+        "XLink" => {
+            let file = map.get("file").cloned().unwrap_or_default();
+            if file.is_empty() && is_xlink_property(owner_type, prop) {
+                let value = map.get("name").cloned().unwrap_or_default();
+                let mut subs: Vec<String> = children
+                    .iter()
+                    .filter(|(name, _)| name == "Sub")
+                    .filter_map(|(_, attrs)| attrs.get("value").cloned())
+                    .collect();
+                if let Some(count) =
+                    map.get("count").and_then(|c| c.trim().parse::<usize>().ok())
+                {
+                    subs.truncate(count);
+                }
+                Ok(Some(PropValue::Value(Property::LinkSub(value, subs))))
+            } else if file.is_empty() {
+                skip_warn!(
+                    "{owner}: property '{prop}': in-document XLink on an unmapped \
+                     (type, property) — outside this kernel's model"
+                )
+            } else {
+                skip_warn!(
+                    "{owner}: property '{prop}': external XLink to file \
+                     '{file}' — outside this kernel's model"
+                )
+            }
         }
         "LinkList" => {
             // FreeCAD's form: `<LinkList count="N"><Link value="…"/>…
@@ -3814,10 +3925,20 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         // own — loaded as plain property containers (see `LoadContainer`)
         // that list and re-save under their own type id. Their `Group` /
         // `Tip` / `LinkedObject` / `Role` / `Placement`/ parameters ride
-        // in as ordinary properties; no attachment or grouping semantics
-        // are derived from them (documented non-goal).
+        // in as ordinary properties (FreeCAD 1.0 writes group `Group`
+        // membership as `App::PropertyLinkList`; the reader maps both it
+        // and our legacy string-list spelling); no attachment or grouping
+        // semantics are derived from them (documented non-goal).
         "App::Part" => Some(Box::new(LoadContainer::new("App::Part", name))),
         "PartDesign::Body" => Some(Box::new(LoadContainer::new("PartDesign::Body", name))),
+        // FreeCAD 1.0's real group type, plus our pre-parity-gate legacy
+        // spelling of it (the gate's first-contact find: the hand-authored
+        // `App::DocumentGroup` is not a type real FreeCAD knows — it drops
+        // such objects on restore; see docs/EQUIVALENCE.md).
+        "App::DocumentObjectGroup" => Some(Box::new(LoadContainer::new(
+            "App::DocumentObjectGroup",
+            name,
+        ))),
         "App::DocumentGroup" => Some(Box::new(LoadContainer::new("App::DocumentGroup", name))),
         "App::Link" => Some(Box::new(LoadContainer::new("App::Link", name))),
         "App::Origin" => Some(Box::new(LoadContainer::new("App::Origin", name))),
@@ -3831,7 +3952,8 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
 /// Loader-side generic object: a named property container for FreeCAD
 /// object types that carry no geometry semantics we model — the
 /// container/link/origin family (`App::Part`, `PartDesign::Body`,
-/// `App::DocumentGroup`, `App::Link`, `App::Origin`, `App::Plane`,
+/// `App::DocumentObjectGroup` and its legacy `App::DocumentGroup`
+/// spelling, `App::Link`, `App::Origin`, `App::Plane`,
 /// `App::Line`), the `Part::Feature` family root, and (via the caller)
 /// unknown `Part::`-family members with their source type id kept in a
 /// `TypeId` property.

@@ -33,20 +33,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKDIR="${PARITY_WORKDIR:-/tmp/parity-work}"
 FIXTURES="${FREECAD_FIXTURES:-$REPO_ROOT/crates/fc-io/tests/fixtures}"
 
-# Recorded defects — quarantined from the gate until fixed (each is a
-# first-contact find of this gate, 2026-10-24; see docs/EQUIVALENCE.md
-# "what the parity gate has caught"):
-#
-#   freecad_sketch_constraints  FreeCAD's solver reports conflicting
-#       constraints (2,3,5,8,9,10,11,13): the hand-designed set is
-#       redundant (Perpendicular+Angle+Horizontal+Vertical overlap;
-#       Radius 9 + Diameter 18 on one circle). The fixture needs a
-#       DOF-consistent redesign authored through freecadcmd.
-#   partdesign_body  the Pad's Profile is App::PropertyLink, but
-#       FreeCAD 1.0's Pad uses App::PropertyLinkSub — restore drops
-#       the link ("No object linked"). The fixture needs regeneration
-#       through real FreeCAD (the v0.1.6 LinkSub form).
-QUARANTINE="${PARITY_QUARANTINE-freecad_sketch_constraints partdesign_body}"
+# Recorded defects — quarantined from the gate until fixed (see
+# docs/EQUIVALENCE.md "what the parity gate has caught"). All three
+# first-contact finds (2026-10-24) were fixture-authoring defects, fixed
+# by regenerating the fixtures through real FreeCAD
+# (scripts/parity/regen_fixtures.py): the sketch's constraint set was
+# redesigned DOF-consistent, the Pad's Profile now rides in FreeCAD
+# 1.0's LinkSub form, and the groups are real App::DocumentObjectGroups
+# with LinkList membership. The quarantine is empty and kept as the
+# mechanism for the next find.
+QUARANTINE="${PARITY_QUARANTINE-}"
 
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/refs" "$WORKDIR/roundtrips"

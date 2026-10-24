@@ -100,7 +100,9 @@
 //! - `App::Part` — `Group` (string list) + `Placement` ride in as
 //!   properties; it is NOT a geometric object for us
 //! - `PartDesign::Body` — `Tip`, `Group`, `Placement`
-//! - `App::DocumentGroup` — `Group`
+//! - `App::DocumentObjectGroup` — `Group` (FreeCAD 1.0's real group
+//!   type, `App::PropertyLinkList` membership; our legacy
+//!   `App::DocumentGroup` spelling still loads and re-saves as-is)
 //! - `App::Link` — `LinkedObject`, `LinkTransform` (bool)
 //! - `App::Origin` and its `App::Plane` / `App::Line` children —
 //!   `Placement` and `Role`; no attachment semantics are derived

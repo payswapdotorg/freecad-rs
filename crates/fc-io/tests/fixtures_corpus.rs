@@ -1,11 +1,16 @@
 //! WOM native-file interop — the fixtures corpus acceptance tests.
 //!
-//! The corpus lives in `tests/fixtures/`: hand-authored `.FCStd` zips
-//! (Document.xml first, side files after — the same layout `save_document`
-//! writes) with their XML committed as sibling `.xml` sources for review
-//! and `.expected.txt` dumps recording name/type/status plus selected
+//! The corpus lives in `tests/fixtures/`: `.FCStd` zips (Document.xml
+//! first, side files after — the same layout `save_document` writes) with
+//! their XML committed as sibling `.xml` sources for review and
+//! `.expected.txt` dumps recording name/type/status plus selected
 //! properties per object. A sync test pins the committed zips to the
-//! committed XML.
+//! committed XML. Provenance is mixed and deliberate: `partdesign_body`,
+//! `group_links` and the two sketch fixtures were regenerated through
+//! real FreeCAD 1.0 (`scripts/parity/regen_fixtures.py`) after the
+//! parity gate caught their hand-authored forms as un-restoreable in
+//! the real program; the rest are hand-authored in the documented
+//! canonical form.
 //!
 //! The four acceptance gates of the work order are covered here:
 //!
@@ -174,7 +179,12 @@ fn fixture_zips_carry_the_committed_xml_sources() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 2 + 3: partdesign_body — Body/Origin(+Plane/Line)/Sketch/Pad, .brp
+// Gate 2 + 3: partdesign_body — Body/Origin(all six features)/Sketch/Pad,
+// real FreeCAD 1.0 forms. Regenerated through freecadcmd (r39109) after
+// the parity gate caught the hand-authored `Profile` persisted as
+// `App::PropertyLink` — FreeCAD 1.0's Pad uses `App::PropertyLinkSub`,
+// and the fake form broke restore ("No object linked"). Provenance:
+// scripts/parity/regen_fixtures.py.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -186,44 +196,58 @@ fn partdesign_body_loads_per_expectations() {
         &doc,
         "partdesign_body",
         &[
-            ("Body", &["Group", "Label", "Placement", "Tip"]),
-            ("Origin", &["Group", "Label", "Placement"]),
-            ("XY_Plane", &["Label", "Placement", "Role"]),
-            ("XZ_Plane", &["Label", "Placement", "Role"]),
-            ("YZ_Plane", &["Label", "Placement", "Role"]),
-            ("X_Axis", &["Label", "Placement", "Role"]),
-            ("Sketch", &["Label", "Placement"]),
+            ("Body", &["Group", "Label", "Tip"]),
+            ("Origin", &["Label", "OriginFeatures"]),
+            ("X_Axis", &["Label", "Role"]),
+            ("Y_Axis", &["Label", "Role"]),
+            ("XY_Plane", &["Label", "Role"]),
+            ("YZ_Plane", &["Label", "Role"]),
+            ("Sketch", &["Label", "FullyConstrained"]),
             (
                 "Pad",
                 &[
-                    "Angle", "Axis", "Label", "Length", "Midplane", "Profile", "Reversed",
+                    "Direction",
+                    "Label",
+                    "Length",
+                    "Midplane",
+                    "Profile",
+                    "Reversed",
                 ],
             ),
         ],
     );
 
-    // Everything loaded; nothing skipped. The Pad's `Type` enumeration
-    // is preserved raw (its FreeCAD form is its truth — a modeled copy
-    // would re-serialize with a drifting type attribute), so it is a
-    // per-property modeling-gap record, not a load failure.
-    assert_eq!(report.objects, 8);
+    // The whole PartDesign structure real FreeCAD builds: Body, Origin
+    // with all six axis/plane features, Sketch, Pad. Nothing skipped,
+    // nothing foreign — and every load warning is a preservation note
+    // (the modern property set FreeCAD 1.0 writes rides verbatim).
+    assert_eq!(report.objects, 10);
     assert_eq!(report.skipped, 0);
-    assert_eq!(
-        report.skipped_properties,
-        vec!["Pad.Type".to_string()],
+    assert_eq!(report.foreign, 0);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|w| fc_app::is_preservation_warning(w)),
         "{:?}",
-        report.skipped_properties
+        report.warnings
     );
 
-    // The quantity-typed parameters were mapped to floats and recorded.
+    // The Pad's Profile is the LinkSub form, exactly as FreeCAD 1.0
+    // wrote it (`<LinkSub value="Sketch" count="0">`).
+    let pad = doc.get_by_name("Pad").unwrap();
     assert_eq!(
-        report.quantity_properties,
-        vec!["Pad.Angle (unit deg)".to_string(), "Pad.Length".to_string(),],
-        "quantity mapping recorded per property"
+        pad.properties().get("Profile"),
+        Some(&Property::LinkSub("Sketch".to_string(), Vec::new()))
     );
+    let pad_feature = pad
+        .as_any()
+        .downcast_ref::<PadFeature>()
+        .expect("Pad is a PadFeature");
 
-    // Gate 3: the Pad's `.brp` payload (OCCT BRep, a real-FreeCAD shape)
-    // is skipped with THE documented warning, while its parameters load.
+    // Gate 3: the OCCT .brp payloads (the Pad's own shapes, the Body
+    // and Sketch shapes) are skipped with THE documented warning, while
+    // the readable parameters load.
     assert!(
         report.warnings.iter().any(|w| w.contains("Pad")
             && w.contains("OCCT BRep shape not modeled")
@@ -234,12 +258,7 @@ fn partdesign_body_loads_per_expectations() {
     );
     // (b) readable parameters loaded — proven by the expectations dump
     // above; (c) no geometry on the object:
-    let pad = doc.get_by_name("Pad").unwrap();
-    assert!(shape_of(pad).is_none(), "Pad carries no geometry");
-    let pad_feature = pad
-        .as_any()
-        .downcast_ref::<PadFeature>()
-        .expect("Pad is a PadFeature");
+    assert!(shape_of(pad).is_none(), "Pad carries no restored geometry");
     assert!(pad_feature.result.is_none(), "no computed result restored");
     // ...and the object is Touched, so a recompute would regenerate what
     // it can from the loaded parameters:
@@ -249,6 +268,19 @@ fn partdesign_body_loads_per_expectations() {
         "geometry-skipped feature stays Touched"
     );
     // (d) no panic — reaching this line is the proof.
+
+    // The quantity-typed parameters were mapped to floats and recorded.
+    assert_eq!(
+        report.quantity_properties,
+        vec![
+            "Pad.Length".to_string(),
+            "Pad.Length2".to_string(),
+            "Pad.Offset".to_string(),
+            "Pad.TaperAngle".to_string(),
+            "Pad.TaperAngle2".to_string(),
+        ],
+        "quantity mapping recorded per property"
+    );
 
     // Gate 1: re-save and reload with identical list output.
     assert_round_trip_list_parity("partdesign_body", &doc);
@@ -419,7 +451,11 @@ fn property_zoo_maps_every_documented_property_type() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 2: group_links — DocumentGroup nesting + link to a grouped object
+// Gate 2: group_links — real FreeCAD 1.0 group nesting + a link to a
+// grouped object. Regenerated through freecadcmd (r39109) after the
+// parity gate caught the hand-authored corpus using the invented
+// `App::DocumentGroup` type (which real FreeCAD drops on restore) and
+// a string-list `Group`. Provenance: scripts/parity/regen_fixtures.py.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -430,31 +466,80 @@ fn group_links_load_per_expectations() {
         &doc,
         "group_links",
         &[
+            ("BoxA", &["Label", "Length"]),
+            ("LeafBox", &["Label", "Length"]),
+            ("LeafSphere", &["Label", "Radius"]),
             ("Outer", &["Group", "Label"]),
             ("Nested", &["Group", "Label"]),
-            ("LeafBox", &["Label", "Length"]),
             ("LinkLeaf", &["Label", "LinkedObject", "LinkTransform"]),
         ],
     );
 
-    assert_eq!(report.objects, 4);
+    // The whole regenerated corpus file: six objects, nothing skipped,
+    // nothing foreign — and every warning a preservation note (the
+    // boxes' .brp shape payloads + FreeCAD 1.0's modern property set
+    // ride in the preservation bag).
+    assert_eq!(report.objects, 6);
     assert_eq!(report.skipped, 0);
-    assert!(
-        report.warnings.is_empty(),
-        "clean fixture loads warning-free: {:?}",
-        report.warnings
+    assert_eq!(report.foreign, 0);
+    assert!(report
+        .warnings
+        .iter()
+        .all(|w| fc_app::is_preservation_warning(w)));
+
+    // FreeCAD 1.0's real group type — the hand-authored predecessor's
+    // fake `App::DocumentGroup` is gone.
+    assert_eq!(
+        doc.get_by_name("Outer").unwrap().type_name(),
+        "App::DocumentObjectGroup"
+    );
+    assert_eq!(
+        doc.get_by_name("Nested").unwrap().type_name(),
+        "App::DocumentObjectGroup"
     );
 
-    // The link points at an object that only exists inside a group's
-    // (string-typed) Group list — it still resolves by name.
+    // The link's target is an `App::PropertyXLink` in the file
+    // (`<XLink file="" stamp="" name="LeafBox"/>`): an in-document
+    // extended link, mapped as the LinkSub it is semantically.
     assert_eq!(
         doc.get_by_name("LinkLeaf")
             .unwrap()
             .properties()
             .get("LinkedObject"),
-        Some(&Property::Link("LeafBox".to_string()))
+        Some(&Property::LinkSub("LeafBox".to_string(), Vec::new()))
     );
+
+    // The link points at an object that only exists inside a group's
+    // (link-list) Group property — it still resolves by name.
     assert_eq!(doc.links_of("LinkLeaf"), vec!["LeafBox".to_string()]);
+    assert_eq!(
+        doc.links_of("Nested"),
+        vec!["LeafBox".to_string(), "LeafSphere".to_string()]
+    );
+
+    // The writer re-emits FreeCAD's own XLink element for the pair
+    // (the `<LinkSub>` form silently drops the value on FreeCAD's
+    // restore — see `XLINK_PROPERTIES` in fcstd.rs; observed against
+    // the r39109 binary). Pin the element in our re-save so the plain
+    // hermetic suite holds the form the parity gate proved.
+    let temp = std::env::temp_dir().join(format!(
+        "fcrs-group-links-xlink-{}-{:?}.fcstd",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    save_document(&doc, &temp).unwrap();
+    let file = std::fs::File::open(&temp).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut xml = String::new();
+    zip.by_name("Document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    let _ = std::fs::remove_file(&temp);
+    assert!(
+        xml.contains("<XLink file=\"\" stamp=\"\" name=\"LeafBox\"/>"),
+        "the XLink element form is preserved in our re-save"
+    );
 
     assert_round_trip_list_parity("group_links", &doc);
 }
@@ -520,87 +605,167 @@ fn every_fixture_round_trips_to_identical_list_output() {
 // ---------------------------------------------------------------------------
 // Real-binary provenance fixtures: sketch constraints, both directions.
 //
-// `freecad_sketch_constraints.fcstd` was written by **real FreeCAD 1.0**
-// (AppImage r39109, `freecadcmd` + the script in the fixture's provenance
-// note below): one sketch, six geometries, thirteen constraints — every
-// kind this kernel maps. Verified with the real binary both ways:
-// FreeCAD opens `fcrs_constraints_roundtrip.fcstd` (freecad-rs's own
-// output) and restores all thirteen constraints exactly; freecad-rs
-// loads the FreeCAD-authored file to the same geometry + constraints.
+// `freecad_sketch_constraints.fcstd` was re-written by **real FreeCAD
+// 1.0** (AppImage r39109, `freecadcmd` + `scripts/parity/regen_fixtures.py`)
+// after the parity gate caught the hand-designed set as solver-conflicting
+// (Perpendicular+Angle+Horizontal+Vertical overlap; Radius 9 + Diameter 18
+// on one circle). The regenerated file carries two DOF-consistent sketches —
+// FreeCAD itself reports both solved and fully constrained — with every one
+// of the thirteen mappable kinds. Only the two absolute-position pins
+// (Sketch) and the origin pin (Sketch001) reference the root point / X axis;
+// their kinds are duplicated by non-root constraints, so the reader's
+// preserve-verbatim handling of root-referencing constraints costs no
+// coverage. Verified with the real binary both ways: FreeCAD opens
+// `fcrs_constraints_roundtrip.fcstd` (freecad-rs's own output) and restores
+// all thirteen constraints exactly; freecad-rs loads the FreeCAD-authored
+// file to the same geometry + constraints.
 // ---------------------------------------------------------------------------
 
 /// The fixture authored by real FreeCAD 1.0 loads with every mappable
 /// constraint kind intact — geometry, ordinals, point-slots and values,
-/// exactly as the real program wrote them.
+/// exactly as the real program wrote them — with the root-referencing
+/// position pins honestly preserved instead of silently dropped.
 #[test]
 fn freecad_authored_sketch_loads_all_thirteen_constraint_kinds() {
     let (doc, report) = load_fixture("freecad_sketch_constraints");
 
-    // One object: the sketch (FreeCAD's own console-authored corpus file
-    // carries document properties we do not model — Uid/Meta/Material —
-    // and two OCCT .brp shape payloads; all honestly warned, none fatal).
-    assert_eq!(report.objects, 1);
+    // Two objects: the two sketches (FreeCAD's own console-authored
+    // corpus file carries document properties we do not model —
+    // Uid/Meta/Material — and each sketch's OCCT shape payloads; all
+    // honestly warned, none fatal).
+    assert_eq!(report.objects, 2);
     assert_eq!(report.skipped, 0);
-    let object = doc.get_by_name("Sketch").expect("the sketch loads");
+    let object = doc.get_by_name("Sketch").expect("the first sketch loads");
     let sketch_object = object
         .as_any()
         .downcast_ref::<fc_sketcher::SketchObject>()
         .expect("it is a Sketcher::SketchObject");
+    let object2 = doc
+        .get_by_name("Sketch001")
+        .expect("the second sketch loads");
+    let sketch_object2 = object2
+        .as_any()
+        .downcast_ref::<fc_sketcher::SketchObject>()
+        .expect("it is a Sketcher::SketchObject");
 
-    // Geometry: the 40×30 quad + circle + point, exactly as authored.
+    // Geometry: the solved trapezoid (bottom 50, top 32, the right side
+    // at the authored 1.9942294… rad angle — the height closes at
+    // 39.93816941878718, the solver's own arithmetic) plus two
+    // circles placed from the bottom-left vertex and a point on the
+    // top edge.
     let sketch = &sketch_object.sketch;
-    assert_eq!(sketch.geometry().len(), 6);
+    assert_eq!(sketch.geometry().len(), 7);
+    let top_y = 39.93816941878718;
     assert!(matches!(
         sketch.geometry()[0],
         fc_sketcher::Geometry::LineSegment { start, end, .. }
-            if (start.x - 0.0).abs() < 1e-9 && (end.x - 40.0).abs() < 1e-9
+            if (start.x + 25.0).abs() < 1e-9 && start.y.abs() < 1e-9
+                && (end.x - 25.0).abs() < 1e-9 && end.y.abs() < 1e-9
+    ));
+    assert!(matches!(
+        sketch.geometry()[1],
+        fc_sketcher::Geometry::LineSegment { start, end, .. }
+            if (start.x - 25.0).abs() < 1e-9 && start.y.abs() < 1e-9
+                && (end.x - 7.0).abs() < 1e-9 && (end.y - top_y).abs() < 1e-9
     ));
     assert!(matches!(
         sketch.geometry()[4],
-        fc_sketcher::Geometry::Circle { radius, .. } if (radius - 9.0).abs() < 1e-9
+        fc_sketcher::Geometry::Circle { radius, .. } if (radius - 6.0).abs() < 1e-9
     ));
     assert!(matches!(
         sketch.geometry()[5],
-        fc_sketcher::Geometry::Point { x: 7.0, y: 8.0 }
+        fc_sketcher::Geometry::Circle { radius, .. } if (radius - 4.0).abs() < 1e-9
+    ));
+    assert!(matches!(
+        sketch.geometry()[6],
+        fc_sketcher::Geometry::Point { x: -11.0, y } if (y - top_y).abs() < 1e-9
     ));
 
-    // All thirteen kinds, with the authored targets and values (the
-    // same layout `io.rs`'s `freecad_native_constraints_*` tests pin,
-    // this time read out of a file the real program wrote).
-    let half_pi = std::f64::consts::FRAC_PI_2;
+    // Eighteen of the twenty constraints load (the two root-point
+    // position pins ride verbatim), with the authored targets and
+    // values — eleven kinds in the first sketch alone.
+    let authored_angle = 1.9942294539833942;
     let cs = sketch.constraints();
-    assert_eq!(cs.len(), 13);
+    assert_eq!(cs.len(), 18);
     use fc_sketcher::Constraint;
     assert!(
         matches!(cs[0], Constraint::Coincident { g1, pos1: fc_sketcher::PointPos::End, g2, pos2: fc_sketcher::PointPos::Start } if g1.0 == 0 && g2.0 == 1)
     );
-    assert!(matches!(cs[1], Constraint::Horizontal { g } if g.0 == 0));
-    assert!(matches!(cs[2], Constraint::Vertical { g } if g.0 == 1));
-    assert!(matches!(cs[3], Constraint::Parallel { g1, g2 } if g1.0 == 0 && g2.0 == 2));
-    assert!(matches!(cs[4], Constraint::Perpendicular { g1, g2 } if g1.0 == 0 && g2.0 == 1));
-    assert!(matches!(cs[5], Constraint::Distance { value, .. } if value == 40.0));
-    assert!(matches!(cs[6], Constraint::DistanceX { value, .. } if value == -40.0));
-    assert!(matches!(cs[7], Constraint::DistanceY { value, .. } if value == 30.0));
-    assert!(matches!(cs[8], Constraint::Angle { value, .. } if (value - half_pi).abs() < 1e-15));
-    assert!(matches!(cs[9], Constraint::Radius { value, .. } if value == 9.0));
-    assert!(matches!(cs[10], Constraint::Diameter { value, .. } if value == 18.0));
-    assert!(matches!(cs[11], Constraint::Equal { g1, g2 } if g1.0 == 0 && g2.0 == 2));
     assert!(
-        matches!(cs[12], Constraint::PointOnObject { g1, pos1: fc_sketcher::PointPos::Start, g2 } if g1.0 == 2 && g2.0 == 0)
+        matches!(cs[1], Constraint::Coincident { g1, pos1: fc_sketcher::PointPos::End, g2, pos2: fc_sketcher::PointPos::Start } if g1.0 == 1 && g2.0 == 2)
     );
+    assert!(
+        matches!(cs[2], Constraint::Coincident { g1, pos1: fc_sketcher::PointPos::End, g2, pos2: fc_sketcher::PointPos::Start } if g1.0 == 2 && g2.0 == 3)
+    );
+    assert!(
+        matches!(cs[3], Constraint::Coincident { g1, pos1: fc_sketcher::PointPos::End, g2, pos2: fc_sketcher::PointPos::Start } if g1.0 == 3 && g2.0 == 0)
+    );
+    assert!(matches!(cs[4], Constraint::Horizontal { g } if g.0 == 0));
+    assert!(matches!(cs[5], Constraint::Parallel { g1, g2 } if g1.0 == 2 && g2.0 == 0));
+    assert!(matches!(cs[6], Constraint::Perpendicular { g1, g2 } if g1.0 == 3 && g2.0 == 2));
+    assert!(
+        matches!(cs[7], Constraint::Angle { value, .. } if (value - authored_angle).abs() < 1e-15)
+    );
+    assert!(matches!(cs[8], Constraint::Distance { value, .. } if value == 50.0));
+    assert!(matches!(cs[9], Constraint::DistanceX { value, .. } if value == -32.0));
+    assert!(matches!(cs[10], Constraint::Radius { value, .. } if value == 6.0));
+    assert!(matches!(cs[11], Constraint::DistanceX { value, .. } if value == 25.0));
+    assert!(matches!(cs[12], Constraint::DistanceY { value, .. } if value == 20.0));
+    assert!(matches!(cs[13], Constraint::Diameter { value, .. } if value == 8.0));
+    assert!(matches!(cs[14], Constraint::DistanceX { value, .. } if value == 25.0));
+    assert!(matches!(cs[15], Constraint::DistanceY { value, .. } if value == 32.0));
+    assert!(
+        matches!(cs[16], Constraint::PointOnObject { g1, pos1: fc_sketcher::PointPos::Start, g2 } if g1.0 == 6 && g2.0 == 2)
+    );
+    assert!(matches!(cs[17], Constraint::DistanceX { value, .. } if value == -18.0));
 
-    // The OCCT .brp payloads FreeCAD wrote (Sketch.Shape and
-    // Sketch.InternalShape) are the documented skip: honest warnings,
-    // parameters kept, the object left Touched for recompute.
+    // The second sketch adds the last two kinds (Vertical, Equal) on an
+    // equal H/V pair from a shared start point.
+    let sketch2 = &sketch_object2.sketch;
+    assert_eq!(sketch2.geometry().len(), 2);
+    let cs2 = sketch2.constraints();
+    assert_eq!(cs2.len(), 5);
+    assert!(
+        matches!(cs2[0], Constraint::Coincident { g1, pos1: fc_sketcher::PointPos::Start, g2, pos2: fc_sketcher::PointPos::Start } if g1.0 == 1 && g2.0 == 0)
+    );
+    assert!(matches!(cs2[1], Constraint::Horizontal { g } if g.0 == 0));
+    assert!(matches!(cs2[2], Constraint::Vertical { g } if g.0 == 1));
+    assert!(matches!(cs2[3], Constraint::Equal { g1, g2 } if g1.0 == 0 && g2.0 == 1));
+    assert!(matches!(cs2[4], Constraint::Distance { value, .. } if value == 10.0));
+
+    // The three root-referencing constraints (Sketch's two position
+    // pins + Sketch001's origin pin) are preserved verbatim — the
+    // honest record, never a silent drop.
     let warnings = report.warnings.join("\n");
     assert!(
+        warnings
+            .matches("constraint #10 (13): references geometry")
+            .count()
+            == 1
+            && warnings
+                .matches("constraint #11 (7): references geometry")
+                .count()
+                == 1
+            && warnings
+                .matches("constraint #0 (1): references geometry")
+                .count()
+                == 1,
+        "the three root-point pins are honestly preserved: {warnings}"
+    );
+
+    // The OCCT .brp payloads FreeCAD wrote (each sketch's Shape and
+    // InternalShape) are the documented skip: honest warnings,
+    // parameters kept, the objects left Touched for recompute.
+    assert!(
         warnings.matches("unknown shape payload format").count() == 2,
-        "both BRep payloads are honestly warned: {warnings}"
+        "both InternalShape payloads are honestly warned: {warnings}"
     );
     assert!(
-        matches!(object.status(), fc_app::ObjectStatus::Touched),
-        "the sketch reloads Touched (its shapes are OCCT-only): {:?}",
-        object.status()
+        matches!(object.status(), fc_app::ObjectStatus::Touched)
+            && matches!(object2.status(), fc_app::ObjectStatus::Touched),
+        "both sketches reload Touched (their shapes are OCCT-only): {:?} / {:?}",
+        object.status(),
+        object2.status()
     );
 }
 

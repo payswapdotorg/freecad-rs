@@ -245,31 +245,40 @@ original payloads re-emerge byte-identically on save.)
   no interaction loop. This is the CLI/kernel side of FreeCAD. (GUI
   *data* — `GuiDocument.xml`, thumbnails — round-trips verbatim.)
 
-### What the parity gate has caught (2026-10-24, first contact)
+### What the parity gate has caught (2026-10-24, first contact — all fixed)
 
 The `parity` workflow (`.github/workflows/parity.yml`, harness in
 `scripts/parity/`) runs a pinned real FreeCAD 1.0 (r39109) over the
 committed fixture corpus in both directions. On its first full local
-run it found three fixture defects the Rust suite could never see —
-each is quarantined in the harness (`PARITY_QUARANTINE`) with its
-rationale, and open for a focused fix:
+run it found three fixture defects the Rust suite could never see:
 
 1. `freecad_sketch_constraints.fcstd` — FreeCAD's solver reports
    *conflicting constraints* (2, 3, 5, 8, 9, 10, 11, 13) and leaves
-   the sketch `Touched/Invalid`. The authored set is redundant
+   the sketch `Touched/Invalid`. The authored set was redundant
    (`Perpendicular` + `Angle` + `Horizontal` + `Vertical` overlap;
-   `Radius` 9 and `Diameter` 18 on the same circle). The reader-side
-   claim (all thirteen kinds parse with exact ordinals/values) is
-   unaffected; the fixture needs a DOF-consistent redesign authored
-   through `freecadcmd`.
+   `Radius` 9 and `Diameter` 18 on the same circle).
 2. `partdesign_body.fcstd` — the Pad's `Profile` is persisted as
    `App::PropertyLink`, but FreeCAD 1.0's Pad uses
    `App::PropertyLinkSub`; on restore the link drops ("No object
-   linked") and the Pad goes `Touched/Invalid`. The fixture needs
-   regeneration through real FreeCAD (the v0.1.6 LinkSub form).
+   linked") and the Pad goes `Touched/Invalid`.
 3. `group_links.fcstd` — the hand-authored type `App::DocumentGroup`
    is not a FreeCAD 1.0 document type (the real type is
    `App::DocumentObjectGroup`); FreeCAD drops the group objects
-   *silently* when opening the file. Real FreeCAD-authored groups
-   round-trip safely today (unknown types are preserved verbatim);
-   the fixture and the loader's group-type mapping need correcting.
+   *silently* when opening the file.
+
+**Resolution (2026-10-26):** all three were fixture-authoring defects,
+not engine defects — the corpus predated the parity gate and had been
+hand-authored in forms real FreeCAD never writes. All three fixtures
+are now regenerated **through real FreeCAD itself**
+(`scripts/parity/regen_fixtures.py`, freecadcmd r39109): the sketch
+constraint set is redesigned DOF-consistent (two sketches, every one of
+the thirteen mappable kinds, FreeCAD reports both solved and fully
+constrained), the Pad's `Profile` rides in the LinkSub form FreeCAD
+1.0 wrote, and the groups are real `App::DocumentObjectGroup`s with
+`App::PropertyLinkList` membership. The loader grew to match real
+FreeCAD's forms: `App::DocumentObjectGroup` is a mapped container type
+(the legacy spelling still loads), and `App::PropertyXLink` with an
+empty `file` (an `App::Link`'s `LinkedObject`) maps as the `LinkSub`
+it is semantically (external-file XLinks stay preserved verbatim —
+outside this kernel's model). The quarantines are lifted
+(`PARITY_QUARANTINE` stays as the mechanism for the next find).

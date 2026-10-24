@@ -1,12 +1,18 @@
-App::DocumentGroup Outer Valid
-  Group = Nested LinkLeaf
-  Label = Outer
-App::DocumentGroup Nested Valid
-  Group = LeafBox
-  Label = Nested
+Part::Box BoxA Touched
+  Label = BoxA
+  Length = 3
 Part::Box LeafBox Touched
   Label = LeafBox
   Length = 4
+Part::Sphere LeafSphere Touched
+  Label = LeafSphere
+  Radius = 1.5
+App::DocumentObjectGroup Outer Valid
+  Group = BoxA,Nested
+  Label = Outer
+App::DocumentObjectGroup Nested Valid
+  Group = LeafBox,LeafSphere
+  Label = Nested
 App::Link LinkLeaf Valid
   Label = LinkLeaf
   LinkedObject = LeafBox
