@@ -145,7 +145,7 @@ with `SHA256SUMS` for every asset — pick what matches your system:
 |---|---|---|
 | `freecad-rs-0.1.8-x86_64.AppImage` | Linux x86_64 | `chmod +x` and run; zero install. On FUSE-less systems use `APPIMAGE_EXTRACT_AND_RUN=1` |
 | `freecad-rs-0.1.8-amd64.deb` | Debian/Ubuntu (amd64) | `sudo dpkg -i freecad-rs-0.1.8-amd64.deb` → `/usr/bin/freecad-rs` |
-| `freecad-rs-0.1.8-x86_64-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
+| `freecad-rs-0.1.8-x86_64-unknown-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
 
 ```sh
 # Linux AppImage, the FreeCAD-style way:
