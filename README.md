@@ -19,12 +19,17 @@ placements, sketches) — lives in
 > reimplements its *architecture and file format* from scratch; no
 > FreeCAD code is used or included. License: MIT.
 
-**Verified baseline** — `main` @ the FC-14 mirrored-seam &
-tangent/symmetric/block-verified parity (2026-10-23): nine crates, **464 tests, 0 failed** (`cargo
-build` / `cargo test --workspace --locked`), `clippy --workspace
---all-targets -- -D warnings` clean, `cargo fmt --all -- --check`
-clean. PartDesign v1, curved-seam boolean robustness (now on mixed
-curved operands: crossed/parallel/skew cylinders, tilted cone and
+**Verified baseline** — v0.1.8 (`main` @ 2026-10-24, plus the
+v0.1.8 exact seam weld landing with it): nine crates, **486 tests**
+(counted 2026-10-24; per-crate counts live in
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the authoritative
+green run is CI: `cargo build` / `cargo test --workspace --locked` /
+`clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check`). PartDesign v1, **exact boolean
+classification** (v0.1.7 — integer predicates, no tolerance;
+certified `f64` filter → i256 → wide integer) with the exact planar
+seam weld (v0.1.8, landing), curved-seam boolean robustness on mixed
+curved operands (crossed/parallel/skew cylinders, tilted cone and
 cylinder vs sphere, mirrored near-coincident seams at fine
 deflections, exact-tangency sliver filtering), native-file interop
 breadth, rhai embedded scripting, the M1 offscreen viewer, and STEP
@@ -44,12 +49,12 @@ the sketcher, and the `.FCStd` file format:
 | `src/App`                | `fc-app`       | `Document`, `DocumentObject`, typed `Property` system, dependency-ordered recompute with cycle detection |
 | `src/App/Transactions.cpp`| `fc-app`      | undo/redo: transaction stack with add/del/change records, property snapshots, auto-record on mutation, `undo`/`redo`/`history` CLI |
 | `src/App/Expression.cpp` | `fc-app`       | expression engine **evaluating to `Quantity`**: dimensional analysis, unit-aware arithmetic (dimension-checked `+`/`-`, unit-combining `*`/`/`, integer-exponent `^`), degree-mode trig, `<<Label>>.Property` references, document bindings with dependency-graph edges + cycle detection, honest binding rejection (a plain-float property rejects a unit-carrying expression, FreeCAD `PropertyFloat` behavior) |
-| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans with **curved-seam robustness** (consensus-grid snap at the seam's own sampling scale — never moving the operands' exact interior surfaces — tolerance-based trace interleaving, fin welding, float-noise vertex welds, folded-sliver zipping, and orientation consistency to the shared-edge contract OCCT enforces; watertight, consistently oriented results on sphere pairs and mixed curved operands — crossed/parallel/skew cylinders, tilted cone and cylinder vs sphere — under a wholesale-or-nothing volume guard), **profile kernels** (closed-wire extraction from sketch geometry, extrusion, revolution — watertight-by-construction meshes), **PartDesign v1 features** (`PartDesign::Pad/Pocket/Revolution` consuming a sketch, recompute-driven) |
+| `src/Mod/Part`           | `fc-part`      | analytic primitives (box/sphere/cylinder/cone/torus), exact volume/area, tessellation, FCBREP serialization, `Part::Box`-style features, `Part::Cut/Fuse/Common` mesh booleans with **exact classification** (v0.1.7: certified integer predicates, no tolerance — `exact.rs`) and **curved-seam robustness** (consensus-grid snap at the seam's own sampling scale — never moving the operands' exact interior surfaces — tolerance-based trace interleaving, fin welding, float-noise vertex welds, folded-sliver zipping, and orientation consistency to the shared-edge contract OCCT enforces; watertight, consistently oriented results on sphere pairs and mixed curved operands — crossed/parallel/skew cylinders, tilted cone and cylinder vs sphere — under a wholesale-or-nothing volume guard), **profile kernels** (closed-wire extraction from sketch geometry, extrusion, revolution — watertight-by-construction meshes), **PartDesign v1 features** (`PartDesign::Pad/Pocket/Revolution` consuming a sketch, recompute-driven) |
 | `src/Mod/PartDesign` (v1) | `fc-part`      | `Pad` (Profile/Length/Midplane/Reversed), `Pocket` (Base/Length/Inverted — boolean cut), `Revolution` (Angle/Axis) — sketch links in the dependency graph, error propagation from failed profiles, parametric recompute proven end-to-end |
 | `src/Mod/Sketcher` (v1)  | `fc-sketcher`   | 2D geometry (point/line/circle/arc), 16 constraint kinds (incl. Tangent/Symmetric/Block), Levenberg-Marquardt constraint solver with DOF report, FreeCAD-style `<Sketch>` XML fragments; `Sketcher::SketchObject` — a first-class document object (execute = solve) with `.FCStd` persistence |
 | `.FCStd` persistence     | `fc-io`        | zip container + `Document.xml` reader/writer, FreeCAD-compatible XML schema (incl. expression bindings and `<Sketch>` fragments), OBJ/STL mesh export, **native-file interop breadth** (`App::Part`/`PartDesign::Body`/origin planes & axes/groups/links load with their parameters; quantity/vector/color/list/matrix property family; a committed fixtures corpus pins round-trip behavior) |
-| `Python console` (distilled) | `fc-script` | **embedded scripting via rhai** — sandboxed document API mirroring the CLI verbs (add/set/bind/recompute/stats/save/export), expression bindings through the `fc-app` engine, honest failure semantics (a failed recompute surfaces the error and exits non-zero), operation budget |
-| 3D view (M1, distilled)  | `fc-viewer`    | **offscreen wgpu 30 renderer** — the exports' tessellation rules + placements, flat shading with the SVG renderer's headlight, svg-parity cameras (`iso/top/front/right`, asserted equal to `export svg`'s matrices), orthographic CPU picking (nearest-hit), error objects rendered visibly flagged, PNG output with `--bless` goldens; `interactive` cargo feature adds a winit orbit/zoom/pan window (build-tested) |
+| `Python console` (distilled) | `fc-script` | **embedded scripting via rhai** — sandboxed document API mirroring the CLI verbs (add/set/bind/recompute/stats/save/export), expression bindings through the `fc-app` engine, honest failure semantics (a failed recompute surfaces the error and exits non-zero), operation budget. *Embedded Rhai, not FreeCAD's Python API, macro system or workbench ecosystem* — that surface remains a non-goal |
+| 3D view (M1, distilled)  | `fc-viewer`    | **offscreen wgpu 30 renderer** — the exports' tessellation rules + placements, flat shading with the SVG renderer's headlight, svg-parity cameras (`iso/top/front/right`, asserted equal to `export svg`'s matrices), orthographic CPU picking (nearest-hit), error objects rendered visibly flagged, PNG output with `--bless` goldens; `interactive` cargo feature adds a winit orbit/zoom/pan window (build-tested). *Viewing only — a renderer and orbit/pan/zoom, not a modeling workbench* |
 | STEP (AP203/AP214)       | `fc-step`      | **exchange with the CAD ecosystem** — faceted-B-rep export (deterministic, the faceted marker in every product name), deflection-parameterized import via `ruststep` 0.4 (planar + cylindrical faces, LINE/CIRCLE edges, POLY_LOOP facets; honest errors on anything else) |
 | `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, quantity-typed expressions, quantity arithmetic (`calc`), sketch verbs (`add sketch`, `sketch-import`, `sketch-export`, `sketch-info`, `sketch-solve`, `sketch-show`), **PartDesign verbs (`pad`, `pocket`, `revolution`)**, OBJ/STL/SVG export, **`render` (M1 viewer)**, **`import-step` / `export step` (M3)**, **`script` (rhai embedded scripting)**, dependency graphs |
 
@@ -73,52 +78,80 @@ concrete terms:
   deflection-bounded approximation: sagitta rules govern arc and
   revolution tessellation (chord error ≤ the requested deflection),
   and profile solids are watertight-by-construction meshes — their
-  volumes are mesh-true, not exact. Exact B-rep/NURBS via OCCT
-  bindings is a *gated future decision*, not a v1 commitment — see
-  [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md).
-* **Mesh Booleans are approximate.** `Part::Cut/Fuse/Common` are
-  watertight for planar/cylindrical seams and for curved-surface
-  seams (sphere-sphere at any overlap down to razors a fiftieth of
-  the radius, sphere-cylinder near-tangent pairs, crossed/parallel/
-  skew cylinders, tilted cylinder or cone against a sphere, crossed
-  and coaxial opposed cones) within the deflection-derived
-  tolerance. Two classes honestly stay open rather than corrupt:
-  mirrored operands whose sheets nearly coincide without sharing a
-  seam curve (a cone against its own z-mirror at fine deflection),
-  and exact-tangency unions may carry zero-area slivers at the
-  tangent point (watertight, manifold, volume exact).
+  volumes are mesh-true, not exact. Exact B-rep/NURBS is pursued as
+  the pure-Rust milestone program of
+  [`docs/adr/0003-geometry-kernel-strategy.md`](docs/adr/0003-geometry-kernel-strategy.md)
+  (OCCT bindings stay a gated decision —
+  [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md)).
+* **Booleans classify exactly; curved operands stay deflection-bounded.**
+  Every classification decision in `Part::Cut/Fuse/Common` is an exact
+  integer computation (v0.1.7: certified `f64` filter → i256 → wide
+  integer — a face offset a millionth of a unit is cut exactly where it
+  belongs), and planar seams — rotated crossings included — weld exactly
+  (v0.1.8, landing). Curved-surface seams are watertight within the
+  deflection-derived tolerance (sphere-sphere at any overlap down to
+  razors a fiftieth of the radius, sphere-cylinder near-tangent pairs,
+  crossed/parallel/skew cylinders, tilted cylinder or cone against a
+  sphere, crossed and coaxial opposed cones, mirrored near-coincident
+  sheets at fine deflections, exact-tangency unions degenerate-free and
+  volume-exact). The approximation that remains is the *tessellation*
+  itself, not the classification — the honest list in
+  [`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md) is the precise record.
 * **Sketcher v1 solves in the XY plane.** The sketch `Placement` is
   persisted but not yet applied — sketches on arbitrary planes and
   attachments are future work, and v1's PartDesign features inherit
   the same XY-frame limitation.
-* **No GUI, no scripting yet.** The interactive viewer, deeper FreeCAD
-  native-file interop, STEP, and embedded scripting are sequenced as
-  product workstreams with explicit acceptance gates in
-  [`docs/PLAN-APPLICATION.md`](docs/PLAN-APPLICATION.md).
+* **No modeling workbench; embedded scripting only.** The GUI surface
+  is the M1 viewer — an offscreen renderer plus an optional
+  interactive orbit/pan/zoom window (`fc-viewer`'s `interactive`
+  feature, build-tested) with picking; there is no editing UI, no
+  tree view, no dockable anything. Scripting is **embedded Rhai**
+  (`fc-script`: a sandboxed document API behind the `script` CLI
+  verb) — *not* FreeCAD's Python API, macro system or workbench
+  ecosystem; a full Python surface remains a non-goal. The plan these
+  landed against is
+  [`docs/PLAN-APPLICATION.md`](docs/PLAN-APPLICATION.md); the record
+  of what has shipped is [`docs/ROADMAP.md`](docs/ROADMAP.md).
 * **Parity is documented, not claimed.** Implemented v1 behavior is
   documented per crate; where the shape of a thing differs from
   FreeCAD (e.g. the `<Sketch>` persistence fragment, FCBREP instead
   of OCCT `.brp`), the crate docs say so.
 
+## Verification
+
+Every capability claim maps to evidence: a source-level test in this
+repo, a CI job that runs it, or a documented manual verification
+against the real FreeCAD 1.0 binary. The full capability → evidence
+matrix — exact test names, where each suite runs, and which claims are
+manual-only — lives in [`docs/VERIFICATION.md`](docs/VERIFICATION.md);
+the bidirectional parity results against real FreeCAD 1.0 live in
+[`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md). CI runs the workspace
+gates (build, `cargo test --workspace --locked`, `clippy -D warnings`,
+`fmt --check`) plus the GPU viewer job, and the `parity` workflow
+([.github/workflows/parity.yml](.github/workflows/parity.yml), landing
+with v0.1.8) is the continuous acceptance gate against real FreeCAD
+1.0 — the manual verification loop `docs/EQUIVALENCE.md` records,
+automated.
+
 ## Install & build
 
-### Download a binary (v0.1.7)
+### Download a binary (v0.1.8)
 
 Prebuilt executables live on the
-[releases page](https://github.com/payswapdotorg/freecad-rs/releases/tag/v0.1.7),
+[releases page](https://github.com/payswapdotorg/freecad-rs/releases/tag/v0.1.8),
 with `SHA256SUMS` for every asset — pick what matches your system:
 
 | Asset | Platform | Install |
 |---|---|---|
-| `freecad-rs-0.1.7-x86_64.AppImage` | Linux x86_64 | `chmod +x` and run; zero install. On FUSE-less systems use `APPIMAGE_EXTRACT_AND_RUN=1` |
-| `freecad-rs-0.1.7-amd64.deb` | Debian/Ubuntu (amd64) | `sudo dpkg -i freecad-rs-0.1.7-amd64.deb` → `/usr/bin/freecad-rs` |
-| `freecad-rs-0.1.7-x86_64-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
+| `freecad-rs-0.1.8-x86_64.AppImage` | Linux x86_64 | `chmod +x` and run; zero install. On FUSE-less systems use `APPIMAGE_EXTRACT_AND_RUN=1` |
+| `freecad-rs-0.1.8-amd64.deb` | Debian/Ubuntu (amd64) | `sudo dpkg -i freecad-rs-0.1.8-amd64.deb` → `/usr/bin/freecad-rs` |
+| `freecad-rs-0.1.8-x86_64-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
 
 ```sh
 # Linux AppImage, the FreeCAD-style way:
-chmod +x freecad-rs-0.1.7-x86_64.AppImage
-./freecad-rs-0.1.7-x86_64.AppImage --version
-# freecad-rs 0.1.6
+chmod +x freecad-rs-0.1.8-x86_64.AppImage
+./freecad-rs-0.1.8-x86_64.AppImage --version
+# freecad-rs 0.1.8
 ```
 
 Rebuild the packages locally with `scripts/package.sh` (needs `dpkg-deb`;
@@ -209,6 +242,8 @@ Full walkthrough: [`docs/cli.md`](docs/cli.md) · rendered example:
 [`scripts/demo.sh`](scripts/demo.sh) · roadmap:
 [`docs/ROADMAP.md`](docs/ROADMAP.md) · kernel decision:
 [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md) ·
+kernel strategy (pure-Rust exactness program):
+[`docs/adr/0003-geometry-kernel-strategy.md`](docs/adr/0003-geometry-kernel-strategy.md) ·
 application-layer plan:
 [`docs/PLAN-APPLICATION.md`](docs/PLAN-APPLICATION.md).
 

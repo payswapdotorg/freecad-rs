@@ -2,11 +2,13 @@
 
 Honest, incremental, no vaporware.
 
-> **Verified baseline** — `main` @ `941d3b2` + the FC-14 closures,
-> verified locally on 2026-10-21: `cargo build` / `cargo test
-> --workspace --locked` green (**441 tests, 0 failed**, nine crates),
-> `clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt
-> --all -- --check` clean.
+> **Verified baseline** — v0.1.7 (counted 2026-10-24; the counts
+> include the v0.1.8 exact seam weld in flight at count time): nine
+> crates, **486 tests** (per-crate counts and method in
+> [`VERIFICATION.md`](VERIFICATION.md) — the authoritative green run
+> is CI: `cargo build` / `cargo test --workspace --locked` /
+> `clippy --workspace --all-targets -- -D warnings` / `cargo fmt
+> --all -- --check`).
 
 ## Done
 
@@ -29,7 +31,9 @@ Honest, incremental, no vaporware.
 - [x] `fc-io`: `.FCStd` read/write (FreeCAD-compatible `Document.xml`)
 - [x] `freecad-rs` CLI: new/add/set/get/list/recompute/info/stats/export/graph
 - [x] Test suite: 361 tests across all six crates (unit + integration;
-      re-verified at `08270c6`)
+      re-verified at `08270c6`) — a point-in-time count; the current
+      count, method and per-crate breakdown live in
+      [`VERIFICATION.md`](VERIFICATION.md)
 - [x] `Part::Cut / Fuse / Common` — BSP mesh booleans with a
       T-junction stitch pass; watertight for watertight box/cylinder
       operands; hybrid splitter (tangent-plane scoring + bounding-box
@@ -185,12 +189,54 @@ Honest, incremental, no vaporware.
       {0.1, 0.2, 0.3, 0.4} — fuse/cut watertight, degenerate-free,
       volume-exact, `common` honestly empty, bit-deterministic; the
       planar box fixtures stay bit-identical byte for byte
+- [x] **v0.1.7** Exact boolean classification — the tolerance regime
+      is gone: vertex sides decided by exact integer predicates
+      (certified `f64` filter → i256 fast path → 104-word wide integer
+      for adversarial exponent spreads, `crates/fc-part/src/exact.rs`)
+      with a construction-noise band seven orders below the old
+      `PLANE_EPS`; golden tests against exact rational references
+      (`scripts/exact_boolean_reference.py`) — the 1e-6 blind spot
+      cut exactly, the rotated-interior box exact to 1e-9; the
+      rotated-crossing planar-seam defect discovered and recorded
+      executably (an `#[ignore]`d test + honest-list entry) — 575f3b4
+- [x] **v0.1.8 (landing)** Exact seam weld — closes the
+      rotated-crossing defect: `weld_exact_seams` (twin weld at
+      construction noise 2^-40, T-junction interleave at the seam's
+      own noise) plus `collapse_needle_caps`, wholesale-or-revert
+      under a noise-implied volume bound; the former defect record
+      runs green — `boolean_rotated_box_crossing_faces_matches_exact_reference`:
+      cut 430.5 / fuse 646.5 / common 49.5 against the exact rational
+      reference, watertight
+
+## Next: the kernel exactness program (K1–K5)
+
+Accepted in
+[`adr/0003-geometry-kernel-strategy.md`](adr/0003-geometry-kernel-strategy.md):
+pure-Rust exactness as its own program, with its own milestones —
+not an OCCT wrapper. Each lands with committed tests; K2 is already
+behind us.
+
+- [ ] **K1** exact topology model — vertices/edges/faces carrying
+      parametric curves & surfaces (line, circle, ellipse, plane,
+      cylinder, cone, sphere, torus, B-spline); structural BRep
+      payload round-trip
+- [x] **K2** robust predicates — **done in v0.1.7**: exact
+      classification (`crates/fc-part/src/exact.rs`; the 1e-6
+      blind-spot golden test)
+- [ ] **K3** exact intersections & booleans on analytic surfaces —
+      differential-tested against a committed OCCT-generated fixture
+      corpus with expected results
+- [ ] **K4** NURBS support and general booleans — subsurface
+      classification, trimming
+- [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)
 
 - OCCT compatibility beyond reading parameters from real files (the
   kernel decision and its revisit triggers:
-  [`adr/0001-geometry-kernel.md`](adr/0001-geometry-kernel.md))
+  [`adr/0001-geometry-kernel.md`](adr/0001-geometry-kernel.md); the
+  accepted pure-Rust exactness strategy — K1–K5, OCCT stays gated —
+  [`adr/0003-geometry-kernel-strategy.md`](adr/0003-geometry-kernel-strategy.md))
 - Python scripting as a FreeCAD-workbench equivalent — an *embedded*
   scripting milestone (rhai first, pyo3 optional) exists in
   [`PLAN-APPLICATION.md`](PLAN-APPLICATION.md), but full Python
