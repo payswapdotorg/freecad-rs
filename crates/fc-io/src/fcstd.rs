@@ -1544,6 +1544,12 @@ fn parse_document(
                     _ => continue,
                 };
                 for t in targets {
+                    // An empty target is FreeCAD's "no link" (unset
+                    // Material/Origin/... properties re-save as empty
+                    // link values): nothing to resolve, nothing lost.
+                    if t.is_empty() {
+                        continue;
+                    }
                     if doc.get_by_name(&t).is_none() {
                         report.warnings.push(format!(
                             "object '{}': property '{key}' links to '{t}', which was not loaded \

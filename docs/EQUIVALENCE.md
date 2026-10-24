@@ -220,12 +220,19 @@ original payloads re-emerge byte-identically on save.)
   one millionth of a model unit is now cut where it belongs (the old
   tolerance snapped it a full 1e-5 away). What remains approximate on
   curved operands is the *tessellation* — the deflection — not the
-  classification. The one new known defect, recorded executably as an
-  `#[ignore]`d test: a rotated planar boundary *crossing* the other
-  operand's faces can lose or duplicate whole chunks (pre-dates exact
-  classification — bit-identical under the old regime; the planar-seam
-  path lacks the operand-aware repair machinery the curved-seam path
-  carries). Axis-aligned crossings are exact.
+  classification. The rotated-crossing planar-seam defect recorded in
+  v0.1.7 — a rotated planar boundary *crossing* the other operand's
+  faces could lose or duplicate whole chunks (kernel 447.03 against
+  the exact truth 430.5; recorded then as an executable `#[ignore]`d
+  test) — is **closed by the exact seam weld**, landing in v0.1.8:
+  a twin weld at construction noise 2^-40, T-junction interleave at
+  the seam's own noise, and needle-cap collapse, under a
+  wholesale-or-revert volume bound. The former defect record now runs
+  and passes —
+  `boolean_rotated_box_crossing_faces_matches_exact_reference`:
+  cut 430.5, fuse 646.5, common 49.5 against the exact
+  rational reference (`scripts/exact_boolean_reference.py`), all
+  watertight. Axis-aligned crossings remain exact.
 - `Part::Mirroring`'s `MirrorPlane` **face-subelement** links (a mirror
   through "Face3" of a linked shape) cannot re-resolve at mesh level —
   no OCCT face numbering survives tessellation — so the plane FreeCAD
@@ -237,3 +244,32 @@ original payloads re-emerge byte-identically on save.)
 - No GUI: the `fc-viewer` renders offscreen; there is no workbench,
   no interaction loop. This is the CLI/kernel side of FreeCAD. (GUI
   *data* — `GuiDocument.xml`, thumbnails — round-trips verbatim.)
+
+### What the parity gate has caught (2026-10-24, first contact)
+
+The `parity` workflow (`.github/workflows/parity.yml`, harness in
+`scripts/parity/`) runs a pinned real FreeCAD 1.0 (r39109) over the
+committed fixture corpus in both directions. On its first full local
+run it found three fixture defects the Rust suite could never see —
+each is quarantined in the harness (`PARITY_QUARANTINE`) with its
+rationale, and open for a focused fix:
+
+1. `freecad_sketch_constraints.fcstd` — FreeCAD's solver reports
+   *conflicting constraints* (2, 3, 5, 8, 9, 10, 11, 13) and leaves
+   the sketch `Touched/Invalid`. The authored set is redundant
+   (`Perpendicular` + `Angle` + `Horizontal` + `Vertical` overlap;
+   `Radius` 9 and `Diameter` 18 on the same circle). The reader-side
+   claim (all thirteen kinds parse with exact ordinals/values) is
+   unaffected; the fixture needs a DOF-consistent redesign authored
+   through `freecadcmd`.
+2. `partdesign_body.fcstd` — the Pad's `Profile` is persisted as
+   `App::PropertyLink`, but FreeCAD 1.0's Pad uses
+   `App::PropertyLinkSub`; on restore the link drops ("No object
+   linked") and the Pad goes `Touched/Invalid`. The fixture needs
+   regeneration through real FreeCAD (the v0.1.6 LinkSub form).
+3. `group_links.fcstd` — the hand-authored type `App::DocumentGroup`
+   is not a FreeCAD 1.0 document type (the real type is
+   `App::DocumentObjectGroup`); FreeCAD drops the group objects
+   *silently* when opening the file. Real FreeCAD-authored groups
+   round-trip safely today (unknown types are preserved verbatim);
+   the fixture and the loader's group-type mapping need correcting.

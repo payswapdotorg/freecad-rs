@@ -1,0 +1,80 @@
+name: parity
+
+# The continuous FreeCAD acceptance gate: a pinned real FreeCAD 1.0
+# (r39109) binary, both directions, over the committed fixture corpus.
+#
+# What "green" means here that the plain Rust CI cannot mean:
+#   - real FreeCAD opens + recomputes every fixture (phase 1),
+#   - freecad-rs preserves FreeCAD-written files losslessly and its
+#     recomputed volumes agree with FreeCAD's own (phase 2),
+#   - real FreeCAD re-opens the files freecad-rs writes (phase 3).
+#
+# Cadence: weekly, on demand, and on pushes that touch the interop
+# surface (the pinned AppImage is ~650 MB; actions/cache keys it by
+# its pinned sha256 so steady-state runs do not re-download it).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "crates/fc-io/**"
+      - "crates/fc-app/**"
+      - "crates/fc-part/**"
+      - "crates/*/tests/**"
+      - "scripts/parity/**"
+      - ".github/workflows/parity.yml"
+
+env:
+  # FreeCAD 1.0.0 official release asset (conda, python 3.11 build).
+  # The sha256 and size were measured from the official download and
+  # cross-checked against the r39109 binary used for every recorded
+  # manual verification in docs/EQUIVALENCE.md.
+  FREECAD_URL: https://github.com/FreeCAD/FreeCAD/releases/download/1.0.0/FreeCAD_1.0.0-conda-Linux-x86_64-py311.AppImage
+  FREECAD_SHA256: 4b1c53e7f444a7897875064e059be84c0ebb8848dd58bc034dcdd1ccc407dbc7
+  FREECAD_SIZE: "679702928"
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore pinned FreeCAD 1.0.0
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/freecad/FreeCAD-1.0.0.AppImage
+          key: freecad-1.0.0-x86_64-${{ env.FREECAD_SHA256 }}
+      - name: Download pinned FreeCAD 1.0.0
+        run: |
+          mkdir -p "$HOME/.cache/freecad"
+          f="$HOME/.cache/freecad/FreeCAD-1.0.0.AppImage"
+          if [ ! -f "$f" ]; then
+            curl -fL --retry 3 -o "$f" "$FREECAD_URL"
+          fi
+          echo "$FREECAD_SHA256  $f" | sha256sum -c -
+          actual="$(stat -c%s "$f")"
+          if [ "$actual" != "$FREECAD_SIZE" ]; then
+            echo "size mismatch: expected $FREECAD_SIZE, got $actual" >&2
+            exit 1
+          fi
+      - name: Extract (FUSE-less)
+        run: |
+          chmod +x "$HOME/.cache/freecad/FreeCAD-1.0.0.AppImage"
+          cd "$RUNNER_TEMP"
+          "$HOME/.cache/freecad/FreeCAD-1.0.0.AppImage" --appimage-extract > /dev/null
+          echo "FREECAD_APPDIR=$RUNNER_TEMP/squashfs-root" >> "$GITHUB_ENV"
+      - name: Parity gate (real FreeCAD 1.0, both directions)
+        run: bash scripts/parity/run_parity.sh
+        env:
+          FREECAD_APPDIR: ${{ env.FREECAD_APPDIR }}
+      - name: Upload parity evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-evidence
+          path: /tmp/parity-work
+          if-no-files-found: ignore
