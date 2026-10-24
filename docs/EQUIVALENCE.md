@@ -212,11 +212,20 @@ original payloads re-emerge byte-identically on save.)
 
 ## Known differences — the honest list
 
-- **Booleans are mesh-level** (BSP on tessellations, watertight,
-  deflection-bounded volumes), not OCCT exact BRep booleans — the one
-  remaining place where a conversion through this kernel is not
-  bit-exact. (Volumes agree to the deflection; the file *data* loss is
-  zero — operands, parameters and results all round-trip.)
+- **Booleans classify exactly; curved operands still tessellate.**
+  Vertex sides are decided by exact integer predicates (a certified
+  `f64` filter, then a 256-bit fast path, then a wide integer path
+  for adversarial exponent spreads) with a construction-noise band
+  seven orders below the old `PLANE_EPS` — a face offset as small as
+  one millionth of a model unit is now cut where it belongs (the old
+  tolerance snapped it a full 1e-5 away). What remains approximate on
+  curved operands is the *tessellation* — the deflection — not the
+  classification. The one new known defect, recorded executably as an
+  `#[ignore]`d test: a rotated planar boundary *crossing* the other
+  operand's faces can lose or duplicate whole chunks (pre-dates exact
+  classification — bit-identical under the old regime; the planar-seam
+  path lacks the operand-aware repair machinery the curved-seam path
+  carries). Axis-aligned crossings are exact.
 - `Part::Mirroring`'s `MirrorPlane` **face-subelement** links (a mirror
   through "Face3" of a linked shape) cannot re-resolve at mesh level —
   no OCCT face numbering survives tessellation — so the plane FreeCAD

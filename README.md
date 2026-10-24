@@ -102,22 +102,22 @@ concrete terms:
 
 ## Install & build
 
-### Download a binary (v0.1.6)
+### Download a binary (v0.1.7)
 
 Prebuilt executables live on the
-[releases page](https://github.com/payswapdotorg/freecad-rs/releases/tag/v0.1.6),
+[releases page](https://github.com/payswapdotorg/freecad-rs/releases/tag/v0.1.7),
 with `SHA256SUMS` for every asset — pick what matches your system:
 
 | Asset | Platform | Install |
 |---|---|---|
-| `freecad-rs-0.1.6-x86_64.AppImage` | Linux x86_64 | `chmod +x` and run; zero install. On FUSE-less systems use `APPIMAGE_EXTRACT_AND_RUN=1` |
-| `freecad-rs-0.1.6-amd64.deb` | Debian/Ubuntu (amd64) | `sudo dpkg -i freecad-rs-0.1.6-amd64.deb` → `/usr/bin/freecad-rs` |
-| `freecad-rs-0.1.6-x86_64-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
+| `freecad-rs-0.1.7-x86_64.AppImage` | Linux x86_64 | `chmod +x` and run; zero install. On FUSE-less systems use `APPIMAGE_EXTRACT_AND_RUN=1` |
+| `freecad-rs-0.1.7-amd64.deb` | Debian/Ubuntu (amd64) | `sudo dpkg -i freecad-rs-0.1.7-amd64.deb` → `/usr/bin/freecad-rs` |
+| `freecad-rs-0.1.7-x86_64-linux-gnu.tar.gz` | any Linux x86_64 | unpack, run `freecad-rs` from the bin dir |
 
 ```sh
 # Linux AppImage, the FreeCAD-style way:
-chmod +x freecad-rs-0.1.6-x86_64.AppImage
-./freecad-rs-0.1.6-x86_64.AppImage --version
+chmod +x freecad-rs-0.1.7-x86_64.AppImage
+./freecad-rs-0.1.7-x86_64.AppImage --version
 # freecad-rs 0.1.6
 ```
 

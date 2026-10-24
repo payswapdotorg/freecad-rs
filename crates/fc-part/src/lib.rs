@@ -7,8 +7,13 @@
 //! serialization ("FCBREP"), and the classic part features wired into the
 //! `fc-app` recompute loop.
 //!
-//! What is **not** implemented (and honestly so): NURBS, booleans, fillets,
-//! chamfers, STEP/BREP interoperability with OCCT.
+//! What is **not** implemented (and honestly so): NURBS, fillets,
+//! chamfers, STEP/BREP interoperability with OCCT. Booleans run on
+//! tessellations with exact classification (see [`exact`]) — the
+//! volumes of curved operands agree to their deflection, and planar
+//! operands exactly.
+
+mod exact;
 
 pub mod boolean;
 pub mod brep;

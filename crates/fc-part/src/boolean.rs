@@ -12,8 +12,12 @@
 //!    first polygon arriving at a node becomes that node's splitting
 //!    plane.
 //! 2. Split every polygon against the planes it meets, classifying
-//!    vertices with [`PLANE_EPS`]; a spanning polygon is cut into a front
-//!    piece and a back piece (Sutherland–Hodgman clipping).
+//!    vertices with exact orientation predicates ([`exact`]): a vertex
+//!    is on a plane only when it is on it in exact arithmetic. A
+//!    spanning polygon is cut into a front piece and a back piece
+//!    (Sutherland–Hodgman clipping; the crossing points themselves are
+//!    `f64`, placed by the rounded plane form with an exact-determinant
+//!    fallback for near-parallel segments — see [`Plane::split_point`]).
 //! 3. Combine the trees with the canonical invert / clip-to / build
 //!    construction for union, difference and intersection: clip each
 //!    boundary to the relevant side of the other solid, flip windings
@@ -94,11 +98,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::mem;
 
+use crate::exact::{crossing_parameter, orient3d_sign};
 use crate::shape::Mesh;
 use fc_base::Vector3;
 
-/// Vertex classification tolerance against a splitting plane, in model
-/// units — the value the `csg.js` lineage uses.
+/// Length scale of the kernel's *tolerance* machinery, in model units —
+/// the value the `csg.js` lineage uses. Vertex classification against
+/// splitting planes no longer reads it (that decision is exact now,
+/// through [`exact`]); it still sizes the input degeneracy prune and
+/// the curved-seam repair distances.
 pub const PLANE_EPS: f64 = 1e-5;
 
 /// How close a projection parameter must be to an edge's endpoints for
@@ -434,6 +442,7 @@ fn polygons_of(mesh: &Mesh, side: Side) -> Vec<Polygon> {
             Some(Polygon {
                 vertices: vec![a, b, c],
                 side,
+                face_plane: Plane::from_points(a, b, c),
             })
         })
         .collect()
@@ -527,7 +536,10 @@ fn stitch_t_junctions(polygons: Vec<Polygon>) -> Vec<Polygon> {
                                 let av = v - a;
                                 // Projection parameter along the edge.
                                 let t = av.dot(&ab) / ab_len_sq;
-                                if t <= STITCH_END_EPS || t >= 1.0 - STITCH_END_EPS {
+                                if !t.is_finite()
+                                    || t <= STITCH_END_EPS
+                                    || t >= 1.0 - STITCH_END_EPS
+                                {
                                     continue;
                                 }
                                 // Perpendicular distance to the (infinite)
@@ -545,7 +557,7 @@ fn stitch_t_junctions(polygons: Vec<Polygon>) -> Vec<Polygon> {
                     stitched.push(v);
                 }
             }
-            match new_polygon(stitched, polygon.side) {
+            match new_polygon(stitched, polygon.side, polygon.face_plane) {
                 Some(stitched) => polygon = stitched,
                 None => {
                     // A stitch that collapses the polygon below three
@@ -3006,9 +3018,20 @@ fn same_point(a: &Vector3, b: &Vector3) -> bool {
 // BSP tree
 // ---------------------------------------------------------------------------
 
-/// Oriented plane `normal · p = w` with a unit normal.
-#[derive(Debug, Clone, Copy)]
+/// Oriented plane `normal · p = w` with a unit normal, plus the three
+/// anchor points it was built from.
+///
+/// Two forms of the same plane live side by side, each doing what it
+/// is exact at: the anchors drive classification — [`orient3d_sign`]
+/// reads the side of any vertex with no rounding at all — while the
+/// rounded `(normal, w)` pair drives the crossing-point interpolation
+/// in [`split_point`](Plane::split_point), whose result is a placed
+/// `f64` point by contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Plane {
+    pa: Vector3,
+    pb: Vector3,
+    pc: Vector3,
     normal: Vector3,
     w: f64,
 }
@@ -3021,6 +3044,9 @@ impl Plane {
         if length > 0.0 && length.is_finite() {
             let normal = normal * (1.0 / length);
             Some(Plane {
+                pa: a,
+                pb: b,
+                pc: c,
                 w: normal.dot(&a),
                 normal,
             })
@@ -3029,8 +3055,11 @@ impl Plane {
         }
     }
 
-    /// Same plane, complement region: flip the normal.
+    /// Same plane, complement region: flip the normal — both the rounded
+    /// form and the anchor orientation (swapping two anchors negates
+    /// the exact determinant).
     fn flip(&mut self) {
+        mem::swap(&mut self.pb, &mut self.pc);
         self.normal = -self.normal;
         self.w = -self.w;
     }
@@ -3039,19 +3068,45 @@ impl Plane {
     /// canonicalized (lexicographically smaller endpoint first) so an
     /// edge and its reverse produce bit-identical crossing points — this
     /// is what keeps the welded output seam-tight.
+    ///
+    /// The placement reads the rounded `(normal, w)` form — the classic
+    /// interpolation, the same expression the `csg.js` lineage uses.
+    /// When that form degenerates (the segment runs nearly parallel to
+    /// the rounded plane while the exact predicate says the endpoints
+    /// answer strictly oppositely), the parameter comes from the
+    /// **exact** endpoint determinants instead (see
+    /// [`exact::crossing_parameter`]) — a crossing provably inside the
+    /// segment, never a blow-up.
     fn split_point(&self, a: Vector3, b: Vector3) -> Vector3 {
         let (lo, hi) = if (a.x, a.y, a.z) < (b.x, b.y, b.z) {
             (a, b)
         } else {
             (b, a)
         };
-        let t = (self.w - self.normal.dot(&lo)) / (self.normal.dot(&hi) - self.normal.dot(&lo));
+        let den = self.normal.dot(&hi) - self.normal.dot(&lo);
+        let mut t = (self.w - self.normal.dot(&lo)) / den;
+        if !t.is_finite() || t < 0.0 || t > 1.0 {
+            t = crossing_parameter(self.pa, self.pb, self.pc, lo, hi);
+        }
         lo + (hi - lo) * t
+    }
+
+    /// Exact side of `vertex`: `+1` front, `-1` back, `0` exactly on
+    /// the plane — no tolerance.
+    fn side_of(&self, vertex: Vector3) -> i8 {
+        orient3d_sign(self.pa, self.pb, self.pc, vertex)
     }
 
     /// Classify `polygon` against this plane without splitting: a
     /// bitmask of the vertex sides (`FRONT_BIT`/`BACK_BIT`), used by the
     /// splitter scorer.
+    ///
+    /// This is the **heuristic** side of the kernel: the scorer only
+    /// *picks* a splitter, and any choice yields a correct construction —
+    /// so it reads the cheap rounded form with the classic tolerance,
+    /// exactly as the `csg.js` lineage always did. The correctness-critical
+    /// side — [`split_polygon`](Plane::split_polygon) — classifies with
+    /// the exact predicate instead.
     fn classify(&self, polygon: &Polygon) -> u8 {
         let mut mask = 0;
         for vertex in &polygon.vertices {
@@ -3073,16 +3128,14 @@ impl Plane {
 
         let origin = polygon.side;
         let vertices = polygon.vertices;
+        let face = polygon.face_plane;
         let mut types = Vec::with_capacity(vertices.len());
         let mut polygon_type = COPLANAR;
         for vertex in &vertices {
-            let t = self.normal.dot(vertex) - self.w;
-            let side = if t < -PLANE_EPS {
-                BACK
-            } else if t > PLANE_EPS {
-                FRONT
-            } else {
-                COPLANAR
+            let side = match self.side_of(*vertex) {
+                -1 => BACK,
+                1 => FRONT,
+                _ => COPLANAR,
             };
             polygon_type |= side;
             types.push(side);
@@ -3090,27 +3143,32 @@ impl Plane {
         match polygon_type {
             COPLANAR => {
                 // Coplanar polygons follow their normal alignment.
-                let aligned =
-                    polygon_plane(&vertices).is_some_and(|p| p.normal.dot(&self.normal) > 0.0);
+                let aligned = face
+                    .or_else(|| polygon_plane(&vertices))
+                    .is_some_and(|p| p.normal.dot(&self.normal) > 0.0);
                 if aligned {
                     Split::CoplanarFront(Polygon {
                         vertices,
                         side: origin,
+                        face_plane: face,
                     })
                 } else {
                     Split::CoplanarBack(Polygon {
                         vertices,
                         side: origin,
+                        face_plane: face,
                     })
                 }
             }
             FRONT => Split::Front(Polygon {
                 vertices,
                 side: origin,
+                face_plane: face,
             }),
             BACK => Split::Back(Polygon {
                 vertices,
                 side: origin,
+                face_plane: face,
             }),
             _ => {
                 // SPANNING: Sutherland–Hodgman clipping into a front and a
@@ -3135,8 +3193,8 @@ impl Plane {
                     }
                 }
                 Split::Spanning {
-                    front: new_polygon(front, origin),
-                    back: new_polygon(back, origin),
+                    front: new_polygon(front, origin, face),
+                    back: new_polygon(back, origin, face),
                 }
             }
         }
@@ -3164,19 +3222,37 @@ enum Split {
 
 /// A clipped piece of a surface: three or more vertices in order, wound
 /// like the triangle it came from, with the operand it originated from.
+///
+/// [`face_plane`] is the plane of the original input triangle the piece
+/// descends from — the *canonical* plane, anchored on original mesh
+/// vertices, inherited unchanged through every split (and flipped with
+/// the winding). Splits place their crossing points with one `f64`
+/// rounding; re-deriving a plane from those crossings would anchor it on
+/// 1-ulp-noisy points, and under exact classification that noise would
+/// manufacture planes no face ever had — the cascade that once overflowed
+/// the builder's stack. Pieces keep their face's plane instead: the
+/// system's plane set stays the finite set of original faces, and every
+/// classification of every vertex is globally consistent.
 #[derive(Debug, Clone, PartialEq)]
 struct Polygon {
     vertices: Vec<Vector3>,
     side: Side,
+    face_plane: Option<Plane>,
 }
 
 impl Polygon {
     fn flip(&mut self) {
         self.vertices.reverse();
+        if let Some(plane) = &mut self.face_plane {
+            plane.flip();
+        }
     }
 
+    /// The piece's plane: the canonical face plane when present, else
+    /// one derived from the current vertices (the degenerate-input
+    /// fallback).
     fn plane(&self) -> Option<Plane> {
-        polygon_plane(&self.vertices)
+        self.face_plane.or_else(|| polygon_plane(&self.vertices))
     }
 }
 
@@ -3193,7 +3269,7 @@ fn polygon_plane(vertices: &[Vector3]) -> Option<Plane> {
 
 /// Collapse consecutive duplicate vertices (and the wraparound pair);
 /// `None` if fewer than three distinct vertices remain.
-fn new_polygon(vertices: Vec<Vector3>, side: Side) -> Option<Polygon> {
+fn new_polygon(vertices: Vec<Vector3>, side: Side, face_plane: Option<Plane>) -> Option<Polygon> {
     let mut distinct: Vec<Vector3> = Vec::with_capacity(vertices.len());
     for vertex in vertices {
         match distinct.last() {
@@ -3208,6 +3284,7 @@ fn new_polygon(vertices: Vec<Vector3>, side: Side) -> Option<Polygon> {
         Some(Polygon {
             vertices: distinct,
             side,
+            face_plane,
         })
     } else {
         None
@@ -3223,6 +3300,45 @@ struct Node {
     polygons: Vec<Polygon>,
     front: Option<Box<Node>>,
     back: Option<Box<Node>>,
+}
+
+/// A point with coordinate `axis` set to `a` and the two cross axes
+/// set to `u` and `w` respectively.
+fn axis_point(axis: usize, a: f64, u: f64, w: f64) -> Vector3 {
+    match axis {
+        0 => Vector3::new(a, u, w),
+        1 => Vector3::new(w, a, u),
+        _ => Vector3::new(u, w, a),
+    }
+}
+
+/// Axis-aligned midplane `coord[axis] = (min + max) / 2`, anchored on
+/// three real points of the bounding box: `pa` at the cross lows, `pb`
+/// raised along the first cross axis, `pc` along the second. The
+/// cyclic cross pairs (`y×z = +x`, `z×x = +y`, `x×y = +z`) make the
+/// anchor normal the *positive* axis direction — matching the exact
+/// `normal` field. `None` when a cross axis is degenerate (flat),
+/// where the midplane could not bound anything anyway.
+fn axis_midplane(axis: usize, min: f64, max: f64, lo: &Vector3, hi: &Vector3) -> Option<Plane> {
+    let (u_lo, u_hi, w_lo, w_hi) = match axis {
+        0 => (lo.y, hi.y, lo.z, hi.z),
+        1 => (lo.z, hi.z, lo.x, hi.x),
+        _ => (lo.x, hi.x, lo.y, hi.y),
+    };
+    if !(u_hi > u_lo && w_hi > w_lo) {
+        return None;
+    }
+    let mid = (min + max) / 2.0;
+    let pa = axis_point(axis, mid, u_lo, w_lo);
+    let pb = axis_point(axis, mid, u_hi, w_lo);
+    let pc = axis_point(axis, mid, u_lo, w_hi);
+    Some(Plane {
+        pa,
+        pb,
+        pc,
+        normal: axis_point(axis, 1.0, 0.0, 0.0),
+        w: mid,
+    })
 }
 
 /// Pick the splitting plane for a node: the best-scoring of (up to 8)
@@ -3279,15 +3395,10 @@ fn choose_splitter(polygons: &[Polygon]) -> Option<Plane> {
                         hi = max_point(hi, *vertex);
                     }
                 }
-                for (normal, min, max) in [
-                    (Vector3::new(1.0, 0.0, 0.0), lo.x, hi.x),
-                    (Vector3::new(0.0, 1.0, 0.0), lo.y, hi.y),
-                    (Vector3::new(0.0, 0.0, 1.0), lo.z, hi.z),
-                ] {
+                for (axis, min, max) in [(0usize, lo.x, hi.x), (1, lo.y, hi.y), (2, lo.z, hi.z)] {
                     if max.is_finite() && min.is_finite() && max - min > PLANE_EPS {
-                        let plane = Plane {
-                            normal,
-                            w: (min + max) / 2.0,
+                        let Some(plane) = axis_midplane(axis, min, max, &lo, &hi) else {
+                            continue;
                         };
                         let mid_score = score_of(&plane);
                         if mid_score < score {
@@ -3504,6 +3615,111 @@ mod tests {
         assert!(result.triangle_count() > 0);
         assert!(mesh_is_closed(&result), "common result must be watertight");
         assert_volume(&result, OVERLAP, 0.02, "box common box");
+    }
+
+    /// The tolerance regime's blind spot, closed: a tool face one
+    /// millionth of a model unit inside the target used to read as
+    /// *coplanar* (within `PLANE_EPS` = 1e-5), snapping the cut to the
+    /// wrong plane. Exact classification sees it: the kept volume is
+    /// the analytic `(5 − 1e-6) · 8 · 6` to the last digit.
+    #[test]
+    fn boolean_cut_face_one_millionth_inside_is_cut_exactly() {
+        let a = box_at(10.0, 8.0, 6.0, 0.0, 0.0, 0.0);
+        // Covers A fully in y and z and reaches past its right face;
+        // its left face sits 1e-6 inside A's right half-space (the cut
+        // lands at x = 5 − 1e-6). No other faces coincide.
+        let b = box_at(10.0, 10.0, 8.0, 5.0 - 1e-6, -1.0, -1.0);
+        let result = cut(&a, &b);
+        assert!(mesh_is_closed(&result), "the cut stays watertight");
+        let expected = (5.0 - 1e-6) * 8.0 * 6.0;
+        let got = result.volume();
+        assert!(
+            (got - expected).abs() <= 1e-9,
+            "volume {got} must equal the analytic {expected} (the old \
+             tolerance regime returned 240.0 here — the cut plane was \
+             snapped a millionth of a unit to the wrong place)"
+        );
+    }
+
+    /// A rotated planar boolean against the exact rational reference
+    /// (`scripts/exact_boolean_reference.py`): a 4×4×4 box rotated by
+    /// (0.6, 0.8) about Z and placed interior to the 10×8×6 box. Every
+    /// operand vertex and placement step is an exact `f64`, and the
+    /// kernel's volumes land on the analytic containment values —
+    /// `V(A − B) = 416`, `V(A ∪ B) = 480`, `V(A ∩ B) = 64` — to the
+    /// rounding of the volume sum itself: rotated planar geometry,
+    /// handled with no tolerance anywhere in the classification.
+    #[test]
+    fn boolean_rotated_interior_box_matches_exact_reference() {
+        let a = box_at(10.0, 8.0, 6.0, 0.0, 0.0, 0.0);
+        let mut b = TopoShape::Box {
+            length: 4.0,
+            width: 4.0,
+            height: 4.0,
+        }
+        .tessellate(DEFAULT_DEFLECTION);
+        for v in &mut b.vertices {
+            let lx = v.x - 2.0;
+            let ly = v.y - 2.0;
+            let lz = v.z - 2.0;
+            v.x = 0.6 * lx - 0.8 * ly + 5.0;
+            v.y = 0.8 * lx + 0.6 * ly + 4.0;
+            v.z = lz + 3.0;
+        }
+        for (name, m, expected) in [
+            ("cut", cut(&a, &b), 416.0),
+            ("fuse", fuse(&a, &b), 480.0),
+            ("common", common(&a, &b), 64.0),
+        ] {
+            assert!(mesh_is_closed(&m), "{name}: watertight");
+            let got = m.volume();
+            assert!(
+                (got - expected).abs() <= 1e-9,
+                "{name}: volume {got} vs exact containment reference {expected}"
+            );
+        }
+    }
+
+    /// A **known, pre-existing defect**, recorded executably: a rotated
+    /// box whose boundary crosses the other operand's faces loses or
+    /// duplicates whole chunks — the planar-seam path has none of the
+    /// operand-aware repair machinery the curved-seam path carries, and
+    /// the exact rational reference (`scripts/exact_boolean_reference.py`)
+    /// makes the divergence measurable: for a 6×6×6 box rotated by
+    /// (0.6, 0.8) at (10, 8, 3.5) cut from the 10×8×6 box the truth is
+    /// `V(A − B) = 430.5` while the kernel returns ≈447.03 — bit-identical
+    /// to the tolerance regime before exact classification, so the
+    /// defect is in the seam construction, not the sides. Axis-aligned
+    /// crossings (the unrotated twin) are exact.
+    #[test]
+    #[ignore = "known defect: planar-seam construction drops/duplicates                 chunks when a rotated boundary crosses the other operand                 (pre-dates exact classification; see                 scripts/exact_boolean_reference.py)"]
+    fn boolean_rotated_box_crossing_faces_matches_exact_reference() {
+        let a = box_at(10.0, 8.0, 6.0, 0.0, 0.0, 0.0);
+        let mut b = TopoShape::Box {
+            length: 6.0,
+            width: 6.0,
+            height: 6.0,
+        }
+        .tessellate(DEFAULT_DEFLECTION);
+        for v in &mut b.vertices {
+            let lx = v.x - 3.0;
+            let ly = v.y - 3.0;
+            let lz = v.z - 3.0;
+            v.x = 0.6 * lx - 0.8 * ly + 10.0;
+            v.y = 0.8 * lx + 0.6 * ly + 8.0;
+            v.z = lz + 3.5;
+        }
+        for (name, m, expected) in [
+            ("cut", cut(&a, &b), 430.5),
+            ("fuse", fuse(&a, &b), 646.5),
+            ("common", common(&a, &b), 49.5),
+        ] {
+            let got = m.volume();
+            assert!(
+                (got - expected).abs() <= 1e-9,
+                "{name}: volume {got} vs exact rational reference {expected}"
+            );
+        }
     }
 
     #[test]
