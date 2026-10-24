@@ -2,3 +2,4 @@
 Cargo.lock.bak
 *.orig
 /dist
+studio/fc_wasm.wasm

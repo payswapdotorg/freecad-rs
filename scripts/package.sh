@@ -92,6 +92,17 @@ EOF
   echo "wrote $OUT/freecad-rs-$VER-x86_64.AppImage"
 fi
 
+# --- fc-studio (the browser workbench) ----------------------------------------
+# Builds the wasm engine and the self-contained one-file workbench.
+# Skipped quietly when neither the wasm32 target nor python3 is present.
+if command -v python3 >/dev/null && \
+   (rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown || [ -f target/wasm32-unknown-unknown/release/fc_wasm.wasm ]); then
+  scripts/package-studio.sh
+  echo "wrote $OUT/fc-studio.html + $OUT/fc_wasm.wasm"
+else
+  echo "note: wasm32 target not installed — skipping fc-studio (scripts/package-studio.sh)" >&2
+fi
+
 # --- checksums ---------------------------------------------------------------
-( cd "$OUT" && sha256sum freecad-rs-$VER-*.tar.gz freecad-rs-$VER-*.AppImage freecad-rs-$VER-*.deb 2>/dev/null > SHA256SUMS || true )
+( cd "$OUT" && sha256sum freecad-rs-$VER-*.tar.gz freecad-rs-$VER-*.AppImage freecad-rs-$VER-*.deb fc-studio.html fc_wasm.wasm 2>/dev/null > SHA256SUMS || true )
 echo "wrote $OUT/SHA256SUMS"

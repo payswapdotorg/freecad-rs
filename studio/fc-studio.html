@@ -1,0 +1,1469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fc-studio — the freecad-rs workbench</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f59e0b' stroke-width='2'%3E%3Cpath d='M12 2l6 10H6z'/%3E%3Crect x='13' y='13' width='8' height='8' rx='1'/%3E%3C/svg%3E">
+<!--fc-wasm-embed-->
+<style>
+  /* fc-studio — the freecad-rs browser workbench.
+     Zero dependencies beyond the engine itself: the 3D viewport is
+     hand-rolled WebGL. The engine module is fetched as fc_wasm.wasm
+     next to this file (or injected as base64 by the release packager
+     at the marker above — then the page works from file:// too). */
+  :root {
+    color-scheme: dark;
+    --bg: #09090b;        /* zinc-950 */
+    --panel: #18181b;     /* zinc-900 */
+    --border: #27272a;    /* zinc-800 */
+    --border-strong: #3f3f46; /* zinc-700 */
+    --text: #f4f4f5;      /* zinc-100 */
+    --text-2: #d4d4d8;    /* zinc-300 */
+    --text-3: #a1a1aa;    /* zinc-400 */
+    --text-4: #71717a;    /* zinc-500 */
+    --text-5: #52525b;    /* zinc-600 */
+    --accent: #f59e0b;    /* amber-500 */
+    --accent-hi: #fbbf24; /* amber-400 */
+    --ok: #34d399; --ok-bg: rgba(6, 78, 59, .4); --ok-br: rgba(6, 78, 59, .6);
+    --warn: #fbbf24; --warn-bg: rgba(120, 53, 15, .4); --warn-br: rgba(120, 53, 15, .6);
+    --err: #f87171; --err-bg: rgba(127, 29, 29, .4); --err-br: rgba(127, 29, 29, .6);
+    --expr: #c4b5fd; --expr-2: #8b5cf6;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.45 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  input, select {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 5px;
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 1.5px solid var(--accent); outline-offset: 1px;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  /* ---- header ---- */
+  header {
+    flex: none; display: flex; align-items: center; gap: 4px;
+    border-bottom: 1px solid var(--border); background: rgba(24, 24, 27, .6);
+    padding: 5px 12px; height: 42px;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; padding-right: 8px; }
+  .brand svg { color: var(--accent); }
+  .brand b { font-size: 13px; letter-spacing: -.01em; }
+  .ver {
+    font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: var(--text-4);
+    background: var(--border); border-radius: 4px; padding: 1px 6px;
+  }
+  .sep { width: 1px; height: 20px; background: var(--border); margin: 0 6px; flex: none; }
+  .tbtn {
+    display: inline-flex; align-items: center; gap: 6px; height: 28px;
+    padding: 0 8px; border-radius: 6px; color: var(--text-3);
+    transition: background .12s, color .12s; white-space: nowrap;
+  }
+  .tbtn:hover { background: var(--border); color: var(--text); }
+  .grow { flex: 1; }
+  .add-btn {
+    display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+    border-radius: 6px; background: var(--accent); color: #18181b; font-weight: 600;
+    transition: background .12s;
+  }
+  .add-btn:hover { background: var(--accent-hi); }
+  @media (max-width: 720px) { .tbtn span.lbl { display: none; } }
+
+  /* ---- add menu ---- */
+  .menu-wrap { position: relative; }
+  .menu {
+    position: absolute; right: 0; top: 34px; z-index: 40; min-width: 190px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0,0,0,.55); padding: 4px; display: none;
+  }
+  .menu.open { display: block; }
+  .menu .cat {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--text-4); padding: 6px 8px 3px;
+  }
+  .menu .item {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    padding: 6px 8px; border-radius: 5px; color: var(--text-2);
+  }
+  .menu .item:hover { background: var(--border); color: var(--text); }
+  .menu .rule { height: 1px; background: var(--border); margin: 4px 2px; }
+
+  /* ---- layout ---- */
+  main { flex: 1; display: flex; min-height: 0; }
+  aside { flex: none; background: rgba(24, 24, 27, .4); min-height: 0; }
+  #tree-panel { width: 232px; border-right: 1px solid var(--border); }
+  #prop-panel { width: 280px; border-left: 1px solid var(--border); }
+  @media (max-width: 860px) { #tree-panel { display: none; } }
+  @media (max-width: 1100px) { #prop-panel { display: none; } }
+  .panel-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--text-4); padding: 8px 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .count { background: var(--border); border-radius: 4px; padding: 0 6px; font-size: 10px; color: var(--text-4); }
+  .panel-body { overflow-y: auto; height: calc(100% - 33px); }
+
+  /* ---- tree ---- */
+  .tree-empty { color: var(--text-5); text-align: center; padding: 24px 8px; font-size: 12px; }
+  .row {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 5px 8px; border-radius: 5px; color: var(--text-2); cursor: pointer;
+  }
+  .row:hover { background: rgba(39, 39, 42, .7); }
+  .row.sel { background: rgba(245, 158, 11, .15); color: #fde68a; box-shadow: inset 0 0 0 1px rgba(245, 158, 11, .4); }
+  .row svg { flex: none; opacity: .7; }
+  .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge {
+    flex: none; border: 1px solid; border-radius: 4px; padding: 0 4px;
+    font-size: 9px; line-height: 1.5; font-family: ui-monospace, Menlo, monospace;
+  }
+  .badge.ok { color: var(--ok); border-color: var(--ok-br); background: var(--ok-bg); }
+  .badge.warn { color: var(--warn); border-color: var(--warn-br); background: var(--warn-bg); }
+  .badge.err { color: var(--err); border-color: var(--err-br); background: var(--err-bg); }
+  .del {
+    flex: none; color: var(--text-5); opacity: 0; border-radius: 4px; padding: 2px;
+    transition: opacity .12s, color .12s;
+  }
+  .row:hover .del { opacity: 1; }
+  .del:hover { color: var(--err); }
+
+  /* ---- viewport ---- */
+  #viewport-wrap { position: relative; flex: 1; min-width: 0; }
+  #viewport-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .vp-empty {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 4px; color: var(--text-5);
+    pointer-events: none; text-align: center; padding: 0 20px;
+  }
+  .vp-hud {
+    position: absolute; left: 10px; bottom: 10px; z-index: 5; pointer-events: none;
+    font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: var(--text-5);
+    background: rgba(9, 9, 11, .55); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 7px; line-height: 1.6;
+  }
+
+  /* ---- property panel ---- */
+  .pp-head { padding: 12px; padding-bottom: 8px; }
+  .pp-name { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .pp-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 3px; font-size: 10px; color: var(--text-4); }
+  .shape-box {
+    margin: 0 12px 12px; border: 1px solid var(--border); border-radius: 7px;
+    background: rgba(24, 24, 27, .6); padding: 8px 10px; font-size: 11px; color: var(--text-4);
+  }
+  .shape-box .t { display: flex; justify-content: space-between; text-transform: uppercase; letter-spacing: .07em; font-size: 10px; }
+  .shape-box .t b { color: var(--text-3); font-family: ui-monospace, Menlo, monospace; font-weight: 400; }
+  .shape-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 6px; }
+  .shape-grid .v { font-family: ui-monospace, Menlo, monospace; color: var(--text-2); font-size: 11px; }
+  .prop-empty { color: var(--text-5); text-align: center; padding: 24px 12px; font-size: 12px; }
+  .prow { display: grid; grid-template-columns: 1fr 1.25fr; align-items: center; gap: 6px; padding: 1px 4px; border-radius: 5px; }
+  .prow:hover { background: rgba(24, 24, 27, .6); }
+  .prow label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--text-4); }
+  .prow .cell { display: flex; align-items: center; gap: 3px; min-width: 0; }
+  .prow input.pi {
+    width: 100%; min-width: 0; height: 24px; padding: 0 6px; font-size: 11px;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  .prow input.pi.dirty { border-color: rgba(217, 119, 6, .7); }
+  .prow input.pi.bound { border-color: rgba(109, 40, 217, .7); color: var(--expr); }
+  .sigma {
+    flex: none; padding: 3px; border-radius: 4px; color: var(--text-5);
+    transition: color .12s;
+  }
+  .sigma:hover { color: var(--text-3); }
+  .sigma.on { color: var(--expr-2); }
+  .expr-row { grid-column: 1 / -1; display: flex; gap: 4px; padding: 0 0 4px 2px; }
+  .expr-row input {
+    width: 100%; height: 24px; padding: 0 6px; font-size: 11px;
+    font-family: ui-monospace, Menlo, monospace; color: var(--expr);
+    border-color: rgba(91, 33, 182, .6);
+  }
+
+  /* ---- footer ---- */
+  footer {
+    flex: none; display: flex; align-items: center; gap: 14px; height: 28px;
+    border-top: 1px solid var(--border); background: rgba(24, 24, 27, .6);
+    padding: 0 12px; font-size: 11px; color: var(--text-4);
+    font-family: ui-monospace, Menlo, monospace;
+  }
+
+  /* ---- dialog ---- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .6);
+    display: none; align-items: center; justify-content: center; padding: 16px;
+  }
+  .overlay.open { display: flex; }
+  .dialog {
+    width: min(380px, 100%); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: 0 24px 64px rgba(0,0,0,.6);
+  }
+  .dialog h3 { margin: 0; padding: 14px 16px 0; font-size: 14px; }
+  .dialog .desc { margin: 3px 16px 0; color: var(--text-4); font-size: 12px; }
+  .dialog .body { max-height: 60vh; overflow-y: auto; padding: 12px 16px; display: grid; gap: 10px; }
+  .field label { display: block; font-size: 11px; color: var(--text-2); margin-bottom: 4px; }
+  .field input, .field select { width: 100%; height: 30px; padding: 0 8px; }
+  .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 16px 14px; }
+  .btn { height: 30px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--border-strong); color: var(--text-2); }
+  .btn:hover { color: var(--text); border-color: var(--text-5); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #18181b; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent-hi); }
+
+  /* ---- toasts ---- */
+  #toasts { position: fixed; right: 14px; bottom: 40px; z-index: 80; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    max-width: 340px; background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--text-4); border-radius: 8px; padding: 8px 12px;
+    font-size: 12px; color: var(--text-2); box-shadow: 0 8px 28px rgba(0,0,0,.5);
+    opacity: 0; transform: translateY(6px); transition: opacity .18s, transform .18s;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.success { border-left-color: var(--ok); }
+  .toast.error { border-left-color: var(--err); color: #fca5a5; }
+  .toast.info { border-left-color: var(--accent); }
+
+  /* ---- drop zone ---- */
+  #dropzone {
+    position: fixed; inset: 0; z-index: 90; display: none;
+    background: rgba(9, 9, 11, .8); align-items: center; justify-content: center;
+    border: 2px dashed var(--accent); border-radius: 12px; margin: 16px;
+    color: var(--accent-hi); font-size: 15px;
+  }
+  #dropzone.on { display: flex; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="17.5" r="3.5"/><rect x="13" y="13" width="8" height="8" rx="1"/><path d="M12 2l6 10H6z"/></svg>
+    <b>fc-studio</b>
+    <span class="ver" id="engine-ver">freecad-rs …</span>
+  </div>
+  <div class="sep"></div>
+  <button class="tbtn" id="b-new" title="New document"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M15 2v5h5"/><path d="M12 11v6M9 14h6"/></svg><span class="lbl">New</span></button>
+  <button class="tbtn" id="b-open" title="Open .FCStd"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M6 17l-2-6h16l-2 6z"/></svg><span class="lbl">Open</span></button>
+  <button class="tbtn" id="b-save" title="Save .FCStd"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg><span class="lbl">Save</span></button>
+  <button class="tbtn" id="b-stl" title="Export selected as STL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg><span class="lbl">STL</span></button>
+  <button class="tbtn" id="b-obj" title="Export selected as OBJ"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 8l5 5 5-5"/><path d="M5 21h14"/></svg><span class="lbl">OBJ</span></button>
+  <div class="sep"></div>
+  <button class="tbtn" id="b-undo" title="Undo (Ctrl+Z)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+  <button class="tbtn" id="b-redo" title="Redo (Ctrl+Y)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
+  <button class="tbtn" id="b-recompute" title="Recompute"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
+  <div class="grow"></div>
+  <div class="menu-wrap">
+    <button class="add-btn" id="b-add"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Add</button>
+    <div class="menu" id="add-menu" role="menu"></div>
+  </div>
+</header>
+
+<main>
+  <aside id="tree-panel">
+    <div class="panel-title">Document <span class="count" id="tree-count">0</span></div>
+    <div class="panel-body" id="tree-body"></div>
+  </aside>
+
+  <section id="viewport-wrap" aria-label="3D viewport">
+    <div class="vp-empty" id="vp-empty">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:.3"><circle cx="7.5" cy="17.5" r="3.5"/><rect x="13" y="13" width="8" height="8" rx="1"/><path d="M12 2l6 10H6z"/></svg>
+      <p>Add a shape — or drop in a .FCStd — and the Rust engine renders it here.</p>
+    </div>
+    <div class="vp-hud">drag&nbsp;orbit · right-drag&nbsp;pan · wheel&nbsp;zoom · click&nbsp;select</div>
+  </section>
+
+  <aside id="prop-panel">
+    <div class="panel-title">Properties</div>
+    <div class="panel-body" id="prop-body"></div>
+  </aside>
+</main>
+
+<footer>
+  <span id="f-doc">untitled · 0 objects</span>
+  <span id="f-vol">Σ volume 0.00 mm³</span>
+  <span class="grow"></span>
+  <span id="f-sel">no selection</span>
+  <span id="f-engine" style="color:var(--text-5)">engine: …</span>
+</footer>
+
+<div class="overlay" id="dialog-overlay">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
+    <h3 id="dlg-title"></h3>
+    <p class="desc" id="dlg-desc"></p>
+    <div class="body" id="dlg-body"></div>
+    <div class="actions">
+      <button class="btn" id="dlg-cancel">Cancel</button>
+      <button class="btn primary" id="dlg-ok">Add</button>
+    </div>
+  </div>
+</div>
+
+<div id="dropzone">Drop a .FCStd to open it</div>
+<div id="toasts" aria-live="polite"></div>
+<input type="file" id="file-input" accept=".fcstd,.FCStd" hidden>
+
+<script>
+"use strict";
+
+/* =========================================================================
+ * fc-studio — the freecad-rs document engine, in the browser.
+ *
+ * Everything below the engine client is the workbench: tree, property
+ * editor, expressions, booleans, sketch → pad PartDesign, undo/redo,
+ * .FCStd in/out, STL/OBJ export — all computed client-side by the
+ * same crates the CLI runs (fc-app / fc-part / fc-sketcher / fc-io),
+ * behind fc-wasm's C ABI + JSON protocol.
+ * ========================================================================= */
+
+/* ---------------------------------------------------------------- engine */
+
+const Engine = {
+  ex: null,
+  ready: null,
+
+  start() {
+    if (!this.ready) this.ready = this.init();
+    return this.ready;
+  },
+
+  async init() {
+    let bytes;
+    if (window.__FC_WASM_B64) {
+      // The release packager inlined the module: this page is fully
+      // self-contained and works from file://.
+      const bin = atob(window.__FC_WASM_B64);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    } else {
+      const response = await fetch("fc_wasm.wasm");
+      if (!response.ok) throw new Error("fetch fc_wasm.wasm → HTTP " + response.status);
+      bytes = new Uint8Array(await response.arrayBuffer());
+    }
+    const { instance } = await WebAssembly.instantiate(bytes, {});
+    this.ex = instance.exports;
+    // wasm32 has no wall clock — the host supplies it.
+    this.ex.fc_set_time(BigInt(Math.floor(Date.now() / 1000)));
+  },
+
+  /** One JSON command in, one response object out. */
+  async command(json) {
+    await this.start();
+    const wasm = this.ex;
+    const encoded = new TextEncoder().encode(JSON.stringify(json));
+    const ptr = wasm.fc_alloc(encoded.length);
+    new Uint8Array(wasm.memory.buffer, ptr, encoded.length).set(encoded);
+    const packed = wasm.fc_command(ptr, encoded.length);
+    wasm.fc_free(ptr, encoded.length);
+    // Fresh views after the call — memory may have grown.
+    const resultPtr = Number(BigInt(packed) >> 32n);
+    const resultLen = Number(BigInt(packed) & 0xffffffffn);
+    const text = new TextDecoder().decode(
+      new Uint8Array(wasm.memory.buffer, resultPtr, resultLen));
+    wasm.fc_free(resultPtr, resultLen);
+    return JSON.parse(text);
+  },
+
+  /** A command that must succeed — throws on engine errors. */
+  async must(json) {
+    const response = await this.command(json);
+    if (!response.ok) throw new Error(response.error || "engine command failed");
+    return response.data;
+  },
+};
+
+/* ---------------------------------------------------------------- state */
+
+const state = {
+  version: null,
+  docLabel: "untitled",
+  rows: [],        // [{name, type, status}]
+  meshes: [],      // [{name, vertices, triangles, positions, indices}]
+  stats: [],       // [{name, kind, volume, area, triangles}]
+  selected: null,
+  properties: null,
+  framePending: true,
+};
+
+/* ---------------------------------------------------------------- toasts */
+
+function toast(kind, text) {
+  const host = document.getElementById("toasts");
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = text;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 250);
+  }, 3800);
+}
+
+/* ------------------------------------------------------------- refresh */
+
+async function refresh(keepSelection) {
+  const listed = await Engine.must({ op: "list" });
+  state.rows = listed.rows;
+  if (keepSelection !== undefined) {
+    state.selected = keepSelection;
+  } else if (state.selected && !state.rows.some((r) => r.name === state.selected)) {
+    state.selected = null;
+  }
+
+  const stat = await Engine.must({ op: "stats" });
+  state.stats = stat.objects;
+
+  const meshes = [];
+  for (const entry of state.stats) {
+    if (entry.kind === null || entry.kind === undefined) continue;
+    try {
+      meshes.push(await Engine.must({
+        op: "mesh", object: entry.name, deflection: 0.25,
+      }));
+    } catch { /* object without a mesh — skip it */ }
+  }
+  state.meshes = meshes;
+
+  if (state.selected) {
+    try {
+      state.properties = await Engine.must({ op: "properties", object: state.selected });
+    } catch { state.properties = null; }
+  } else {
+    state.properties = null;
+  }
+
+  renderAll();
+}
+
+function withEngine(work, success) {
+  return Promise.resolve()
+    .then(work)
+    .then(() => refresh())
+    .then(() => { if (success) toast("success", success); })
+    .catch((error) => toast("error", error.message || String(error)));
+}
+
+/* ------------------------------------------------------------- actions */
+
+function add(kind, params) {
+  return withEngine(
+    () => Engine.must({ op: "add", kind, params }),
+    kind + " added");
+}
+
+function setProperty(object, property, value) {
+  return withEngine(
+    () => Engine.must({ op: "set", object, property, value }),
+    object + "." + property + " = " + value);
+}
+
+function setExpression(object, property, expression) {
+  const trimmed = (expression || "").trim();
+  return withEngine(
+    () => trimmed
+      ? Engine.must({ op: "set_expr", object, property, expression: trimmed })
+      : Engine.must({ op: "clear_expr", object, property }),
+    trimmed ? object + "." + property + " ← " + trimmed : "expression cleared");
+}
+
+function remove(name) {
+  return withEngine(
+    () => Engine.must({ op: "remove", object: name }),
+    name + " removed");
+}
+
+function undo() {
+  return withEngine(async () => {
+    const result = await Engine.must({ op: "undo" });
+    if (!result.applied) toast("info", "Nothing to undo");
+  });
+}
+
+function redo() {
+  return withEngine(async () => {
+    const result = await Engine.must({ op: "redo" });
+    if (!result.applied) toast("info", "Nothing to redo");
+  });
+}
+
+function recompute() {
+  return withEngine(() => Engine.must({ op: "recompute" }), "recomputed");
+}
+
+function newDocument() {
+  return withEngine(async () => {
+    const created = await Engine.must({ op: "new", label: "untitled" });
+    state.docLabel = created.label;
+    state.framePending = true;
+  }, "new document");
+}
+
+async function save() {
+  try {
+    const saved = await Engine.must({ op: "save" });
+    downloadBase64("freecad-rs-document.fcstd", saved.fcstd_base64);
+    toast("success", "Saved .FCStd (" + saved.size + " bytes)");
+  } catch (error) {
+    toast("error", error.message || String(error));
+  }
+}
+
+async function openFile(file) {
+  try {
+    const encoded = await fileToBase64(file);
+    const loaded = await Engine.must({ op: "load", fcstd_base64: encoded });
+    state.docLabel = file.name.replace(/\.fcstd$/i, "");
+    state.framePending = true;
+    await refresh(null);
+    toast("success", "Loaded " + file.name + " — " + loaded.objects + " objects");
+  } catch (error) {
+    toast("error", error.message || String(error));
+  }
+}
+
+function exportSelected(op, ext) {
+  if (!state.selected) {
+    toast("error", "Select an object to export as " + ext);
+    return;
+  }
+  const object = state.selected;
+  Engine.must({ op, object })
+    .then((exported) => {
+      const field = ext.toLowerCase() + "_base64";
+      downloadBase64(object + "." + ext.toLowerCase(), exported[field]);
+      toast("success", "Exported " + object + "." + ext.toLowerCase() + " (" + exported.size + " bytes)");
+    })
+    .catch((error) => toast("error", error.message || String(error)));
+}
+
+function downloadBase64(name, base64) {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes]));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function select(name) {
+  state.selected = name;
+  if (name) {
+    Engine.must({ op: "properties", object: name })
+      .then((properties) => { state.properties = properties; renderAll(); })
+      .catch(() => { state.properties = null; renderAll(); });
+  } else {
+    state.properties = null;
+    renderAll();
+  }
+}
+
+/* =====================================================================
+ * The viewport — hand-rolled WebGL, no libraries.
+ * Z-up (FreeCAD convention), orbit / pan / zoom, click-to-select with a
+ * ray/triangle picker, flat-shaded tessellations from the engine.
+ * ===================================================================== */
+
+const viewport = (() => {
+  const wrap = document.getElementById("viewport-wrap");
+  const canvas = document.createElement("canvas");
+  wrap.appendChild(canvas);
+  const gl = canvas.getContext("webgl2", { antialias: true })
+    || canvas.getContext("webgl", { antialias: true });
+  if (!gl) {
+    toast("error", "WebGL is not available in this browser");
+    return { setMeshes() {}, setSelected() {}, frame() {} };
+  }
+
+  // ---- shader programs -------------------------------------------------
+  function program(vs, fs) {
+    const compile = (type, source) => {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        throw new Error("shader: " + gl.getShaderInfoLog(shader));
+      }
+      return shader;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error("link: " + gl.getProgramInfoLog(prog));
+    }
+    return prog;
+  }
+
+  const meshProg = program(`
+    attribute vec3 aPos; attribute vec3 aNormal;
+    uniform mat4 uView; uniform mat4 uProj;
+    varying vec3 vNormal;
+    void main() {
+      vNormal = aNormal;
+      gl_Position = uProj * uView * vec4(aPos, 1.0);
+    }`, `
+    precision mediump float;
+    uniform vec3 uColor; uniform float uEmissive;
+    varying vec3 vNormal;
+    void main() {
+      vec3 N = normalize(vNormal);
+      float key  = max(dot(N, normalize(vec3(0.45, 0.25, 0.86))), 0.0) * 0.90;
+      float fill = max(dot(N, normalize(vec3(-0.70, -0.50, 0.10))), 0.0) * 0.35;
+      vec3 c = uColor * (0.55 + key + fill) + uEmissive * vec3(0.27, 0.10, 0.01);
+      gl_FragColor = vec4(c, 1.0);
+    }`);
+
+  const lineProg = program(`
+    attribute vec3 aPos; attribute vec3 aColor;
+    uniform mat4 uView; uniform mat4 uProj;
+    varying vec3 vColor;
+    void main() {
+      vColor = aColor;
+      gl_Position = uProj * uView * vec4(aPos, 1.0);
+    }`, `
+    precision mediump float;
+    varying vec3 vColor;
+    void main() { gl_FragColor = vec4(vColor, 1.0); }`);
+
+  const mU = {
+    view: gl.getUniformLocation(meshProg, "uView"),
+    proj: gl.getUniformLocation(meshProg, "uProj"),
+    color: gl.getUniformLocation(meshProg, "uColor"),
+    emissive: gl.getUniformLocation(meshProg, "uEmissive"),
+    pos: gl.getAttribLocation(meshProg, "aPos"),
+    normal: gl.getAttribLocation(meshProg, "aNormal"),
+  };
+  const lU = {
+    view: gl.getUniformLocation(lineProg, "uView"),
+    proj: gl.getUniformLocation(lineProg, "uProj"),
+    pos: gl.getAttribLocation(lineProg, "aPos"),
+    color: gl.getAttribLocation(lineProg, "aColor"),
+  };
+
+  // ---- mat4 (column-major) ---------------------------------------------
+  function perspective(fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2);
+    return new Float32Array([
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) / (near - far), -1,
+      0, 0, (2 * far * near) / (near - far), 0,
+    ]);
+  }
+  function lookAt(eye, target, up) {
+    let zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+    const zl = Math.hypot(zx, zy, zz); zx /= zl; zy /= zl; zz /= zl;
+    let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
+    const xl = Math.hypot(xx, xy, xz); xx /= xl; xy /= xl; xz /= xl;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    return new Float32Array([
+      xx, yx, zx, 0,
+      xy, yy, zy, 0,
+      xz, yz, zz, 0,
+      -(xx * eye[0] + xy * eye[1] + xz * eye[2]),
+      -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+      -(zx * eye[0] + zy * eye[1] + zz * eye[2]),
+      1,
+    ]);
+  }
+
+  // ---- camera ------------------------------------------------------------
+  // Z-up world (FreeCAD). Spherical orbit around a target.
+  const cam = { theta: 0.95, phi: 0.52, radius: 110, target: [0, 0, 0] };
+  const FOV = 45 * Math.PI / 180;
+
+  function eye() {
+    const cp = Math.cos(cam.phi), sp = Math.sin(cam.phi);
+    return [
+      cam.target[0] + cam.radius * cp * Math.sin(cam.theta),
+      cam.target[1] + cam.radius * cp * Math.cos(cam.theta),
+      cam.target[2] + cam.radius * sp,
+    ];
+  }
+  function basis() {
+    const e = eye();
+    let fx = cam.target[0] - e[0], fy = cam.target[1] - e[1], fz = cam.target[2] - e[2];
+    const fl = Math.hypot(fx, fy, fz); fx /= fl; fy /= fl; fz /= fl;
+    // right = forward × worldUp(0,0,1)
+    let rx = fy, ry = -fx, rz = 0;
+    const rl = Math.hypot(rx, ry, rz) || 1; rx /= rl; ry /= rl; rz /= rl;
+    // up = right × forward
+    const ux = ry * fz - rz * fy, uy = rz * fx - rx * fz, uz = rx * fy - ry * fx;
+    return { e, f: [fx, fy, fz], r: [rx, ry, rz], u: [ux, uy, uz] };
+  }
+
+  // ---- grid + axes (built once) -------------------------------------------
+  // 200×200 grid, 40 divisions, on the XY plane; axes X/Y/Z, length 25.
+  function buildLines() {
+    const minor = [0x27 / 255, 0x27 / 255, 0x2a / 255];
+    const major = [0x3f / 255, 0x3f / 255, 0x46 / 255];
+    const verts = [];
+    const push = (x1, y1, z1, x2, y2, z2, c) =>
+      verts.push(x1, y1, z1, c[0], c[1], c[2], x2, y2, z2, c[0], c[1], c[2]);
+    const N = 40, S = 200, step = S / N, half = S / 2;
+    for (let i = 0; i <= N; i++) {
+      const t = -half + i * step;
+      const c = (i === N / 2) ? major : minor;
+      push(t, -half, 0, t, half, 0, c);
+      push(-half, t, 0, half, t, 0, c);
+    }
+    const z = 0.02; // lift the axes above the grid a hair — no z-fighting
+    const ax = [0.88, 0.42, 0.42], ay = [0.45, 0.75, 0.45], az = [0.48, 0.61, 0.83];
+    push(-25, 0, z, 25, 0, z, ax);
+    push(0, -25, z, 0, 25, z, ay);
+    push(0, 0, 0, 0, 0, 25, az);
+    return new Float32Array(verts);
+  }
+  const lineData = buildLines();
+  const lineBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, lineData, gl.STATIC_DRAW);
+  const lineCount = lineData.length / 6;
+
+  // ---- scene meshes -------------------------------------------------------
+  const BODY_COLOR = [0.83, 0.83, 0.85];
+  const SELECT_COLOR = [0.96, 0.62, 0.04];
+  let meshes = []; // [{name, count, buf, positions, indices}]
+
+  function setMeshes(list) {
+    for (const m of meshes) gl.deleteBuffer(m.buf);
+    meshes = list.map((mesh) => {
+      // Non-indexed, flat-shaded: every triangle gets its own 3 vertices
+      // carrying the face normal.
+      const positions = mesh.positions, indices = mesh.indices;
+      const data = new Float32Array(indices.length * 6);
+      let w = 0;
+      for (let i = 0; i < indices.length; i += 3) {
+        const a = indices[i] * 3, b = indices[i + 1] * 3, c = indices[i + 2] * 3;
+        const ax = positions[a], ay = positions[a + 1], az = positions[a + 2];
+        const bx = positions[b], by = positions[b + 1], bz = positions[b + 2];
+        const cx = positions[c], cy = positions[c + 1], cz = positions[c + 2];
+        let nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
+        let ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+        let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        const nl = Math.hypot(nx, ny, nz) || 1;
+        nx /= nl; ny /= nl; nz /= nl;
+        for (const v of [[ax, ay, az], [bx, by, bz], [cx, cy, cz]]) {
+          data[w++] = v[0]; data[w++] = v[1]; data[w++] = v[2];
+          data[w++] = nx; data[w++] = ny; data[w++] = nz;
+        }
+      }
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      return { name: mesh.name, count: indices.length, buf, positions, indices };
+    });
+  }
+
+  function setSelected() { /* the color is applied per-draw */ }
+
+  // Frame the scene: center the target, fit the radius.
+  function frame() {
+    if (!meshes.length) { cam.target = [0, 0, 0]; cam.radius = 110; return; }
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (const m of meshes) {
+      const p = m.positions;
+      for (let i = 0; i < p.length; i += 3) {
+        if (p[i] < minX) minX = p[i]; if (p[i] > maxX) maxX = p[i];
+        if (p[i + 1] < minY) minY = p[i + 1]; if (p[i + 1] > maxY) maxY = p[i + 1];
+        if (p[i + 2] < minZ) minZ = p[i + 2]; if (p[i + 2] > maxZ) maxZ = p[i + 2];
+      }
+    }
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+    const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1);
+    cam.target = [cx, cy, cz];
+    cam.radius = span * 1.7 + 4;
+  }
+
+  // ---- interaction ----------------------------------------------------------
+  let downX = 0, downY = 0, downButton = 0, dragged = false;
+  const pointers = new Map();
+  let pinchStart = null;
+
+  canvas.addEventListener("pointerdown", (event) => {
+    canvas.setPointerCapture(event.pointerId);
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    downX = event.clientX; downY = event.clientY;
+    downButton = event.button; dragged = false;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchStart = { d: Math.hypot(a.x - b.x, a.y - b.y), radius: cam.radius };
+    }
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    const prev = pointers.get(event.pointerId);
+    if (!prev) return;
+    const dx = event.clientX - prev.x, dy = event.clientY - prev.y;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 2 && pinchStart) {
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (d > 0) cam.radius = clamp(pinchStart.radius * pinchStart.d / d, 2, 1e5);
+      return;
+    }
+    if (Math.hypot(event.clientX - downX, event.clientY - downY) > 4) dragged = true;
+    if (!dragged) return;
+    if (downButton === 0 && !event.shiftKey) {
+      cam.theta -= dx * 0.011;
+      cam.phi = clamp(cam.phi + dy * 0.011, -Math.PI / 2 + 0.02, Math.PI / 2 - 0.02);
+    } else {
+      // pan: move the target along the camera's right/up axes
+      const { r, u } = basis();
+      const k = (2 * cam.radius * Math.tan(FOV / 2)) / Math.max(1, canvas.clientHeight);
+      for (const axis of [0, 1, 2]) {
+        cam.target[axis] += (-dx * r[axis] + dy * u[axis]) * k;
+      }
+    }
+  });
+
+  canvas.addEventListener("pointerup", (event) => {
+    pointers.delete(event.pointerId);
+    if (pointers.size < 2) pinchStart = null;
+    if (!dragged && event.button === 0) pick(event.clientX, event.clientY);
+  });
+
+  canvas.addEventListener("pointercancel", (event) => {
+    pointers.delete(event.pointerId);
+    pinchStart = null;
+  });
+
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    cam.radius = clamp(cam.radius * Math.exp(event.deltaY * 0.0012), 2, 1e5);
+  }, { passive: false });
+
+  // Ray/triangle picking: nearest object under the cursor.
+  function pick(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    const { e, f, r, u } = basis();
+    const tan = Math.tan(FOV / 2);
+    const aspect = rect.width / rect.height;
+    const dir = [0, 0, 0];
+    for (const axis of [0, 1, 2]) {
+      dir[axis] = f[axis]
+        + r[axis] * ndcX * tan * aspect
+        + u[axis] * ndcY * tan;
+    }
+    const dl = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    for (const axis of [0, 1, 2]) dir[axis] /= dl;
+
+    let best = null, bestT = Infinity;
+    for (const m of meshes) {
+      const t = rayHitObject(e, dir, m.positions, m.indices, bestT);
+      if (t !== null && t < bestT) { bestT = t; best = m.name; }
+    }
+    select(best);
+  }
+
+  function rayHitObject(origin, dir, positions, indices, tMax) {
+    let best = null;
+    for (let i = 0; i < indices.length; i += 3) {
+      const a = indices[i] * 3, b = indices[i + 1] * 3, c = indices[i + 2] * 3;
+      const t = rayTriangle(origin, dir, positions, a, b, c);
+      if (t !== null && t < tMax && (best === null || t < best)) best = t;
+    }
+    return best;
+  }
+
+  function rayTriangle(orig, dir, p, ia, ib, ic) {
+    // Möller–Trumbore
+    const e1x = p[ib] - p[ia], e1y = p[ib + 1] - p[ia + 1], e1z = p[ib + 2] - p[ia + 2];
+    const e2x = p[ic] - p[ia], e2y = p[ic + 1] - p[ia + 1], e2z = p[ic + 2] - p[ia + 2];
+    const px = dir[1] * e2z - dir[2] * e2y, py = dir[2] * e2x - dir[0] * e2z,
+          pz = dir[0] * e2y - dir[1] * e2x;
+    const det = e1x * px + e1y * py + e1z * pz;
+    if (Math.abs(det) < 1e-12) return null;
+    const inv = 1 / det;
+    const tx = orig[0] - p[ia], ty = orig[1] - p[ia + 1], tz = orig[2] - p[ia + 2];
+    const u = (tx * px + ty * py + tz * pz) * inv;
+    if (u < 0 || u > 1) return null;
+    const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+    const v = (dir[0] * qx + dir[1] * qy + dir[2] * qz) * inv;
+    if (v < 0 || u + v > 1) return null;
+    const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+    return t > 1e-9 ? t : null;
+  }
+
+  function clamp(value, lo, hi) { return Math.min(hi, Math.max(lo, value)); }
+
+  // ---- resize + render loop -------------------------------------------------
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, Math.round(wrap.clientWidth * dpr));
+    const h = Math.max(1, Math.round(wrap.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h;
+    }
+  }
+  new ResizeObserver(resize).observe(wrap);
+
+  function render() {
+    requestAnimationFrame(render);
+    resize();
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0x09 / 255, 0x09 / 255, 0x0b / 255, 1);
+    gl.enable(gl.DEPTH_TEST);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    const proj = perspective(FOV, aspect, 0.1, 100000);
+    const view = lookAt(eye(), cam.target, [0, 0, 1]);
+
+    // grid + axes
+    gl.useProgram(lineProg);
+    gl.uniformMatrix4fv(lU.view, false, view);
+    gl.uniformMatrix4fv(lU.proj, false, proj);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+    gl.enableVertexAttribArray(lU.pos);
+    gl.vertexAttribPointer(lU.pos, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(lU.color);
+    gl.vertexAttribPointer(lU.color, 3, gl.FLOAT, false, 24, 12);
+    gl.drawArrays(gl.LINES, 0, lineCount);
+
+    // meshes
+    gl.useProgram(meshProg);
+    gl.uniformMatrix4fv(mU.view, false, view);
+    gl.uniformMatrix4fv(mU.proj, false, proj);
+    for (const m of meshes) {
+      const selected = m.name === state.selected;
+      gl.uniform3fv(mU.color, selected ? SELECT_COLOR : BODY_COLOR);
+      gl.uniform1f(mU.emissive, selected ? 0.28 : 0.0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, m.buf);
+      gl.enableVertexAttribArray(mU.pos);
+      gl.vertexAttribPointer(mU.pos, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(mU.normal);
+      gl.vertexAttribPointer(mU.normal, 3, gl.FLOAT, false, 24, 12);
+      gl.drawArrays(gl.TRIANGLES, 0, m.count);
+    }
+  }
+  render();
+
+  return { setMeshes, setSelected, frame };
+})();
+
+function maybeFrame() {
+  if (state.framePending) {
+    viewport.frame();
+    state.framePending = false;
+  }
+}
+
+/* ------------------------------------------------------------- tree ui */
+
+const TYPE_ICONS = {
+  "Part::Box": "box", "Part::Sphere": "circle", "Part::Cylinder": "cylinder",
+  "Part::Cone": "cone", "Part::Torus": "circle",
+  "Part::Cut": "scissors", "Part::Fuse": "layers", "Part::MultiFuse": "layers",
+  "Part::Common": "combine", "Part::Transform": "move3d",
+  "Part::Mirroring": "flip", "Sketcher::SketchObject": "sketch",
+  "PartDesign::Pad": "box", "PartDesign::Pocket": "box",
+  "PartDesign::Revolution": "rotate",
+};
+
+const ICONS = {
+  shapes: '<circle cx="7.5" cy="17.5" r="3.5"/><rect x="13" y="13" width="8" height="8" rx="1"/><path d="M12 2l6 10H6z"/>',
+  box: '<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+  circle: '<circle cx="12" cy="12" r="9"/>',
+  cylinder: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14a8 3 0 0 0 16 0V5"/>',
+  cone: '<path d="M12 3L5 17.5"/><path d="M12 3l7 14.5"/><ellipse cx="12" cy="18.5" rx="7" ry="3"/>',
+  scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12"/>',
+  combine: '<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/>',
+  layers: '<path d="M12 2l9 5-9 5-9-5z"/><path d="M3 12l9 5 9-5"/><path d="M3 17l9 5 9-5"/>',
+  move3d: '<path d="M5 3v16h16"/><path d="M5 19l7-7"/><path d="M2 6l3-3 3 3"/><path d="M18 16l3 3-3 3"/>',
+  flip: '<path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3"/><path d="M12 20V4"/>',
+  sketch: '<path d="M17 3l4 4L7 21H3v-4z"/>',
+  rotate: '<path d="M21 12a9 9 0 1 1-9-9c2.5 0 4.9 1 6.6 2.6L21 8"/><path d="M21 3v5h-5"/>',
+  trash: '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
+  sigma: '<path d="M18 7V4H6l6 8-6 8h12v-3"/>',
+};
+
+function icon(name, size) {
+  const s = size || 14;
+  return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || ICONS.shapes) + "</svg>";
+}
+
+function statusClass(status) {
+  if (status.includes("Error") || status.includes("Invalid")) return "err";
+  if (status.includes("Touched")) return "warn";
+  return "ok";
+}
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function renderTree() {
+  const body = document.getElementById("tree-body");
+  document.getElementById("tree-count").textContent = String(state.rows.length);
+  if (!state.rows.length) {
+    body.innerHTML = '<p class="tree-empty">Empty document —<br>add an object to begin.</p>';
+    return;
+  }
+  body.innerHTML = state.rows.map((row) => {
+    const iconName = TYPE_ICONS[row.type] || "shapes";
+    return '<div class="row' + (row.name === state.selected ? " sel" : "") + '" data-name="' + esc(row.name) + '" role="button" tabindex="0">' +
+      icon(iconName) +
+      '<span class="name mono">' + esc(row.name) + "</span>" +
+      '<span class="badge ' + statusClass(row.status) + '">' + esc(row.status) + "</span>" +
+      '<button class="del" data-del="' + esc(row.name) + '" title="Delete ' + esc(row.name) + '" aria-label="Delete ' + esc(row.name) + '">' + icon("trash", 12) + "</button>" +
+      "</div>";
+  }).join("");
+}
+
+document.getElementById("tree-body").addEventListener("click", (event) => {
+  const del = event.target.closest("[data-del]");
+  if (del) { remove(del.dataset.del); return; }
+  const row = event.target.closest(".row");
+  if (row) select(row.dataset.name);
+});
+document.getElementById("tree-body").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    const row = event.target.closest(".row");
+    if (row) select(row.dataset.name);
+  }
+});
+
+/* -------------------------------------------------------- property ui */
+
+function formatNumber(value) {
+  if (!Number.isFinite(value)) return "—";
+  if (Math.abs(value) >= 1000) return value.toFixed(1);
+  if (Math.abs(value) >= 1) return value.toFixed(3);
+  return value.toPrecision(4);
+}
+
+const editingExpr = {}; // property → open editor (survives re-renders)
+
+function renderProperties() {
+  const body = document.getElementById("prop-body");
+  const properties = state.properties;
+  if (!state.selected || !properties) {
+    body.innerHTML = '<p class="prop-empty">' + (state.rows.length === 0
+      ? "No objects yet."
+      : "Select an object to inspect and edit its parameters.") + "</p>";
+    return;
+  }
+
+  const entry = state.stats.find((s) => s.name === state.selected);
+  let html = '<div class="pp-head"><div class="pp-name">' + esc(properties.name) + "</div>" +
+    '<div class="pp-meta"><span class="mono">' + esc(properties.type) + "</span>" +
+    '<span class="badge ' + statusClass(properties.status) + '">' + esc(properties.status) + "</span></div></div>";
+
+  if (entry && entry.kind) {
+    html += '<div class="shape-box"><div class="t"><span>Shape</span><b>' + esc(entry.kind) + "</b></div>" +
+      '<div class="shape-grid">' +
+      "<div><div>Volume</div><div class=\"v\">" + formatNumber(entry.volume) + "</div></div>" +
+      "<div><div>Area</div><div class=\"v\">" + formatNumber(entry.area) + "</div></div>" +
+      "<div><div>Triangles</div><div class=\"v\">" + entry.triangles + "</div></div>" +
+      "</div></div>";
+  }
+
+  html += '<div style="padding:0 4px 12px">';
+  for (const [key, value] of Object.entries(properties.props)) {
+    const bound = properties.expressions && properties.expressions[key] !== undefined;
+    const open = !!editingExpr[key];
+    html += '<div class="prow">' +
+      "<label title=\"" + esc(key) + "\">" + esc(key) + "</label>" +
+      '<div class="cell">' +
+      '<input class="pi' + (bound ? " bound" : "") + '" id="prop-' + esc(key) + '" data-prop="' + esc(key) + '" aria-label="' + esc(properties.name + "." + key) + '" value="' + esc(value) + '">' +
+      '<button class="sigma' + (bound ? " on" : "") + '" data-sigma="' + esc(key) + '" title="' + (bound ? "bound: " + esc(properties.expressions[key]) : "bind an expression") + '" aria-label="Bind expression to ' + esc(properties.name + "." + key) + '">' + icon("sigma", 12) + "</button>" +
+      "</div>" +
+      (open
+        ? '<div class="expr-row"><input id="expr-' + esc(key) + '" data-expr="' + esc(key) + '" placeholder="e.g. Box.Length * 2 + sin(30)" value="' + esc(properties.expressions[key] || "") + '"></div>'
+        : "") +
+      "</div>";
+  }
+  html += "</div>";
+  body.innerHTML = html;
+}
+
+(function bindPropertyEvents() {
+  const body = document.getElementById("prop-body");
+  body.addEventListener("keydown", (event) => {
+    const input = event.target;
+    if (input.dataset.expr !== undefined) {
+      if (event.key === "Enter") {
+        setExpression(state.selected, input.dataset.expr, input.value);
+        delete editingExpr[input.dataset.expr];
+      } else if (event.key === "Escape") {
+        delete editingExpr[input.dataset.expr];
+        renderProperties();
+      }
+      return;
+    }
+    if (input.dataset.prop !== undefined) {
+      if (event.key === "Enter") input.blur();
+      if (event.key === "Escape") {
+        const properties = state.properties;
+        if (properties) input.value = properties.props[input.dataset.prop] || "";
+        input.classList.remove("dirty");
+      }
+    }
+  });
+  body.addEventListener("input", (event) => {
+    if (event.target.dataset.prop !== undefined) event.target.classList.add("dirty");
+  });
+  body.addEventListener("blur", (event) => {
+    const input = event.target;
+    if (input.dataset.prop === undefined) return;
+    const key = input.dataset.prop;
+    const properties = state.properties;
+    const original = properties ? properties.props[key] : "";
+    if (input.value !== original) {
+      setProperty(state.selected, key, input.value);
+    }
+  }, true);
+  body.addEventListener("click", (event) => {
+    const sigma = event.target.closest("[data-sigma]");
+    if (!sigma) return;
+    const key = sigma.dataset.sigma;
+    if (editingExpr[key]) delete editingExpr[key];
+    else editingExpr[key] = true;
+    renderProperties();
+    const expr = document.getElementById("expr-" + cssEscape(key));
+    if (expr) expr.focus();
+  });
+})();
+
+function cssEscape(text) {
+  return window.CSS && CSS.escape ? CSS.escape(text) : text.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+
+/* ---------------------------------------------------------- footer ui */
+
+function renderFooter() {
+  const volume = state.stats.reduce((sum, entry) => sum + (entry.volume || 0), 0);
+  document.getElementById("f-doc").textContent =
+    state.docLabel + " · " + state.rows.length + " object" + (state.rows.length === 1 ? "" : "s");
+  document.getElementById("f-vol").textContent = "Σ volume " + volume.toFixed(2) + " mm³";
+  document.getElementById("f-sel").textContent = state.selected
+    ? "selected: " + state.selected : "no selection";
+}
+
+function renderAll() {
+  renderTree();
+  renderProperties();
+  renderFooter();
+  viewport.setMeshes(state.meshes);
+  document.getElementById("vp-empty").style.display = state.meshes.length ? "none" : "";
+  maybeFrame();
+}
+
+/* ---------------------------------------------------------- add dialog */
+
+const ADD_FORMS = {
+  box: {
+    title: "Add Box", desc: "A Part::Box — length × width × height.",
+    fields: [
+      { n: "length", l: "Length", d: 10 }, { n: "width", l: "Width", d: 10 },
+      { n: "height", l: "Height", d: 10 },
+    ],
+  },
+  sphere: {
+    title: "Add Sphere", desc: "A Part::Sphere.",
+    fields: [{ n: "radius", l: "Radius", d: 6 }],
+  },
+  cylinder: {
+    title: "Add Cylinder", desc: "A Part::Cylinder.",
+    fields: [{ n: "radius", l: "Radius", d: 4 }, { n: "height", l: "Height", d: 12 }],
+  },
+  cone: {
+    title: "Add Cone", desc: "A Part::Cone.",
+    fields: [
+      { n: "radius1", l: "Radius 1", d: 6 }, { n: "radius2", l: "Radius 2", d: 0 },
+      { n: "height", l: "Height", d: 12 },
+    ],
+  },
+  torus: {
+    title: "Add Torus", desc: "A Part::Torus.",
+    fields: [{ n: "radius1", l: "Radius 1", d: 10 }, { n: "radius2", l: "Radius 2", d: 2 }],
+  },
+  cut: {
+    title: "Cut", desc: "Part::Cut — subtract the tool from the base.",
+    fields: [{ s: "base", l: "Base" }, { s: "tool", l: "Tool" }],
+  },
+  fuse: {
+    title: "Fuse", desc: "Part::Fuse — union of two shapes.",
+    fields: [{ s: "base", l: "Base" }, { s: "tool", l: "Tool" }],
+  },
+  common: {
+    title: "Common", desc: "Part::Common — intersection of two shapes.",
+    fields: [{ s: "base", l: "Base" }, { s: "tool", l: "Tool" }],
+  },
+  mirroring: {
+    title: "Mirror", desc: "Part::Mirroring — mirror a shape across the plane through Base with the given Normal.",
+    fields: [
+      { s: "source", l: "Source" },
+      { n: "baseX", l: "Base X", d: 0 }, { n: "baseY", l: "Base Y", d: 0 },
+      { n: "baseZ", l: "Base Z", d: 0 },
+      { n: "normalX", l: "Normal X", d: 0 }, { n: "normalY", l: "Normal Y", d: 0 },
+      { n: "normalZ", l: "Normal Z", d: 1 },
+    ],
+  },
+  sketch: {
+    title: "Add Sketch", desc: "A Sketcher::SketchObject with a fully-constrained rectangle profile.",
+    fields: [
+      { n: "x", l: "X", d: -10 }, { n: "y", l: "Y", d: -6 },
+      { n: "w", l: "Width", d: 20 }, { n: "h", l: "Height", d: 12 },
+    ],
+    sketch: true,
+  },
+  pad: {
+    title: "Pad", desc: "PartDesign::Pad — extrude a sketch profile.",
+    fields: [
+      { s: "profile", l: "Profile", sketches: true, hint: "add a Sketch first" },
+      { n: "length", l: "Length", d: 6 },
+    ],
+  },
+  pocket: {
+    title: "Pocket", desc: "PartDesign::Pocket — cut a sketch profile into a shape.",
+    fields: [
+      { s: "profile", l: "Profile", sketches: true, hint: "add a Sketch first" },
+      { n: "length", l: "Length", d: 3 },
+    ],
+  },
+  revolution: {
+    title: "Revolution", desc: "PartDesign::Revolution — revolve a sketch profile about the Z axis.",
+    fields: [
+      { s: "profile", l: "Profile", sketches: true, hint: "add a Sketch first" },
+      { n: "angle", l: "Angle (deg)", d: 360 },
+    ],
+  },
+};
+
+const ADD_MENU = [
+  ["Part primitives", ["box", "sphere", "cylinder", "cone", "torus"]],
+  ["Booleans", ["cut", "fuse", "common"]],
+  ["PartDesign", ["sketch", "pad", "pocket", "revolution"]],
+  ["Transform", ["mirroring"]],
+];
+
+const MENU_ICONS = {
+  box: "box", sphere: "circle", cylinder: "cylinder", cone: "cone", torus: "circle",
+  cut: "scissors", fuse: "layers", common: "combine", sketch: "sketch",
+  pad: "box", pocket: "box", revolution: "rotate", mirroring: "flip",
+};
+const MENU_LABELS = {
+  cut: "Cut", fuse: "Fuse", common: "Common", sketch: "Sketch", pad: "Pad",
+  pocket: "Pocket", revolution: "Revolution", mirroring: "Mirror",
+};
+
+let dialogKind = null;
+
+function buildAddMenu() {
+  const menu = document.getElementById("add-menu");
+  menu.innerHTML = ADD_MENU.map(([category, kinds]) =>
+    '<div class="cat">' + category + "</div>" +
+    kinds.map((kind) => {
+      const label = MENU_LABELS[kind] || kind.charAt(0).toUpperCase() + kind.slice(1);
+      return '<button class="item" data-kind="' + kind + '" role="menuitem">' + icon(MENU_ICONS[kind]) + label + "</button>";
+    }).join("")).join('<div class="rule"></div>');
+}
+
+function openAdd(kind) {
+  dialogKind = kind;
+  const spec = ADD_FORMS[kind];
+  document.getElementById("dlg-title").textContent = spec.title;
+  document.getElementById("dlg-desc").textContent = spec.desc;
+  const body = document.getElementById("dlg-body");
+  body.innerHTML = spec.fields.map((field) => {
+    if (field.n !== undefined) {
+      return '<div class="field"><label for="f-' + field.n + '">' + field.l + '</label>' +
+        '<input id="f-' + field.n + '" type="number" step="any" value="' + field.d + '"></div>';
+    }
+    let candidates = state.rows;
+    if (field.sketches) candidates = state.rows.filter((r) => r.type === "Sketcher::SketchObject");
+    const options = candidates.length
+      ? candidates.map((r) => '<option value="' + esc(r.name) + '">' + esc(r.name) + " · " +
+          esc(r.type.replace("Part::", "").replace("PartDesign::", "PD:")) + "</option>").join("")
+      : "";
+    return '<div class="field"><label for="f-' + field.s + '">' + field.l + "</label>" +
+      '<select id="f-' + field.s + '"' + (candidates.length ? "" : " disabled") + ">" +
+      (candidates.length ? options : '<option value="">' + (field.hint || "no objects") + "</option>") +
+      "</select></div>";
+  }).join("");
+  const first = body.querySelector("input, select");
+  if (first) first.focus();
+  document.getElementById("dialog-overlay").classList.add("open");
+}
+
+function closeAdd() {
+  document.getElementById("dialog-overlay").classList.remove("open");
+  dialogKind = null;
+}
+
+function confirmAdd() {
+  const spec = ADD_FORMS[dialogKind];
+  if (!spec) return closeAdd();
+  const params = {};
+  for (const field of spec.fields) {
+    if (field.n !== undefined) {
+      const raw = document.getElementById("f-" + field.n).value;
+      const value = Number(raw);
+      if (raw.trim() !== "" && !Number.isFinite(value)) {
+        toast("error", field.l + " must be a number");
+        return;
+      }
+      params[field.n] = value;
+    } else {
+      const value = document.getElementById("f-" + field.s).value;
+      if (!value) {
+        toast("error", "Choose " + field.l.toLowerCase() + " first");
+        return;
+      }
+      params[field.s] = value;
+    }
+  }
+  if (spec.sketch) {
+    params.geometry = [{ kind: "rectangle", x: params.x, y: params.y, w: params.w, h: params.h }];
+    delete params.x; delete params.y; delete params.w; delete params.h;
+  }
+  if (dialogKind === "mirroring") {
+    params.base = [params.baseX || 0, params.baseY || 0, params.baseZ || 0];
+    params.normal = [params.normalX || 0, params.normalY || 0, params.normalZ || 1];
+    delete params.baseX; delete params.baseY; delete params.baseZ;
+    delete params.normalX; delete params.normalY; delete params.normalZ;
+  }
+  const kind = dialogKind;
+  closeAdd();
+  add(kind, params);
+}
+
+buildAddMenu();
+
+document.getElementById("b-add").addEventListener("click", () => {
+  document.getElementById("add-menu").classList.toggle("open");
+});
+document.getElementById("add-menu").addEventListener("click", (event) => {
+  const item = event.target.closest("[data-kind]");
+  if (!item) return;
+  document.getElementById("add-menu").classList.remove("open");
+  openAdd(item.dataset.kind);
+});
+document.addEventListener("click", (event) => {
+  const menu = document.getElementById("add-menu");
+  if (menu.classList.contains("open") && !event.target.closest(".menu-wrap")) {
+    menu.classList.remove("open");
+  }
+});
+document.getElementById("dlg-cancel").addEventListener("click", closeAdd);
+document.getElementById("dlg-ok").addEventListener("click", confirmAdd);
+document.getElementById("dialog-overlay").addEventListener("pointerdown", (event) => {
+  if (event.target === event.currentTarget) closeAdd();
+});
+
+/* ------------------------------------------------------------- header */
+
+document.getElementById("b-new").addEventListener("click", newDocument);
+document.getElementById("b-open").addEventListener("click", () =>
+  document.getElementById("file-input").click());
+document.getElementById("file-input").addEventListener("change", (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (file) openFile(file);
+  event.target.value = "";
+});
+document.getElementById("b-save").addEventListener("click", save);
+document.getElementById("b-stl").addEventListener("click", () => exportSelected("export_stl", "STL"));
+document.getElementById("b-obj").addEventListener("click", () => exportSelected("export_obj", "OBJ"));
+document.getElementById("b-undo").addEventListener("click", undo);
+document.getElementById("b-redo").addEventListener("click", redo);
+document.getElementById("b-recompute").addEventListener("click", recompute);
+
+/* ------------------------------------------------------------- dnd */
+
+const dropzone = document.getElementById("dropzone");
+let dragDepth = 0;
+window.addEventListener("dragenter", (event) => {
+  if (event.dataTransfer && [...event.dataTransfer.types].includes("Files")) {
+    dragDepth++;
+    dropzone.classList.add("on");
+  }
+});
+window.addEventListener("dragleave", () => {
+  if (--dragDepth <= 0) { dragDepth = 0; dropzone.classList.remove("on"); }
+});
+window.addEventListener("dragover", (event) => event.preventDefault());
+window.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dragDepth = 0;
+  dropzone.classList.remove("on");
+  const file = event.dataTransfer.files && event.dataTransfer.files[0];
+  if (file) openFile(file);
+});
+
+/* --------------------------------------------------------- keyboard */
+
+document.addEventListener("keydown", (event) => {
+  const active = document.activeElement;
+  const typing = active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName);
+  const overlayOpen = document.getElementById("dialog-overlay").classList.contains("open");
+  if (overlayOpen) {
+    if (event.key === "Escape") closeAdd();
+    if (event.key === "Enter") confirmAdd();
+    return;
+  }
+  if (event.key === "Escape") { select(null); return; }
+  if (typing) return;
+  const meta = event.ctrlKey || event.metaKey;
+  if (meta && event.key.toLowerCase() === "z" && !event.shiftKey) { event.preventDefault(); undo(); }
+  else if (meta && (event.key.toLowerCase() === "y" || (event.key.toLowerCase() === "z" && event.shiftKey))) { event.preventDefault(); redo(); }
+  else if (meta && event.key.toLowerCase() === "s") { event.preventDefault(); save(); }
+  else if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
+    event.preventDefault();
+    remove(state.selected);
+  }
+});
+
+/* ------------------------------------------------------------- boot */
+
+(async function boot() {
+  try {
+    await Engine.start();
+  } catch (error) {
+    toast("error", "Engine failed to load: " + (error.message || error) +
+      " — serve this folder over http (e.g. python3 -m http.server), or use the self-contained fc-studio.html release asset");
+    document.getElementById("engine-ver").textContent = "engine failed";
+    return;
+  }
+  try {
+    const version = await Engine.must({ op: "version" });
+    state.version = version.version;
+    document.getElementById("engine-ver").textContent = "freecad-rs " + version.version;
+    document.getElementById("f-engine").textContent = "engine: freecad-rs " + version.version + " · wasm";
+    const created = await Engine.must({ op: "new", label: "untitled" });
+    state.docLabel = created.label;
+    await refresh(null);
+  } catch (error) {
+    toast("error", "Engine failed to start: " + (error.message || error));
+  }
+})();
+</script>
+</body>
+</html>

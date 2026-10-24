@@ -20,7 +20,8 @@ placements, sketches) — lives in
 > FreeCAD code is used or included. License: MIT.
 
 **Verified baseline** — v0.1.8 (`main` @ 2026-10-24, plus the
-v0.2.0 — the browser workbench): ten crates, **497 tests**
+v0.2.0 — the browser workbench; v0.2.1 makes the workbench a durable
+in-repo asset): ten crates, **497 tests**
 (counted 2026-10-24; per-crate counts live in
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the authoritative
 green run is CI: `cargo build` / `cargo test --workspace --locked` /
@@ -57,11 +58,13 @@ the sketcher, and the `.FCStd` file format:
 | 3D view (M1, distilled)  | `fc-viewer`    | **offscreen wgpu 30 renderer** — the exports' tessellation rules + placements, flat shading with the SVG renderer's headlight, svg-parity cameras (`iso/top/front/right`, asserted equal to `export svg`'s matrices), orthographic CPU picking (nearest-hit), error objects rendered visibly flagged, PNG output with `--bless` goldens; `interactive` cargo feature adds a winit orbit/zoom/pan window (build-tested). *Viewing only — a renderer and orbit/pan/zoom, not a modeling workbench* |
 | STEP (AP203/AP214)       | `fc-step`      | **exchange with the CAD ecosystem** — faceted-B-rep export (deterministic, the faceted marker in every product name), deflection-parameterized import via `ruststep` 0.4 (planar + cylindrical faces, LINE/CIRCLE edges, POLY_LOOP facets; honest errors on anything else) |
 | `FreeCADCmd`             | `freecad-rs`   | CLI: create/edit/recompute documents, undo/redo history, boolean features, quantity-typed expressions, quantity arithmetic (`calc`), sketch verbs (`add sketch`, `sketch-import`, `sketch-export`, `sketch-info`, `sketch-solve`, `sketch-show`), **PartDesign verbs (`pad`, `pocket`, `revolution`)**, OBJ/STL/SVG export, **`render` (M1 viewer)**, **`import-step` / `export step` (M3)**, **`script` (rhai embedded scripting)**, dependency graphs |
-| browser engine           | `fc-wasm`      | **the whole document engine compiled to `wasm32-unknown-unknown`** behind a C ABI (`fc_alloc`/`fc_free`/`fc_set_time`/`fc_command`): one in-memory session + a JSON command protocol — new/load/save `.FCStd` (base64, in-memory), add × 13 feature kinds, set/get/expressions, undo/redo/history, stats, mesh (the engine's own tessellation), STL/OBJ export. 1.7 MB release module; the `fc-studio` browser workbench (separate frontend) drives it |
+| browser engine           | `fc-wasm`      | **the whole document engine compiled to `wasm32-unknown-unknown`** behind a C ABI (`fc_alloc`/`fc_free`/`fc_set_time`/`fc_command`): one in-memory session + a JSON command protocol — new/load/save `.FCStd` (base64, in-memory), add × 13 feature kinds, set/get/expressions, undo/redo/history, stats, mesh (the engine's own tessellation), STL/OBJ export. 1.7 MB release module; driven by **`fc-studio`** ([`studio/`](studio/) in this repo — the browser workbench below) |
 
 **Not implemented (yet, if ever):** exact B-rep/NURBS geometry (OCCT),
 a native GUI workbench (v0.2.0 ships `fc-wasm` — the engine in the
-browser — plus a first browser workbench, `fc-studio`; a FreeCAD-style
+browser — plus a first browser workbench, `fc-studio` ([`studio/`](studio/), shipped
+as a single self-contained release asset — download `fc-studio.html`,
+double-click it); a FreeCAD-style
 native Qt application remains future work), Python scripting (the *embedded* scripting milestone is rhai
 — `fc-script`; a full Python surface remains a non-goal). STEP is
 **faceted** both ways (ADR-0002): exports carry the faceted marker in
@@ -105,13 +108,17 @@ concrete terms:
   the same XY-frame limitation.
 * **No native modeling workbench yet.** The GUI surfaces today are
   the M1 viewer (offscreen renderer + the optional interactive
-  orbit/pan/zoom window, build-tested) and — new in v0.2.0 —
-  **fc-studio**, a browser workbench over `fc-wasm`: document tree,
+  orbit/pan/zoom window, build-tested) and — new in v0.2.0, made
+  durable in v0.2.1 — **fc-studio**, a browser workbench over
+  `fc-wasm` ([`studio/`](studio/) in this repo; releases ship it as
+  one self-contained `fc-studio.html` — the engine embedded, no
+  server, works from `file://`): document tree,
   property editor, expressions, booleans, sketch→pad PartDesign,
   undo/redo and `.FCStd`/STL in/out, all computed client-side by the
   same engine the CLI runs. It is a first workbench, not yet
   FreeCAD's Qt application (no dockable anything, sketch editing is
-  composite presets). Scripting is **embedded Rhai**
+  composite presets, the viewport is the tessellated kernel with
+  hand-rolled WebGL). Scripting is **embedded Rhai**
   (`fc-script`: a sandboxed document API behind the `script` CLI
   verb) — *not* FreeCAD's Python API, macro system or workbench
   ecosystem; a full Python surface remains a non-goal. The plan these

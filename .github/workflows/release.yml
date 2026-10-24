@@ -14,6 +14,35 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  studio:
+    name: studio (browser workbench)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build engine (wasm32) + package the workbench
+        run: scripts/package-studio.sh
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum fc-studio.html fc_wasm.wasm > fc-studio.sha256
+          cat fc-studio.sha256
+
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/fc-studio.html
+            dist/fc_wasm.wasm
+            dist/fc-studio.sha256
+
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}

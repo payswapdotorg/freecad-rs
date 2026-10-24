@@ -207,6 +207,28 @@ Honest, incremental, no vaporware.
       runs green — `boolean_rotated_box_crossing_faces_matches_exact_reference`:
       cut 430.5 / fuse 646.5 / common 49.5 against the exact rational
       reference, watertight
+- [x] **v0.2.0 + v0.2.1** The browser workbench — **`fc-wasm`**, the
+      whole document engine compiled to `wasm32-unknown-unknown`
+      behind a C ABI (`fc_alloc`/`fc_free`/`fc_set_time`/
+      `fc_command`; one JSON command protocol — 20 ops, 11 native
+      tests), and **`fc-studio`** ([`studio/`](../studio/)), the
+      workbench over it: document tree with status badges, property
+      editor with live set→recompute and per-property expression
+      binding, add × 13 feature kinds (primitives, booleans,
+      sketch→pad/pocket/revolution, mirroring), undo/redo, `.FCStd`
+      in/out (drag-and-drop), STL/OBJ export — all computed
+      client-side, the viewport hand-rolled WebGL (zero JS
+      dependencies: Z-up orbit/pan/zoom, ray-triangle picking, the
+      engine's tessellations, flat shading). Browser-verified
+      end-to-end: sketch→pad lands on exactly **1440 mm³** (the same
+      number real FreeCAD 1.0 writes for the same body), parametric
+      edits, expression bindings, undo/redo, the save→load round-trip.
+      v0.2.1 makes it **durable**: the workbench lives in-repo
+      (previously only in the sandbox that happened to serve it) and
+      releases ship a single self-contained `fc-studio.html` (engine
+      embedded as base64 — no server, works from `file://`), gated by
+      a CI `studio` job (build + package + sanity checks) and a
+      `release` workflow job that attaches the asset
 
 ## Next: the kernel exactness program (K1–K5)
 

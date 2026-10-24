@@ -21,6 +21,26 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+  studio:
+    # The browser workbench asset: build the wasm engine, package the
+    # self-contained HTML, and sanity-check the embed marker + the
+    # packaged size (the release ships exactly this file).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build engine (wasm32) + package the workbench
+        run: scripts/package-studio.sh
+      - name: Sanity checks
+        run: |
+          grep -q "fc-wasm-embed" studio/fc-studio.html
+          grep -q "__FC_WASM_B64" dist/fc-studio.html
+          test "$(wc -c < dist/fc-studio.html)" -gt 2000000
+          test "$(wc -c < dist/fc_wasm.wasm)" -gt 1000000
+          echo "fc-studio.html: $(wc -c < dist/fc-studio.html) bytes, fc_wasm.wasm: $(wc -c < dist/fc_wasm.wasm) bytes"
+
   viewer:
     # M1: the GPU render tests on a software adapter (lavapipe). The
     # golden image for the ISO frame is blessed here and uploaded as an
