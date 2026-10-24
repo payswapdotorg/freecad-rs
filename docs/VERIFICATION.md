@@ -28,7 +28,7 @@ list: a claim with no evidence gets marked, not made.
 
 ## Test counts (measured 2026-10-24)
 
-**486 tests** across nine crates. Method: `cargo test -p <crate> --
+**497 tests** across ten crates. Method: `cargo test -p <crate> --
 --list` for the five crates this sandbox can build (exact: includes
 unit, integration and doc-test targets); `#[test]`-function count via
 grep for the four crates whose dependency builds did not fit the
@@ -47,7 +47,8 @@ or doc tests those counts would miss.
 | `fc-viewer` | 16 (`camera.rs` 12, `scene.rs` 2, `pick.rs` 2) | 9 (`tests/scene_cpu.rs` 7, `tests/gpu_render.rs` 2) | 0 | **25** | grep |
 | `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | grep |
 | `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 19 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3) | 0 | **30** | grep |
-| **Total** | | | | **486** | |
+| `fc-wasm` | 11 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths) | 0 | 0 | **11** | listed |
+| **Total** | | | | **497** | |
 
 Notes, honestly: `#[ignore]`d tests — none anywhere in `crates/**`
 at this writing (the one that used to exist, the rotated-crossing

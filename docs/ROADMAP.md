@@ -4,7 +4,7 @@ Honest, incremental, no vaporware.
 
 > **Verified baseline** — v0.1.7 (counted 2026-10-24; the counts
 > include the v0.1.8 exact seam weld in flight at count time): nine
-> crates, **486 tests** (per-crate counts and method in
+> crates, **497 tests** (per-crate counts and method in
 > [`VERIFICATION.md`](VERIFICATION.md) — the authoritative green run
 > is CI: `cargo build` / `cargo test --workspace --locked` /
 > `clippy --workspace --all-targets -- -D warnings` / `cargo fmt
