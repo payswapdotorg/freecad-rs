@@ -115,7 +115,26 @@ struct SideFile {
 /// dropped (the model's output is the truth about that entry).
 pub fn save_document(doc: &Document, path: &Path) -> Result<(), FcstdError> {
     let file = std::fs::File::create(path)?;
-    let mut zip = zip::ZipWriter::new(file);
+    write_document_zip(doc, file)
+}
+
+/// Save a `.FCStd` into an in-memory byte vector — the no-filesystem
+/// form of [`save_document`] (the `fc-wasm` browser build saves and
+/// hands the bytes to JavaScript for download).
+pub fn save_document_to_vec(doc: &Document) -> Result<Vec<u8>, FcstdError> {
+    let mut bytes: Vec<u8> = Vec::new();
+    write_document_zip(doc, std::io::Cursor::new(&mut bytes))?;
+    Ok(bytes)
+}
+
+/// The archive writer behind [`save_document`] /
+/// [`save_document_to_vec`]: any `Write + Seek` sink (a file, or an
+/// in-memory cursor).
+fn write_document_zip<W: std::io::Write + std::io::Seek>(
+    doc: &Document,
+    out: W,
+) -> Result<(), FcstdError> {
+    let mut zip = zip::ZipWriter::new(out);
 
     let mut side_files: Vec<SideFile> = Vec::new();
     let xml = build_document_xml(doc, &mut side_files)?;
@@ -1201,7 +1220,23 @@ pub fn load_document_with_hook(
     mutate: Option<&mut ObjectHook<'_>>,
 ) -> Result<(Document, LoadReport), FcstdError> {
     let file = std::fs::File::open(path)?;
-    let mut zip = zip::ZipArchive::new(file).map_err(zip_err)?;
+    load_document_from_reader(file, mutate)
+}
+
+/// Load a `.FCStd` from an in-memory byte slice — the no-filesystem
+/// form of [`load_document`] (the `fc-wasm` browser build loads files
+/// JavaScript read for it).
+pub fn load_document_from_bytes(bytes: &[u8]) -> Result<(Document, LoadReport), FcstdError> {
+    load_document_from_reader(std::io::Cursor::new(bytes), None)
+}
+
+/// The archive reader behind [`load_document`] /
+/// [`load_document_from_bytes`]: any `Read + Seek` source.
+fn load_document_from_reader<R: std::io::Read + std::io::Seek>(
+    source: R,
+    mutate: Option<&mut ObjectHook<'_>>,
+) -> Result<(Document, LoadReport), FcstdError> {
+    let mut zip = zip::ZipArchive::new(source).map_err(zip_err)?;
 
     let xml_bytes = match zip.by_name("Document.xml") {
         Ok(mut entry) => {
@@ -1438,7 +1473,7 @@ fn extra_attrs(e: &BytesStart<'_>, consumed: &[&str]) -> Vec<(String, String)> {
 /// final sweep preserves every other entry verbatim.
 fn parse_document(
     xml: &[u8],
-    zip: &mut zip::ZipArchive<std::fs::File>,
+    zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
     doc: &mut Document,
     report: &mut LoadReport,
     mut mutate: Option<&mut ObjectHook<'_>>,
@@ -1899,7 +1934,7 @@ fn parse_object_data_section(
     buf: &mut Vec<u8>,
     xml: &[u8],
     built: &mut Vec<(String, Option<Box<dyn DocumentObject>>)>,
-    zip: &mut zip::ZipArchive<std::fs::File>,
+    zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
     report: &mut LoadReport,
     consumed: &mut BTreeSet<String>,
 ) -> Result<(), FcstdError> {
@@ -1997,7 +2032,7 @@ fn parse_object_properties(
     xml: &[u8],
     object: &mut Box<dyn DocumentObject>,
     owner: &str,
-    zip: &mut zip::ZipArchive<std::fs::File>,
+    zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
     report: &mut LoadReport,
     consumed: &mut BTreeSet<String>,
 ) -> Result<(), FcstdError> {
@@ -3755,7 +3790,7 @@ type PreservedPayload = (String, Vec<u8>, bool);
 /// `consumed` records archive entries read (the load's final sweep
 /// preserves every unclaimed entry).
 fn load_shape_payload(
-    zip: &mut zip::ZipArchive<std::fs::File>,
+    zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
     shape_ref: &ShapeRef,
     owner: &str,
     report: &mut LoadReport,

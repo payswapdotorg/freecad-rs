@@ -25,7 +25,7 @@ pub mod shape;
 pub use brep::{read_shape_bytes, write_shape, BrpError, BrpFormat};
 pub use features::{
     mesh_of, shape_of, BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature,
-    MeshFeature, SphereFeature, TorusFeature, TransformFeature,
+    MeshFeature, MirroringFeature, SphereFeature, TorusFeature, TransformFeature,
 };
 pub use partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 pub use profile::{

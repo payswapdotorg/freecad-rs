@@ -10,10 +10,11 @@ members = [
     "crates/fc-viewer",
     "crates/fc-step",
     "crates/freecad-rs",
+    "crates/fc-wasm",
 ]
 
 [workspace.package]
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/payswapdotorg/freecad-rs"
@@ -29,9 +30,13 @@ fc-script = { path = "crates/fc-script" }
 fc-viewer = { path = "crates/fc-viewer" }
 fc-step = { path = "crates/fc-step" }
 rhai = "1.26"
-zip = "2.2"
+# .FCStd archives are zip with deflate/stored entries (FreeCAD's own
+# writer) — the default feature set's C codecs (bzip2/lzma/zstd) never
+# appear in the format and break the wasm32 build.
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 clap = { version = "4.5", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 lto = "thin"

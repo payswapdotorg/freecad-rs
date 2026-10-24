@@ -25,7 +25,7 @@ pub mod property;
 pub mod recompute;
 pub mod transaction;
 
-pub use document::{Document, ObjectId, ObjectSummary};
+pub use document::{set_embedded_wallclock_secs, Document, ObjectId, ObjectSummary};
 pub use foreign::ForeignObject;
 pub use object::{DocumentObject, ObjectStatus, PropertyContainer};
 pub use preservation::{

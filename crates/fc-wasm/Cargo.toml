@@ -1,0 +1,19 @@
+[package]
+name = "fc-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The freecad-rs document engine in the browser: a C ABI over an in-memory session + a JSON command protocol, built for wasm32 (and testable natively)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fc-base.workspace = true
+fc-app.workspace = true
+fc-part.workspace = true
+fc-sketcher.workspace = true
+fc-io.workspace = true
+serde_json.workspace = true

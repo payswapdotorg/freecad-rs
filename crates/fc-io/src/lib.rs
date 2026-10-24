@@ -134,7 +134,9 @@
 
 pub mod fcstd;
 pub mod mesh_export;
+pub use mesh_export::{write_obj, write_stl_ascii, write_stl_binary};
 
 pub use fcstd::{
-    load_document, load_document_with_hook, save_document, FcstdError, LoadReport, ObjectHook,
+    load_document, load_document_from_bytes, load_document_with_hook, save_document,
+    save_document_to_vec, FcstdError, LoadReport, ObjectHook,
 };

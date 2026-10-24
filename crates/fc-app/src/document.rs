@@ -767,15 +767,37 @@ impl Document {
     }
 }
 
+/// The wall-clock source on targets without one. `fc-wasm` (the browser
+/// build) sets this from JavaScript before creating documents — the
+/// wasm32 target has no `SystemTime` (it would panic). Native targets
+/// always use the real clock and ignore the override.
+static EMBEDDED_WALLCLOCK_SECS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Set the embedded wall-clock (Unix seconds). Only consulted on
+/// `wasm32` targets; harmless (and ignored) elsewhere.
+pub fn set_embedded_wallclock_secs(secs: i64) {
+    EMBEDDED_WALLCLOCK_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wallclock_secs() -> i64 {
+    EMBEDDED_WALLCLOCK_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wallclock_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Current time as an RFC 3339 UTC stamp with second resolution, e.g.
 /// `2026-10-19T21:20:00Z`. Pure `std`: wall-clock seconds since the Unix
 /// epoch converted to a civil date with Howard Hinnant's
 /// `civil_from_days` algorithm.
 fn rfc3339_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
+    let secs = wallclock_secs();
     let days = secs.div_euclid(86_400);
     let secs_of_day = secs.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
