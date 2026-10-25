@@ -26,9 +26,10 @@ What it drives (all computed client-side):
 
 - **Document tree** with type icons and live status badges
   (Valid / Touched / Error), delete-on-hover
-- **Add × 13 feature kinds**: box, sphere, cylinder, cone, torus;
+- **Add × 15 feature kinds**: box, sphere, cylinder, cone, torus;
   cut / fuse / common; sketch (a fully-constrained rectangle
-  profile), pad, pocket, revolution; mirroring
+  profile), pad, pocket, revolution; linear pattern, polar pattern;
+  mirroring
 - **Property editor**: every property in its text form — edit →
   set → recompute; per-property **expression binding** (the engine's
   quantity-typed expressions, e.g. `Box.Height * 2`)

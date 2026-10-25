@@ -346,9 +346,11 @@ fn build_feature(
                     Box::new(f)
                 }
                 "pocket" => {
+                    let base = link(doc, p, "base")?;
                     let mut f = fc_part::partdesign::PocketFeature::new(name.unwrap_or("Pocket"));
                     f.container
                         .set("Profile", Property::LinkSub(profile, Vec::new()));
+                    f.container.set("Base", Property::Link(base));
                     f.container.set(
                         "Length",
                         Property::Float(p.get("length").and_then(Value::as_f64).unwrap_or(5.0)),
@@ -371,10 +373,74 @@ fn build_feature(
             };
             feature
         }
+        "pattern-linear" | "pattern-polar" => {
+            let originals = link(doc, p, "originals")?;
+            let base = link(doc, p, "base")?;
+            // Accept both JSON integers and whole floats (the studio's
+            // number inputs serialize floats).
+            let occurrences = p
+                .get("occurrences")
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                .unwrap_or(2);
+            let feature: Box<dyn fc_app::DocumentObject> = if kind == "pattern-linear" {
+                let mut f =
+                    fc_part::partdesign::LinearPatternFeature::new(name.unwrap_or("LinearPattern"));
+                f.container
+                    .set("Originals", Property::LinkSub(originals, Vec::new()));
+                f.container.set("Base", Property::Link(base));
+                let direction = match p.get("direction").and_then(Value::as_str) {
+                    Some("x") | None => Vector3::new(1.0, 0.0, 0.0),
+                    Some("y") => Vector3::new(0.0, 1.0, 0.0),
+                    Some("z") => Vector3::Z,
+                    Some(other) => {
+                        return Err(format!(
+                            "parameter 'direction' expects x, y or z (got '{other}')"
+                        ))
+                    }
+                };
+                f.container.set("Direction", Property::Vector(direction));
+                f.container.set(
+                    "Length",
+                    Property::Float(p.get("length").and_then(Value::as_f64).unwrap_or(20.0)),
+                );
+                f.container
+                    .set("Occurrences", Property::Integer(occurrences));
+                if p.get("reversed").and_then(Value::as_bool) == Some(true) {
+                    f.container.set("Reversed", Property::Bool(true));
+                }
+                Box::new(f)
+            } else {
+                let mut f =
+                    fc_part::partdesign::PolarPatternFeature::new(name.unwrap_or("PolarPattern"));
+                f.container
+                    .set("Originals", Property::LinkSub(originals, Vec::new()));
+                f.container.set("Base", Property::Link(base));
+                let axis = match p.get("axis").and_then(Value::as_str) {
+                    Some("y") => Vector3::new(0.0, 1.0, 0.0),
+                    Some("z") | None => Vector3::Z,
+                    Some(other) => {
+                        return Err(format!("parameter 'axis' expects y or z (got '{other}')"))
+                    }
+                };
+                f.container.set("Axis", Property::Vector(axis));
+                f.container.set(
+                    "Angle",
+                    Property::Float(p.get("angle").and_then(Value::as_f64).unwrap_or(360.0)),
+                );
+                f.container
+                    .set("Occurrences", Property::Integer(occurrences));
+                if p.get("reversed").and_then(Value::as_bool) == Some(true) {
+                    f.container.set("Reversed", Property::Bool(true));
+                }
+                Box::new(f)
+            };
+            feature
+        }
         _ => {
             return Err(format!(
                 "unknown kind '{kind}' (box, sphere, cylinder, cone, torus, cut, fuse, \
-                 common, transform, mirroring, sketch, pad, pocket, revolution)"
+                 common, transform, mirroring, sketch, pad, pocket, revolution, \
+                 pattern-linear, pattern-polar)"
             ))
         }
     })
@@ -1125,5 +1191,124 @@ mod tests {
         assert!(error.contains("unknown op"), "{error}");
         let error = err(json!({"op": "add", "kind": "holodeck"}));
         assert!(error.contains("unknown kind"), "{error}");
+    }
+
+    // -----------------------------------------------------------------
+    // Feature patterns (the mechanical-workflow milestone)
+    // -----------------------------------------------------------------
+
+    /// The stats volume of `object`.
+    fn volume_of(object: &str) -> f64 {
+        ok(json!({"op": "stats", "object": object}))["objects"][0]["volume"]
+            .as_f64()
+            .unwrap()
+    }
+
+    /// Pad the given circle profile in a scratch document and read the
+    /// volume — the engine's own measurement of the tessellated tool.
+    fn circle_tool_volume(cx: f64, cy: f64, r: f64) -> f64 {
+        ok(json!({"op": "new", "label": "tool"}));
+        ok(json!({"op": "add", "kind": "sketch", "geometry": [
+            {"kind": "circle", "cx": cx, "cy": cy, "r": r}]}));
+        ok(json!({"op": "add", "kind": "pad", "params": {"profile": "Sketch", "length": 10}}));
+        volume_of("Pad")
+    }
+
+    #[test]
+    fn patterns_bracket_plate_end_to_end() {
+        // Tool volumes, measured through the engine itself.
+        let v_corner = circle_tool_volume(-50.0, 30.0, 3.0);
+        let v_bolt = circle_tool_volume(40.0, 0.0, 2.0);
+
+        // The bracket plate: centered 120x80 plate.
+        ok(json!({"op": "new", "label": "Bracket"}));
+        ok(json!({"op": "add", "kind": "sketch", "geometry": [
+            {"kind": "rectangle", "x": -60, "y": -40, "w": 120, "h": 80}]}));
+        ok(json!({"op": "add", "kind": "pad", "name": "Plate",
+                  "params": {"profile": "Sketch", "length": 10}}));
+        assert!((volume_of("Plate") - 96000.0).abs() < 1e-6);
+
+        // One corner hole, pocketed through.
+        ok(json!({"op": "add", "kind": "sketch", "geometry": [
+            {"kind": "circle", "cx": -50, "cy": 30, "r": 3}]}));
+        ok(json!({"op": "add", "kind": "pocket", "name": "Hole",
+                  "params": {"profile": "Sketch001", "base": "Plate", "length": 10}}));
+        assert!((volume_of("Hole") - (96000.0 - v_corner)).abs() < 1e-4);
+
+        // The Y row (reversed: the copy lands at y = -30).
+        ok(
+            json!({"op": "add", "kind": "pattern-linear", "name": "HolesY",
+                  "params": {"originals": "Hole", "base": "Plate", "direction": "y",
+                             "length": 60, "occurrences": 2, "reversed": true}}),
+        );
+        let data = ok(json!({"op": "list"}));
+        assert!(data["rows"].to_string().contains("LinearPattern"), "{data}");
+        assert!((volume_of("HolesY") - (96000.0 - 2.0 * v_corner)).abs() < 1e-4);
+
+        // The nested X grid: 2x2 from one pocket.
+        ok(
+            json!({"op": "add", "kind": "pattern-linear", "name": "HolesGrid",
+                  "params": {"originals": "HolesY", "base": "Plate", "direction": "x",
+                             "length": 100, "occurrences": 2}}),
+        );
+        assert!((volume_of("HolesGrid") - (96000.0 - 4.0 * v_corner)).abs() < 1e-4);
+
+        // The bolt circle: one hole at (40, 0), patterned around Z.
+        ok(json!({"op": "add", "kind": "sketch", "geometry": [
+            {"kind": "circle", "cx": 40, "cy": 0, "r": 2}]}));
+        ok(json!({"op": "add", "kind": "pocket", "name": "BoltHole",
+                  "params": {"profile": "Sketch002", "base": "HolesGrid", "length": 10}}));
+        ok(
+            json!({"op": "add", "kind": "pattern-polar", "name": "BoltCircle",
+                  "params": {"originals": "BoltHole", "base": "HolesGrid", "axis": "z",
+                             "angle": 360, "occurrences": 6}}),
+        );
+        let data = ok(json!({"op": "list"}));
+        assert!(data["rows"].to_string().contains("PolarPattern"), "{data}");
+        assert!(
+            (volume_of("BoltCircle") - (96000.0 - 4.0 * v_corner - 6.0 * v_bolt)).abs() < 1e-3,
+            "bracket volume {} vs expected",
+            volume_of("BoltCircle")
+        );
+
+        // The save/load roundtrip keeps the patterns and their
+        // geometry.
+        let data = ok(json!({"op": "save"}));
+        let encoded = data["fcstd_base64"].as_str().unwrap().to_string();
+        ok(json!({"op": "load", "fcstd_base64": encoded}));
+        assert!(
+            (volume_of("BoltCircle") - (96000.0 - 4.0 * v_corner - 6.0 * v_bolt)).abs() < 1e-3,
+            "reloaded bracket volume"
+        );
+    }
+
+    #[test]
+    fn pattern_params_are_validated() {
+        fresh_doc();
+        ok(
+            json!({"op": "add", "kind": "box", "params": {"length": 30, "width": 30, "height": 10}}),
+        );
+        ok(json!({"op": "add", "kind": "sketch", "geometry": [
+            {"kind": "rectangle", "x": -2, "y": -2, "w": 4, "h": 4}]}));
+        ok(json!({"op": "add", "kind": "pocket", "name": "Hole",
+                  "params": {"profile": "Sketch", "base": "Box", "length": 10}}));
+
+        // Occurrences below 2 is not a pattern.
+        let error = err(json!({"op": "add", "kind": "pattern-linear",
+            "params": {"originals": "Hole", "base": "Box", "direction": "x",
+                       "length": 10, "occurrences": 1}}));
+        assert!(error.contains("Occurrences must be >= 2"), "{error}");
+
+        // Unknown direction is named.
+        let error = err(json!({"op": "add", "kind": "pattern-linear",
+            "params": {"originals": "Hole", "base": "Box", "direction": "w",
+                       "length": 10, "occurrences": 2}}));
+        assert!(error.contains("direction"), "{error}");
+
+        // Unknown originals is named.
+        let error = err(json!({"op": "add", "kind": "pattern-polar",
+            "params": {"originals": "Ghost", "base": "Box", "angle": 360,
+                       "occurrences": 3}}));
+        assert!(error.contains("Ghost"), "{error}");
     }
 }

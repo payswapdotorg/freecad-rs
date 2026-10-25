@@ -422,14 +422,21 @@ async function refresh(keepSelection) {
   const stat = await Engine.must({ op: "stats" });
   state.stats = stat.objects;
 
+  // Render the TIP — the last mesh-bearing object, FreeCAD's
+  // Body→Tip rule. PartDesign features are cumulative (a Pocket's
+  // result already contains the Pad it cut), so drawing every
+  // feature stacks coincident solids and z-fights; the tip is the
+  // honest "current state of the part".
   const meshes = [];
-  for (const entry of state.stats) {
-    if (entry.kind === null || entry.kind === undefined) continue;
+  const withKind = state.stats.filter(
+    (entry) => entry.kind !== null && entry.kind !== undefined);
+  if (withKind.length) {
+    const tip = withKind[withKind.length - 1];
     try {
       meshes.push(await Engine.must({
-        op: "mesh", object: entry.name, deflection: 0.25,
+        op: "mesh", object: tip.name, deflection: 0.25,
       }));
-    } catch { /* object without a mesh — skip it */ }
+    } catch { /* tip without a mesh — skip it */ }
   }
   state.meshes = meshes;
 
@@ -998,6 +1005,7 @@ const ICONS = {
   flip: '<path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3"/><path d="M12 20V4"/>',
   sketch: '<path d="M17 3l4 4L7 21H3v-4z"/>',
   rotate: '<path d="M21 12a9 9 0 1 1-9-9c2.5 0 4.9 1 6.6 2.6L21 8"/><path d="M21 3v5h-5"/>',
+  grid: '<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   sigma: '<path d="M18 7V4H6l6 8-6 8h12v-3"/>',
 };
@@ -1246,6 +1254,7 @@ const ADD_FORMS = {
     title: "Pocket", desc: "PartDesign::Pocket — cut a sketch profile into a shape.",
     fields: [
       { s: "profile", l: "Profile", sketches: true, hint: "add a Sketch first" },
+      { s: "base", l: "Base", hint: "the solid to cut into" },
       { n: "length", l: "Length", d: 3 },
     ],
   },
@@ -1256,12 +1265,31 @@ const ADD_FORMS = {
       { n: "angle", l: "Angle (deg)", d: 360 },
     ],
   },
+  "pattern-linear": {
+    title: "Linear Pattern", desc: "PartDesign::LinearPattern — repeat a feature's tool along a direction (the row of holes, the boss grid).",
+    fields: [
+      { s: "originals", l: "Originals", hint: "the feature to copy" },
+      { s: "base", l: "Base", hint: "the solid to apply the copies to" },
+      { s: "direction", l: "Direction", choices: ["x", "y", "z"], d: "x" },
+      { n: "length", l: "Span", d: 20 },
+      { n: "occurrences", l: "Occurrences", d: 2 },
+    ],
+  },
+  "pattern-polar": {
+    title: "Polar Pattern", desc: "PartDesign::PolarPattern — repeat a feature's tool around the Z axis (the bolt circle).",
+    fields: [
+      { s: "originals", l: "Originals", hint: "the feature to copy" },
+      { s: "base", l: "Base", hint: "the solid to apply the copies to" },
+      { n: "angle", l: "Angle (deg)", d: 360 },
+      { n: "occurrences", l: "Occurrences", d: 6 },
+    ],
+  },
 };
 
 const ADD_MENU = [
   ["Part primitives", ["box", "sphere", "cylinder", "cone", "torus"]],
   ["Booleans", ["cut", "fuse", "common"]],
-  ["PartDesign", ["sketch", "pad", "pocket", "revolution"]],
+  ["PartDesign", ["sketch", "pad", "pocket", "revolution", "pattern-linear", "pattern-polar"]],
   ["Transform", ["mirroring"]],
 ];
 
@@ -1269,10 +1297,12 @@ const MENU_ICONS = {
   box: "box", sphere: "circle", cylinder: "cylinder", cone: "cone", torus: "circle",
   cut: "scissors", fuse: "layers", common: "combine", sketch: "sketch",
   pad: "box", pocket: "box", revolution: "rotate", mirroring: "flip",
+  "pattern-linear": "grid", "pattern-polar": "rotate",
 };
 const MENU_LABELS = {
   cut: "Cut", fuse: "Fuse", common: "Common", sketch: "Sketch", pad: "Pad",
   pocket: "Pocket", revolution: "Revolution", mirroring: "Mirror",
+  "pattern-linear": "Linear Pattern", "pattern-polar": "Polar Pattern",
 };
 
 let dialogKind = null;
@@ -1297,6 +1327,12 @@ function openAdd(kind) {
     if (field.n !== undefined) {
       return '<div class="field"><label for="f-' + field.n + '">' + field.l + '</label>' +
         '<input id="f-' + field.n + '" type="number" step="any" value="' + field.d + '"></div>';
+    }
+    if (field.choices !== undefined) {
+      return '<div class="field"><label for="f-' + field.s + '">' + field.l + '</label>' +
+        '<select id="f-' + field.s + '">' +
+        field.choices.map((c) => '<option value="' + c + '"' + (c === field.d ? " selected" : "") + '>' + c + "</option>").join("") +
+        "</select></div>";
     }
     let candidates = state.rows;
     if (field.sketches) candidates = state.rows.filter((r) => r.type === "Sketcher::SketchObject");

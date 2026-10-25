@@ -864,6 +864,12 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
     if let Some(f) = any.downcast_ref::<crate::partdesign::RevolutionFeature>() {
         return f.result.clone();
     }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::LinearPatternFeature>() {
+        return f.result.clone();
+    }
+    if let Some(f) = any.downcast_ref::<crate::partdesign::PolarPatternFeature>() {
+        return f.result.clone();
+    }
     None
 }
 

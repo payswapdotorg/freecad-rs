@@ -65,7 +65,7 @@
 //! was read or used.
 
 use fc_app::{impl_document_object, Document, DocumentObject, Property, PropertyContainer};
-use fc_base::{Placement, Vector3};
+use fc_base::{Matrix4, Placement, Rotation, Vector3};
 
 use crate::profile::{
     classify_wires, extract_wires, extrude as extrude_kernel, revolve as revolve_kernel, Wire,
@@ -204,37 +204,50 @@ impl PadFeature {
 
     fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
         let type_name = "PartDesign::Pad";
-        let name = self.container.name().to_string();
         // A failed execute leaves no stale geometry behind: dependents
         // re-running against this feature must fail honestly.
         self.result = None;
-        let length = require_float(&self.container, type_name, "Length")?;
-        if !(length.is_finite() && length > 0.0) {
-            return Err(format!(
-                "{type_name} '{name}': Length must be finite and > 0 (got {length})"
-            ));
-        }
-        let midplane = require_bool(&self.container, type_name, "Midplane")?;
-        let reversed = require_bool(&self.container, type_name, "Reversed")?;
-        let wires = profile_wires(&self.container, type_name, doc)?;
-        let direction = if reversed {
-            Vector3::new(0.0, 0.0, -1.0)
-        } else {
-            Vector3::Z
-        };
-        let mesh = extrude_kernel(
-            &wires,
-            direction,
-            length,
-            midplane,
-            DEFAULT_PROFILE_DEFLECTION,
-        )
-        .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+        let mesh = pad_tool(&self.container, type_name, doc)?;
         store_result(&self.container, type_name, mesh, &mut self.result)
     }
 }
 
 impl_document_object!(PadFeature, "PartDesign::Pad");
+
+/// A `PartDesign::Pad`'s **tool**: the extrusion of its solved profile
+/// — the solid the pad fuses onto nothing (the pad's own result).
+/// Factored out of `PadFeature::execute_impl` because feature patterns
+/// re-derive the tools of their originals on every recompute (the
+/// parametric path — a pattern never copies a cached result).
+fn pad_tool(
+    container: &PropertyContainer,
+    type_name: &str,
+    doc: &Document,
+) -> Result<Mesh, String> {
+    let name = container.name();
+    let length = require_float(container, type_name, "Length")?;
+    if !(length.is_finite() && length > 0.0) {
+        return Err(format!(
+            "{type_name} '{name}': Length must be finite and > 0 (got {length})"
+        ));
+    }
+    let midplane = require_bool(container, type_name, "Midplane")?;
+    let reversed = require_bool(container, type_name, "Reversed")?;
+    let wires = profile_wires(container, type_name, doc)?;
+    let direction = if reversed {
+        Vector3::new(0.0, 0.0, -1.0)
+    } else {
+        Vector3::Z
+    };
+    extrude_kernel(
+        &wires,
+        direction,
+        length,
+        midplane,
+        DEFAULT_PROFILE_DEFLECTION,
+    )
+    .map_err(|err| format!("{type_name} '{name}': {err}"))
+}
 
 /// FreeCAD `PartDesign::Pocket` (distilled): extrude the sketch's solved
 /// profile into a tool solid and subtract it from the `Base` feature's
@@ -270,14 +283,6 @@ impl PocketFeature {
         let type_name = "PartDesign::Pocket";
         let name = self.container.name().to_string();
         self.result = None;
-        let length = require_float(&self.container, type_name, "Length")?;
-        if !(length.is_finite() && length > 0.0) {
-            return Err(format!(
-                "{type_name} '{name}': Length must be finite and > 0 (got {length})"
-            ));
-        }
-        let midplane = require_bool(&self.container, type_name, "Midplane")?;
-        let inverted = require_bool(&self.container, type_name, "Inverted")?;
 
         let base_target = match self.container.get("Base") {
             Some(Property::Link(target)) if !target.is_empty() => target.clone(),
@@ -298,26 +303,45 @@ impl PocketFeature {
             )
         })?;
 
-        let wires = profile_wires(&self.container, type_name, doc)?;
-        let direction = if inverted {
-            Vector3::new(0.0, 0.0, -1.0)
-        } else {
-            Vector3::Z
-        };
-        let tool = extrude_kernel(
-            &wires,
-            direction,
-            length,
-            midplane,
-            DEFAULT_PROFILE_DEFLECTION,
-        )
-        .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+        let tool = pocket_tool(&self.container, type_name, doc)?;
         let mesh = crate::boolean::cut(&base, &tool);
         store_result(&self.container, type_name, mesh, &mut self.result)
     }
 }
 
 impl_document_object!(PocketFeature, "PartDesign::Pocket");
+
+/// A `PartDesign::Pocket`'s **tool**: the extrusion it cuts from `Base`
+/// (the pocket's own result is `Base − tool`; patterns want the tool).
+fn pocket_tool(
+    container: &PropertyContainer,
+    type_name: &str,
+    doc: &Document,
+) -> Result<Mesh, String> {
+    let name = container.name();
+    let length = require_float(container, type_name, "Length")?;
+    if !(length.is_finite() && length > 0.0) {
+        return Err(format!(
+            "{type_name} '{name}': Length must be finite and > 0 (got {length})"
+        ));
+    }
+    let midplane = require_bool(container, type_name, "Midplane")?;
+    let inverted = require_bool(container, type_name, "Inverted")?;
+    let wires = profile_wires(container, type_name, doc)?;
+    let direction = if inverted {
+        Vector3::new(0.0, 0.0, -1.0)
+    } else {
+        Vector3::Z
+    };
+    extrude_kernel(
+        &wires,
+        direction,
+        length,
+        midplane,
+        DEFAULT_PROFILE_DEFLECTION,
+    )
+    .map_err(|err| format!("{type_name} '{name}': {err}"))
+}
 
 /// FreeCAD `PartDesign::Revolution` (distilled): sweep the sketch's
 /// solved profile around an axis through the origin.
@@ -363,45 +387,463 @@ impl RevolutionFeature {
 
     fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
         let type_name = "PartDesign::Revolution";
-        let name = self.container.name().to_string();
         self.result = None;
-        let angle = require_float(&self.container, type_name, "Angle")?;
-        if !(angle.is_finite() && angle != 0.0) {
-            return Err(format!(
-                "{type_name} '{name}': Angle must be finite and non-zero (got {angle})"
-            ));
-        }
-        let axis = match self.container.get("Axis") {
-            Some(Property::Vector(v)) => *v,
-            _ => return Err(format!("{type_name} '{name}': missing property 'Axis'")),
-        };
-        if !axis.x.is_finite()
-            || !axis.y.is_finite()
-            || !axis.z.is_finite()
-            || (axis.x == 0.0 && axis.y == 0.0 && axis.z == 0.0)
-        {
-            return Err(format!(
-                "{type_name} '{name}': Axis must be a finite, non-zero vector (got \
-                 ({}, {}, {}))",
-                axis.x, axis.y, axis.z
-            ));
-        }
-        let reversed = require_bool(&self.container, type_name, "Reversed")?;
-        let wires = profile_wires(&self.container, type_name, doc)?;
-        let angle = if reversed { -angle } else { angle };
-        let mesh = revolve_kernel(
-            &wires,
-            Vector3::ZERO,
-            axis,
-            angle,
-            DEFAULT_PROFILE_DEFLECTION,
-        )
-        .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+        let mesh = revolution_tool(&self.container, type_name, doc)?;
         store_result(&self.container, type_name, mesh, &mut self.result)
     }
 }
 
 impl_document_object!(RevolutionFeature, "PartDesign::Revolution");
+
+/// A `PartDesign::Revolution`'s **tool**: the sweep of its solved
+/// profile (the revolution's own result).
+fn revolution_tool(
+    container: &PropertyContainer,
+    type_name: &str,
+    doc: &Document,
+) -> Result<Mesh, String> {
+    let name = container.name();
+    let angle = require_float(container, type_name, "Angle")?;
+    if !(angle.is_finite() && angle != 0.0) {
+        return Err(format!(
+            "{type_name} '{name}': Angle must be finite and non-zero (got {angle})"
+        ));
+    }
+    let axis = match container.get("Axis") {
+        Some(Property::Vector(v)) => *v,
+        _ => return Err(format!("{type_name} '{name}': missing property 'Axis'")),
+    };
+    if !axis.x.is_finite()
+        || !axis.y.is_finite()
+        || !axis.z.is_finite()
+        || (axis.x == 0.0 && axis.y == 0.0 && axis.z == 0.0)
+    {
+        return Err(format!(
+            "{type_name} '{name}': Axis must be a finite, non-zero vector (got \
+             ({}, {}, {}))",
+            axis.x, axis.y, axis.z
+        ));
+    }
+    let reversed = require_bool(container, type_name, "Reversed")?;
+    let wires = profile_wires(container, type_name, doc)?;
+    let angle = if reversed { -angle } else { angle };
+    revolve_kernel(
+        &wires,
+        Vector3::ZERO,
+        axis,
+        angle,
+        DEFAULT_PROFILE_DEFLECTION,
+    )
+    .map_err(|err| format!("{type_name} '{name}': {err}"))
+}
+
+// ---------------------------------------------------------------------------
+// Feature patterns (the mechanical-workflow milestone)
+// ---------------------------------------------------------------------------
+
+/// What a pattern's original does to the base when copied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Polarity {
+    /// The original adds material (`Pad`, `Revolution`, primitives).
+    Additive,
+    /// The original removes material (`Pocket`).
+    Subtractive,
+}
+
+/// The maximum pattern nesting depth (a pattern whose originals are a
+/// pattern — FreeCAD's multiplicative `Transformed` composition, the
+/// 2×2 grid from two chained linear patterns). The dependency graph
+/// makes cycles impossible (a pattern can only reference features that
+/// already exist, and links are DAG edges); this guards hand-edited
+/// properties anyway.
+const MAX_PATTERN_NESTING: usize = 8;
+
+/// Read a pattern's required `Occurrences` (`App::PropertyInteger`,
+/// FreeCAD's `PropertyInteger`).
+fn require_occurrences(container: &PropertyContainer, type_name: &str) -> Result<i64, String> {
+    match container.get("Occurrences") {
+        Some(Property::Integer(n)) => Ok(*n),
+        _ => Err(format!(
+            "{type_name} '{}': missing property 'Occurrences'",
+            container.name()
+        )),
+    }
+}
+
+/// Validate a span/step scalar (finite, strictly positive).
+fn require_positive(
+    container: &PropertyContainer,
+    type_name: &str,
+    key: &str,
+) -> Result<f64, String> {
+    let value = require_float(container, type_name, key)?;
+    if !(value.is_finite() && value > 0.0) {
+        return Err(format!(
+            "{type_name} '{}': {key} must be finite and > 0 (got {value})",
+            container.name()
+        ));
+    }
+    Ok(value)
+}
+
+/// A `PartDesign::LinearPattern`'s copy transforms, one per occurrence
+/// (the first is the identity — occurrence 1 is the untransformed
+/// original, FreeCAD's rule). Spacing is `Length / (Occurrences − 1)`,
+/// the total span between first and last copy.
+fn linear_copies(container: &PropertyContainer, type_name: &str) -> Result<Vec<Matrix4>, String> {
+    let name = container.name();
+    let length = require_positive(container, type_name, "Length")?;
+    let occurrences = require_occurrences(container, type_name)?;
+    if occurrences < 2 {
+        return Err(format!(
+            "{type_name} '{name}': Occurrences must be >= 2 (got {occurrences})"
+        ));
+    }
+    let direction = match container.get("Direction") {
+        Some(Property::Vector(v)) => *v,
+        _ => {
+            return Err(format!(
+                "{type_name} '{name}': missing property 'Direction'"
+            ))
+        }
+    };
+    let unit = direction.normalized().ok_or_else(|| {
+        format!(
+            "{type_name} '{name}': Direction must be a finite, non-zero vector (got \
+             ({}, {}, {}))",
+            direction.x, direction.y, direction.z
+        )
+    })?;
+    let reversed = require_bool(container, type_name, "Reversed")?;
+    let spacing = length / (occurrences - 1) as f64;
+    let signed = if reversed { -spacing } else { spacing };
+    Ok((0..occurrences)
+        .map(|k| Matrix4::from_translation(&(unit * (signed * k as f64))))
+        .collect())
+}
+
+/// A `PartDesign::PolarPattern`'s copy transforms (rotations about the
+/// axis through the origin; occurrence 1 is the untransformed
+/// original). FreeCAD's 360° rule: a full turn spaces occurrences
+/// `360/N` apart so the last copy does not stack on the first; a
+/// partial arc spaces them `Angle/(N−1)` across the span.
+fn polar_copies(container: &PropertyContainer, type_name: &str) -> Result<Vec<Matrix4>, String> {
+    let name = container.name();
+    let angle = require_float(container, type_name, "Angle")?;
+    if !angle.is_finite() || angle == 0.0 || angle.abs() > 360.0 {
+        return Err(format!(
+            "{type_name} '{name}': Angle must be finite, non-zero and within \
+             ±360° (got {angle})"
+        ));
+    }
+    let occurrences = require_occurrences(container, type_name)?;
+    if occurrences < 2 {
+        return Err(format!(
+            "{type_name} '{name}': Occurrences must be >= 2 (got {occurrences})"
+        ));
+    }
+    let axis = match container.get("Axis") {
+        Some(Property::Vector(v)) => *v,
+        _ => return Err(format!("{type_name} '{name}': missing property 'Axis'")),
+    };
+    if !axis.x.is_finite()
+        || !axis.y.is_finite()
+        || !axis.z.is_finite()
+        || (axis.x == 0.0 && axis.y == 0.0 && axis.z == 0.0)
+    {
+        return Err(format!(
+            "{type_name} '{name}': Axis must be a finite, non-zero vector (got \
+             ({}, {}, {}))",
+            axis.x, axis.y, axis.z
+        ));
+    }
+    let reversed = require_bool(container, type_name, "Reversed")?;
+    let step = if angle.abs() >= 360.0 {
+        360.0 / occurrences as f64
+    } else {
+        angle / (occurrences - 1) as f64
+    };
+    let step = if reversed { -step } else { step };
+    let step = Rotation::from_axis_angle(axis, step.to_radians()).map_err(|_| {
+        format!(
+            "{type_name} '{name}': Axis must be a finite, non-zero vector (got \
+                 ({}, {}, {}))",
+            axis.x, axis.y, axis.z
+        )
+    })?;
+    let mut copies = Vec::with_capacity(occurrences as usize);
+    let mut rotation = Rotation::IDENTITY;
+    for _ in 0..occurrences {
+        copies.push(Matrix4::from_placement(&Placement {
+            position: Vector3::ZERO,
+            rotation,
+        }));
+        rotation = step.multiply(&rotation);
+    }
+    Ok(copies)
+}
+
+/// Resolve a pattern's `Originals` link (the feature whose tool gets
+/// copied — `App::PropertyLinkSub`, like the PartDesign profiles).
+fn originals_target(container: &PropertyContainer, type_name: &str) -> Result<String, String> {
+    match container.get("Originals") {
+        Some(Property::Link(target)) if !target.is_empty() => Ok(target.clone()),
+        Some(Property::LinkSub(target, _)) if !target.is_empty() => Ok(target.clone()),
+        _ => Err(format!(
+            "{type_name} '{}': Originals must link to the feature being patterned",
+            container.name()
+        )),
+    }
+}
+
+/// A feature's **tool** — the solid its own operation adds or removes —
+/// plus its [`Polarity`], re-derived from live properties (a pattern
+/// recomputes against the current sketch and dimensions, never a
+/// cached result).
+///
+/// * `Pad` / `Pocket` / `Revolution` contribute their profile tool
+///   (additive, subtractive, additive).
+/// * A pattern contributes the union of all its copies, polarity
+///   inherited from its originals (recursion — FreeCAD's `Transformed`
+///   composition: patterning a pattern copies every copy).
+/// * Anything else contributes its placed mesh additively (primitives,
+///   booleans — a documented superset of FreeCAD, which only patterns
+///   PartDesign features).
+///
+/// `type_name`/`name` attribute the errors to the *pattern* asking.
+fn original_tool(
+    doc: &Document,
+    object: &dyn DocumentObject,
+    type_name: &str,
+    name: &str,
+    depth: usize,
+) -> Result<(Mesh, Polarity), String> {
+    if depth > MAX_PATTERN_NESTING {
+        return Err(format!(
+            "{type_name} '{name}': pattern nesting deeper than {MAX_PATTERN_NESTING} levels"
+        ));
+    }
+    // Defense in depth: the recompute loop aborts on the original's own
+    // failure before the pattern runs, but a *later* recompute skips
+    // errored objects — never pattern off a failed feature.
+    if let fc_app::ObjectStatus::Error(reason) = object.status() {
+        return Err(format!(
+            "{type_name} '{name}': Originals '{}' is in error state: {reason}",
+            object.name()
+        ));
+    }
+    if let Some(pad) = object.as_any().downcast_ref::<PadFeature>() {
+        return Ok((
+            pad_tool(&pad.container, "PartDesign::Pad", doc)?,
+            Polarity::Additive,
+        ));
+    }
+    if let Some(pocket) = object.as_any().downcast_ref::<PocketFeature>() {
+        return Ok((
+            pocket_tool(&pocket.container, "PartDesign::Pocket", doc)?,
+            Polarity::Subtractive,
+        ));
+    }
+    if let Some(revolution) = object.as_any().downcast_ref::<RevolutionFeature>() {
+        return Ok((
+            revolution_tool(&revolution.container, "PartDesign::Revolution", doc)?,
+            Polarity::Additive,
+        ));
+    }
+    match object.as_any().downcast_ref::<LinearPatternFeature>() {
+        Some(pattern) => {
+            // The inner pattern's tool: the union of all its copies,
+            // polarity inherited from its originals.
+            let container = &pattern.container;
+            let target = originals_target(container, "PartDesign::LinearPattern")
+                .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+            let inner = doc
+                .get_by_name(&target)
+                .ok_or_else(|| format!("{type_name} '{name}': Originals '{target}' not found"))?;
+            let (tool, polarity) = original_tool(doc, inner, type_name, name, depth + 1)?;
+            let copies = linear_copies(container, "PartDesign::LinearPattern")
+                .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+            Ok((fuse_copies(&tool, &copies), polarity))
+        }
+        None => match object.as_any().downcast_ref::<PolarPatternFeature>() {
+            Some(pattern) => {
+                let container = &pattern.container;
+                let target = originals_target(container, "PartDesign::PolarPattern")
+                    .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+                let inner = doc.get_by_name(&target).ok_or_else(|| {
+                    format!("{type_name} '{name}': Originals '{target}' not found")
+                })?;
+                let (tool, polarity) = original_tool(doc, inner, type_name, name, depth + 1)?;
+                let copies = polar_copies(container, "PartDesign::PolarPattern")
+                    .map_err(|err| format!("{type_name} '{name}': {err}"))?;
+                Ok((fuse_copies(&tool, &copies), polarity))
+            }
+            None => {
+                let mesh =
+                    crate::features::placed_mesh_of(object, crate::shape::DEFAULT_DEFLECTION)
+                        .ok_or_else(|| {
+                            format!(
+                                "{type_name} '{name}': Originals '{}' has no computed geometry \
+                         (not a part feature, or not yet recomputed)",
+                                object.name()
+                            )
+                        })?;
+                Ok((mesh, Polarity::Additive))
+            }
+        },
+    }
+}
+
+/// Union of every transformed copy of a tool (the nested pattern's own
+/// contribution — `occurrences >= 2` guarantees at least one copy).
+fn fuse_copies(tool: &Mesh, copies: &[Matrix4]) -> Mesh {
+    let mut fused: Option<Mesh> = None;
+    for m in copies {
+        let copy = tool.transformed(m);
+        fused = Some(match fused {
+            None => copy,
+            Some(acc) => crate::boolean::fuse(&acc, &copy),
+        });
+    }
+    fused.expect("occurrences >= 2 guarantees a copy")
+}
+
+/// The shared execute of both pattern features: resolve `Base` (the
+/// solid the copies apply to — semantically the state *before* the
+/// original feature was applied, FreeCAD's `BaseFeature`), derive the
+/// original's tool + polarity, then fold every copy onto the base.
+fn pattern_execute(
+    container: &PropertyContainer,
+    type_name: &str,
+    doc: &Document,
+    copies: Vec<Matrix4>,
+) -> Result<Mesh, String> {
+    let name = container.name().to_string();
+    let base_target = match container.get("Base") {
+        Some(Property::Link(target)) if !target.is_empty() => target.clone(),
+        _ => {
+            return Err(format!(
+                "{type_name} '{name}': Base must link to a solid feature"
+            ))
+        }
+    };
+    let base_object = doc
+        .get_by_name(&base_target)
+        .ok_or_else(|| format!("{type_name} '{name}': Base '{base_target}' not found"))?;
+    let base = crate::features::placed_mesh_of(base_object, crate::shape::DEFAULT_DEFLECTION)
+        .ok_or_else(|| {
+            format!(
+                "{type_name} '{name}': Base '{base_target}' has no computed geometry \
+             (not a part feature, or not yet recomputed)"
+            )
+        })?;
+
+    let target = originals_target(container, type_name)?;
+    let original = doc
+        .get_by_name(&target)
+        .ok_or_else(|| format!("{type_name} '{name}': Originals '{target}' not found"))?;
+    let (tool, polarity) = original_tool(doc, original, type_name, &name, 0)?;
+
+    // Fold all copies into ONE tool union first, then a single boolean
+    // against the base. Set-theoretically identical to per-copy folds
+    // (`cut(A, B∪C) == cut(cut(A,B),C)` in exact arithmetic) and far
+    // cheaper: a per-copy cut re-classifies the whole — growing — base
+    // mesh every occurrence (quadratic), while the union of disjoint
+    // copies costs only the pairwise fuses of the small tools.
+    let combined = fuse_copies(&tool, &copies);
+    let mesh = match polarity {
+        Polarity::Additive => crate::boolean::fuse(&base, &combined),
+        Polarity::Subtractive => crate::boolean::cut(&base, &combined),
+    };
+    Ok(mesh)
+}
+
+/// FreeCAD `PartDesign::LinearPattern` (distilled): repeat an original
+/// feature's tool along a direction — the boss grid and the row of
+/// holes. `Length` is the span between the first and last occurrence
+/// (spacing `Length/(Occurrences−1)`); occurrence 1 is the untransformed
+/// original's position. An additive original (Pad/Revolution/primitive)
+/// fuses its copies onto `Base`; a subtractive one (Pocket) cuts them.
+/// Patterning a pattern composes multiplicatively (FreeCAD's
+/// `Transformed` semantics): every copy of the inner pattern gets
+/// copied again.
+pub struct LinearPatternFeature {
+    pub container: PropertyContainer,
+    /// `Base` folded with every copy of the original's tool.
+    pub result: Option<Mesh>,
+}
+
+impl LinearPatternFeature {
+    /// Properties: `Originals` (LinkSub, required), `Base` (Link,
+    /// required), `Direction` ((1, 0, 0)), `Length` (20.0),
+    /// `Occurrences` (2), `Reversed` (false), `Placement`.
+    pub fn new(name: &str) -> Self {
+        let mut container = PropertyContainer::new(name);
+        container.set("Originals", Property::LinkSub(String::new(), Vec::new()));
+        container.set("Base", Property::Link(String::new()));
+        container.set("Direction", Property::Vector(Vector3::new(1.0, 0.0, 0.0)));
+        container.set("Length", Property::Float(20.0));
+        container.set("Occurrences", Property::Integer(2));
+        container.set("Reversed", Property::Bool(false));
+        container.set("Placement", Property::Placement(Placement::IDENTITY));
+        Self {
+            container,
+            result: None,
+        }
+    }
+
+    fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
+        let type_name = "PartDesign::LinearPattern";
+        self.result = None;
+        let copies = linear_copies(&self.container, type_name)?;
+        let mesh = pattern_execute(&self.container, type_name, doc, copies)?;
+        store_result(&self.container, type_name, mesh, &mut self.result)
+    }
+}
+
+impl_document_object!(LinearPatternFeature, "PartDesign::LinearPattern");
+
+/// FreeCAD `PartDesign::PolarPattern` (distilled): repeat an original
+/// feature's tool around an axis through the origin — the bolt circle.
+/// `Angle` is the swept arc: a full 360° spaces occurrences `360/N`
+/// apart (the last copy never stacks on the first, FreeCAD's rule); a
+/// partial arc spaces them `Angle/(N−1)`. Polarity and nesting behave
+/// exactly like [`LinearPatternFeature`].
+pub struct PolarPatternFeature {
+    pub container: PropertyContainer,
+    /// `Base` folded with every rotated copy of the original's tool.
+    pub result: Option<Mesh>,
+}
+
+impl PolarPatternFeature {
+    /// Properties: `Originals` (LinkSub, required), `Base` (Link,
+    /// required), `Axis` ((0, 0, 1)), `Angle` (360.0), `Occurrences`
+    /// (2), `Reversed` (false), `Placement`.
+    pub fn new(name: &str) -> Self {
+        let mut container = PropertyContainer::new(name);
+        container.set("Originals", Property::LinkSub(String::new(), Vec::new()));
+        container.set("Base", Property::Link(String::new()));
+        container.set("Axis", Property::Vector(Vector3::Z));
+        container.set("Angle", Property::Float(360.0));
+        container.set("Occurrences", Property::Integer(2));
+        container.set("Reversed", Property::Bool(false));
+        container.set("Placement", Property::Placement(Placement::IDENTITY));
+        Self {
+            container,
+            result: None,
+        }
+    }
+
+    fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
+        let type_name = "PartDesign::PolarPattern";
+        self.result = None;
+        let copies = polar_copies(&self.container, type_name)?;
+        let mesh = pattern_execute(&self.container, type_name, doc, copies)?;
+        store_result(&self.container, type_name, mesh, &mut self.result)
+    }
+}
+
+impl_document_object!(PolarPatternFeature, "PartDesign::PolarPattern");
 
 #[cfg(test)]
 mod tests {
@@ -1004,6 +1446,421 @@ mod tests {
         doc.set_property("Rev", "Angle", Property::Float(360.0))
             .unwrap();
         doc.set_property("Rev", "Axis", Property::Vector(Vector3::ZERO))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("zero axis must fail");
+        assert!(
+            err.to_string()
+                .contains("Axis must be a finite, non-zero vector"),
+            "{err}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Feature patterns
+    // -----------------------------------------------------------------
+
+    /// A centered `2s x 2s x height` box base spanning z in [0, height].
+    fn box_base(side: f64, height: f64) -> BoxFeature {
+        let mut body = BoxFeature::new("Base");
+        body.container.set("Length", Property::Float(side));
+        body.container.set("Width", Property::Float(side));
+        body.container.set("Height", Property::Float(height));
+        body.container.set(
+            "Placement",
+            Property::Placement(Placement::new(
+                Vector3::new(-side / 2.0, -side / 2.0, 0.0),
+                fc_base::Rotation::IDENTITY,
+            )),
+        );
+        body
+    }
+
+    /// A document holding a centered 30x30x10 base and a through pocket
+    /// of a centered 4x4 square (the pattern test bed): `Pocket` cuts
+    /// 160 mm³, leaving 8840.
+    fn pattern_doc() -> Document {
+        let mut doc = Document::new("test");
+        doc.add(Box::new(box_base(30.0, 10.0)));
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            centered_square_sketch(2.0),
+        )));
+        doc.add(Box::new(PocketFeature::new("Pocket")));
+        doc.set_property("Pocket", "Profile", Property::Link("Sketch".into()))
+            .unwrap();
+        doc.set_property("Pocket", "Base", Property::Link("Base".into()))
+            .unwrap();
+        doc.set_property("Pocket", "Length", Property::Float(10.0))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        doc
+    }
+
+    /// Wire up a linear pattern on `originals` over `base`.
+    fn add_linear(doc: &mut Document, name: &str, originals: &str, base: &str) {
+        doc.add(Box::new(LinearPatternFeature::new(name)));
+        doc.set_property(name, "Originals", Property::Link(originals.into()))
+            .unwrap();
+        doc.set_property(name, "Base", Property::Link(base.into()))
+            .unwrap();
+    }
+
+    /// The pattern feature's computed volume (panics when it failed).
+    fn result_volume(doc: &Document, name: &str) -> f64 {
+        let object = doc.get_by_name(name).unwrap();
+        let mesh = match object.type_name() {
+            "PartDesign::LinearPattern" => object
+                .as_any()
+                .downcast_ref::<LinearPatternFeature>()
+                .unwrap()
+                .result
+                .as_ref()
+                .expect("pattern computed a mesh"),
+            _ => object
+                .as_any()
+                .downcast_ref::<PolarPatternFeature>()
+                .unwrap()
+                .result
+                .as_ref()
+                .expect("pattern computed a mesh"),
+        };
+        mesh.volume()
+    }
+
+    /// The pattern feature's computed mesh, for watertightness checks.
+    fn result_mesh<'a>(doc: &'a Document, name: &str) -> &'a Mesh {
+        let object = doc.get_by_name(name).unwrap();
+        if let Some(f) = object.as_any().downcast_ref::<LinearPatternFeature>() {
+            return f.result.as_ref().expect("pattern computed a mesh");
+        }
+        object
+            .as_any()
+            .downcast_ref::<PolarPatternFeature>()
+            .unwrap()
+            .result
+            .as_ref()
+            .expect("pattern computed a mesh")
+    }
+
+    #[test]
+    fn linear_pattern_of_pocket_cuts_exactly_n_disjoint_holes() {
+        let mut doc = pattern_doc();
+        add_linear(&mut doc, "Row", "Pocket", "Base");
+        // 3 occurrences over a 12 mm span: holes at (0, 0), (0, -6)
+        // and (0, -12) — each 4x4, all inside the 30x30 plate, all
+        // disjoint.
+        doc.set_property("Row", "Direction", Property::Vector(Vector3::Y))
+            .unwrap();
+        doc.set_property("Row", "Length", Property::Float(12.0))
+            .unwrap();
+        doc.set_property("Row", "Occurrences", Property::Integer(3))
+            .unwrap();
+        doc.set_property("Row", "Reversed", Property::Bool(true))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Row");
+        // 9000 - 3 x (4 x 4 x 10) — exact arithmetic on rectangles.
+        assert!(
+            (volume - (9000.0 - 3.0 * 160.0)).abs() < 1e-6,
+            "expected 8520, got {volume}"
+        );
+        assert!(
+            mesh_is_closed(result_mesh(&doc, "Row")),
+            "pattern result must be watertight"
+        );
+    }
+
+    #[test]
+    fn nested_linear_patterns_compose_multiplicatively() {
+        let mut doc = pattern_doc();
+        // Y row: holes at (0, 0) and (0, -8).
+        add_linear(&mut doc, "Row", "Pocket", "Base");
+        doc.set_property("Row", "Direction", Property::Vector(Vector3::Y))
+            .unwrap();
+        doc.set_property("Row", "Length", Property::Float(8.0))
+            .unwrap();
+        doc.set_property("Row", "Occurrences", Property::Integer(2))
+            .unwrap();
+        doc.set_property("Row", "Reversed", Property::Bool(true))
+            .unwrap();
+        // X grid over the ROW's copies: (0, 0), (0, -8) and (8, 0),
+        // (8, -8) — a 2x2 grid from one pocket.
+        add_linear(&mut doc, "Grid", "Row", "Base");
+        doc.set_property(
+            "Grid",
+            "Direction",
+            Property::Vector(Vector3::new(1.0, 0.0, 0.0)),
+        )
+        .unwrap();
+        doc.set_property("Grid", "Length", Property::Float(8.0))
+            .unwrap();
+        doc.set_property("Grid", "Occurrences", Property::Integer(2))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Grid");
+        // 9000 - 4 x 160 — the multiplicative Transformed composition.
+        assert!(
+            (volume - (9000.0 - 4.0 * 160.0)).abs() < 1e-6,
+            "expected 8360, got {volume}"
+        );
+        assert!(
+            mesh_is_closed(result_mesh(&doc, "Grid")),
+            "nested pattern result must be watertight"
+        );
+    }
+
+    #[test]
+    fn linear_pattern_of_pad_fuses_exactly_n_disjoint_copies() {
+        let mut doc = Document::new("test");
+        // The base sits strictly below the pads' z slab (a 1 mm air
+        // gap): the union is exact disjoint-set arithmetic, no
+        // coplanar-face booleans in the way of the volume assertion.
+        let mut base = BoxFeature::new("Base");
+        base.container.set("Length", Property::Float(30.0));
+        base.container.set("Width", Property::Float(30.0));
+        base.container.set("Height", Property::Float(4.0));
+        base.container.set(
+            "Placement",
+            Property::Placement(Placement::new(
+                Vector3::new(-15.0, -15.0, -5.0),
+                fc_base::Rotation::IDENTITY,
+            )),
+        );
+        doc.add(Box::new(base));
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            rectangle_at(-12.0, -2.5, 5.0, 5.0),
+        )));
+        doc.add(Box::new(PadFeature::new("Pad")));
+        doc.set_property("Pad", "Profile", Property::Link("Sketch".into()))
+            .unwrap();
+        doc.set_property("Pad", "Length", Property::Float(4.0))
+            .unwrap();
+        // 3 copies over a 20 mm span: prisms at x = -12, -2 and +8
+        // (each 5 wide — disjoint), all additive.
+        add_linear(&mut doc, "Row", "Pad", "Base");
+        doc.set_property(
+            "Row",
+            "Direction",
+            Property::Vector(Vector3::new(1.0, 0.0, 0.0)),
+        )
+        .unwrap();
+        doc.set_property("Row", "Length", Property::Float(20.0))
+            .unwrap();
+        doc.set_property("Row", "Occurrences", Property::Integer(3))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Row");
+        // 3600 (base) + 3 x 100 (5x5x4 prisms).
+        assert!(
+            (volume - (3600.0 + 3.0 * 100.0)).abs() < 1e-6,
+            "expected 3900, got {volume}"
+        );
+        assert!(
+            mesh_is_closed(result_mesh(&doc, "Row")),
+            "additive pattern result must be watertight"
+        );
+    }
+
+    #[test]
+    fn polar_pattern_full_turn_spaces_360_over_n() {
+        let mut doc = Document::new("test");
+        doc.add(Box::new(box_base(30.0, 10.0)));
+        // A 2x2 square pocket centered at (10, 0).
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            rectangle_at(9.0, -1.0, 2.0, 2.0),
+        )));
+        doc.add(Box::new(PocketFeature::new("Pocket")));
+        doc.set_property("Pocket", "Profile", Property::Link("Sketch".into()))
+            .unwrap();
+        doc.set_property("Pocket", "Base", Property::Link("Base".into()))
+            .unwrap();
+        doc.set_property("Pocket", "Length", Property::Float(10.0))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+
+        doc.add(Box::new(PolarPatternFeature::new("Circle")));
+        doc.set_property("Circle", "Originals", Property::Link("Pocket".into()))
+            .unwrap();
+        doc.set_property("Circle", "Base", Property::Link("Base".into()))
+            .unwrap();
+        doc.set_property("Circle", "Axis", Property::Vector(Vector3::Z))
+            .unwrap();
+        doc.set_property("Circle", "Angle", Property::Float(360.0))
+            .unwrap();
+        doc.set_property("Circle", "Occurrences", Property::Integer(6))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Circle");
+        // Six 2x2x10 holes on the r=10 circle (chord 10 apart —
+        // disjoint), each removing exactly 40: 9000 - 240.
+        assert!(
+            (volume - (9000.0 - 6.0 * 40.0)).abs() < 1e-6,
+            "expected 8760, got {volume}"
+        );
+        assert!(
+            mesh_is_closed(result_mesh(&doc, "Circle")),
+            "polar pattern result must be watertight"
+        );
+    }
+
+    #[test]
+    fn polar_pattern_partial_arc_and_reversed() {
+        let mut doc = Document::new("test");
+        doc.add(Box::new(box_base(30.0, 10.0)));
+        doc.add(Box::new(SketchObject::with_sketch(
+            "Sketch",
+            rectangle_at(9.0, -1.0, 2.0, 2.0),
+        )));
+        doc.add(Box::new(PocketFeature::new("Pocket")));
+        doc.set_property("Pocket", "Profile", Property::Link("Sketch".into()))
+            .unwrap();
+        doc.set_property("Pocket", "Base", Property::Link("Base".into()))
+            .unwrap();
+        doc.set_property("Pocket", "Length", Property::Float(10.0))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+
+        doc.add(Box::new(PolarPatternFeature::new("Arc")));
+        doc.set_property("Arc", "Originals", Property::Link("Pocket".into()))
+            .unwrap();
+        doc.set_property("Arc", "Base", Property::Link("Base".into()))
+            .unwrap();
+        doc.set_property("Arc", "Axis", Property::Vector(Vector3::Z))
+            .unwrap();
+        doc.set_property("Arc", "Angle", Property::Float(90.0))
+            .unwrap();
+        doc.set_property("Arc", "Occurrences", Property::Integer(3))
+            .unwrap();
+        // Partial arc: steps of 90/(3-1) = 45 degrees.
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Arc");
+        assert!(
+            (volume - (9000.0 - 3.0 * 40.0)).abs() < 1e-6,
+            "expected 8880, got {volume}"
+        );
+
+        // Reversed flips the sweep: same three holes, mirrored side —
+        // same volume.
+        doc.set_property("Arc", "Reversed", Property::Bool(true))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Arc");
+        assert!(
+            (volume - (9000.0 - 3.0 * 40.0)).abs() < 1e-6,
+            "reversed arc must cut the same volume: got {volume}"
+        );
+    }
+
+    #[test]
+    fn pattern_parametric_edit_cascades_through_the_graph() {
+        let mut doc = pattern_doc();
+        add_linear(&mut doc, "Row", "Pocket", "Base");
+        doc.set_property("Row", "Direction", Property::Vector(Vector3::Y))
+            .unwrap();
+        doc.set_property("Row", "Length", Property::Float(8.0))
+            .unwrap();
+        doc.set_property("Row", "Occurrences", Property::Integer(2))
+            .unwrap();
+        doc.set_property("Row", "Reversed", Property::Bool(true))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+
+        // Deepen is wrong way round — HALVE the pocket depth: the cut
+        // volume halves, the pattern follows through the graph.
+        doc.set_property("Pocket", "Length", Property::Float(5.0))
+            .unwrap();
+        doc.recompute_all().expect("recompute succeeds");
+        let volume = result_volume(&doc, "Row");
+        assert!(
+            (volume - (9000.0 - 2.0 * (4.0 * 4.0 * 5.0))).abs() < 1e-6,
+            "expected 9000 - 160 = 8840, got {volume}"
+        );
+    }
+
+    #[test]
+    fn pattern_validation_is_upfront_and_honest() {
+        // Occurrences below 2 is not a pattern.
+        let mut doc = pattern_doc();
+        add_linear(&mut doc, "Row", "Pocket", "Base");
+        doc.set_property("Row", "Occurrences", Property::Integer(1))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("occurrences 1 must fail");
+        assert!(
+            err.to_string().contains("Occurrences must be >= 2"),
+            "{err}"
+        );
+
+        // A zero-length span stacks every copy.
+        doc.set_property("Row", "Occurrences", Property::Integer(2))
+            .unwrap();
+        doc.set_property("Row", "Length", Property::Float(0.0))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("zero length must fail");
+        assert!(
+            err.to_string().contains("Length must be finite and > 0"),
+            "{err}"
+        );
+
+        // A zero direction has no unit vector.
+        doc.set_property("Row", "Length", Property::Float(8.0))
+            .unwrap();
+        doc.set_property("Row", "Direction", Property::Vector(Vector3::ZERO))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("zero direction must fail");
+        assert!(
+            err.to_string()
+                .contains("Direction must be a finite, non-zero vector"),
+            "{err}"
+        );
+
+        // Missing links are named, not guessed.
+        doc.set_property("Row", "Direction", Property::Vector(Vector3::Y))
+            .unwrap();
+        doc.set_property("Row", "Originals", Property::Link(String::new()))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("empty originals must fail");
+        assert!(err.to_string().contains("Originals must link to"), "{err}");
+        doc.set_property("Row", "Originals", Property::Link("Ghost".into()))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("ghost originals must fail");
+        assert!(err.to_string().contains("Ghost"), "{err}");
+        doc.set_property("Row", "Originals", Property::Link("Pocket".into()))
+            .unwrap();
+        doc.set_property("Row", "Base", Property::Link("Ghost".into()))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("ghost base must fail");
+        assert!(err.to_string().contains("Ghost"), "{err}");
+    }
+
+    #[test]
+    fn polar_pattern_validation_is_upfront_and_honest() {
+        let mut doc = pattern_doc();
+        doc.add(Box::new(PolarPatternFeature::new("Circle")));
+        doc.set_property("Circle", "Originals", Property::Link("Pocket".into()))
+            .unwrap();
+        doc.set_property("Circle", "Base", Property::Link("Base".into()))
+            .unwrap();
+        // Zero angle is no revolution at all.
+        doc.set_property("Circle", "Angle", Property::Float(0.0))
+            .unwrap();
+        doc.set_property("Circle", "Occurrences", Property::Integer(3))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("zero angle must fail");
+        assert!(
+            err.to_string().contains("Angle must be finite, non-zero"),
+            "{err}"
+        );
+        // More than a full turn is refused (FreeCAD's rule).
+        doc.set_property("Circle", "Angle", Property::Float(361.0))
+            .unwrap();
+        let err = doc.recompute_all().expect_err("over-360 must fail");
+        assert!(err.to_string().contains("within ±360"), "{err}");
+        // A zero axis is not an axis.
+        doc.set_property("Circle", "Angle", Property::Float(360.0))
+            .unwrap();
+        doc.set_property("Circle", "Axis", Property::Vector(Vector3::ZERO))
             .unwrap();
         let err = doc.recompute_all().expect_err("zero axis must fail");
         assert!(

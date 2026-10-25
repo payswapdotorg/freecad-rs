@@ -32,12 +32,13 @@ text format where FreeCAD writes OCCT `.brp`).
 * Exit codes: `0` ok · `1` runtime error (printed as `error: …` on
   stderr) · `2` usage error.
 * Every mutating command (`new`, `add`, `set`, `pad`, `pocket`,
-  `revolution`, `sketch-import`, `recompute`, `undo`,
+  `revolution`, `pattern-linear`, `pattern-polar`,
+  `sketch-import`, `recompute`, `undo`,
   `redo`) saves the file back. Even when a recompute fails, the document is saved — with
   the failing object marked `Error`, FreeCAD-style — before exiting 1, so
   no work is lost.
 * `add`, `set` and the PartDesign verbs (`pad`, `pocket`,
-  `revolution`) are **undoable**: each one appends a transaction
+  `revolution`, `pattern-linear`, `pattern-polar`) are **undoable**: each one appends a transaction
   to the document's session journal (`FILE.undolog`, see `undo`), and
   `undo`/`redo`/`history` operate on it. Expression bindings
   (`set-expr`/`clear-expr`) and sketch content swaps (`sketch-import`)
@@ -438,6 +439,72 @@ the pad's volume scales with the new sketch width. `Length` and
 `Angle` are `App::PropertyFloat` like the Part primitives' dimensions,
 so expression bindings work on them (`set-expr demo.fcstd Pad Length
 "2 * 3"` — dimensionless, like every Float binding).
+
+## Feature patterns: `pattern-linear` / `pattern-polar`
+
+FreeCAD `PartDesign::LinearPattern` / `PartDesign::PolarPattern`
+distilled: repeat an original feature's **tool** — the solid its own
+operation adds or removes, re-derived from live properties on every
+recompute — along a direction or around an axis. This is the
+mechanical-workflow milestone: the boss grid, the row of holes, the
+bolt circle.
+
+Both verbs share the same mental model:
+
+* `--originals F` — the feature being patterned (a `Pad` fuses its
+  copies; a `Pocket` cuts them; anything mesh-bearing, like a
+  primitive, contributes its placed mesh additively — a documented
+  superset of FreeCAD, which only patterns PartDesign features).
+* `--base B` — the solid the copies apply to, semantically the state
+  **before** the original feature was applied (FreeCAD's
+  `BaseFeature`): pattern a pocket against the body that existed
+  before the pocket cut it.
+* Occurrence 1 is the untransformed original's position — a pattern
+  of `N` occurrences is `N` tools total, not `N` copies plus one.
+* Patterning a **pattern** composes multiplicatively (FreeCAD's
+  `Transformed` semantics): the outer pattern copies *every copy* of
+  the inner one — the 2×2 hole grid from one pocket via two chained
+  linear patterns.
+
+The copies are fused into one tool union first and applied in a
+single boolean against the base — set-theoretically identical to
+per-copy folds, and far cheaper on large patterns.
+
+### `pattern-linear` — repeat a feature along a direction
+
+```sh
+freecad-rs pattern-linear demo.fcstd --originals Hole --base Plate \
+    --direction y --length 60 --occurrences 2 --reversed --name HolesY
+#   HolesY: Valid, volume 95436.956 mm³, 1266 triangles
+```
+
+`--length` is the span between the first and last occurrence (spacing
+`Length/(Occurrences−1)`, FreeCAD's rule); `--direction` is `x`, `y`
+or `z`; `--reversed` patterns along the negative direction.
+
+### `pattern-polar` — repeat a feature around an axis
+
+```sh
+freecad-rs pattern-polar demo.fcstd --originals BoltHole --base Grid \
+    --axis z --angle 360 --occurrences 6 --name BoltCircle
+#   BoltCircle: Valid, volume 94124.766 mm³, 5806 triangles
+```
+
+Rotations about the axis through the origin (`--axis z` or `y`). A
+full `--angle 360` spaces occurrences `360/N` apart — the last copy
+never stacks on the first (FreeCAD's rule); a partial arc spaces them
+`Angle/(N−1)` across the span. `--reversed` sweeps the other way.
+
+### The bracket plate, end to end
+
+The acceptance test for this milestone (`tests/mechanical_cli.rs`) is
+a real mechanical part — worth reading as a tutorial: a 120×80×10
+plate, four Ø6 corner holes from **one** pocket through two chained
+linear patterns (the multiplicative 2×2 grid), and a Ø80 bolt circle
+of six Ø4 holes via a polar pattern — every intermediate volume
+asserted against tool volumes measured through the engine itself,
+then the parametric cascade (halve the pocket depth; all four
+patterns follow), undo, and save/reload.
 
 ## Expressions: `set-expr` / `clear-expr`
 

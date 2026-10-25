@@ -16,11 +16,13 @@ use fc_part::features::{
     BooleanFeature, BoxFeature, ConeFeature, CylinderFeature, MirroringFeature, SphereFeature,
     TorusFeature, TransformFeature,
 };
-use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
+use fc_part::partdesign::{
+    LinearPatternFeature, PadFeature, PocketFeature, PolarPatternFeature, RevolutionFeature,
+};
 use fc_part::{mesh_of, shape_of, BooleanKind, Mesh, TopoShape};
 use fc_sketcher::{Geometry, SketchObject};
 
-use crate::{AddShape, AxisChoice, Command, ExportFormat};
+use crate::{AddShape, AxisChoice, Command, DirectionChoice, ExportFormat};
 
 pub fn dispatch(cmd: Command) -> Result<(), String> {
     match cmd {
@@ -90,6 +92,44 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
             axis,
             name,
         } => revolution(&file, &sketch, angle, axis, name.as_deref()),
+        Command::PatternLinear {
+            file,
+            originals,
+            base,
+            direction,
+            length,
+            occurrences,
+            reversed,
+            name,
+        } => pattern_linear(
+            &file,
+            &originals,
+            &base,
+            direction,
+            length,
+            occurrences,
+            reversed,
+            name.as_deref(),
+        ),
+        Command::PatternPolar {
+            file,
+            originals,
+            base,
+            axis,
+            angle,
+            occurrences,
+            reversed,
+            name,
+        } => pattern_polar(
+            &file,
+            &originals,
+            &base,
+            axis,
+            angle,
+            occurrences,
+            reversed,
+            name.as_deref(),
+        ),
         Command::Info { file } => info(&file),
         Command::Stats { file } => stats(&file),
         Command::Script { file } => crate::script::run(&file),
@@ -835,6 +875,124 @@ fn revolution(
         &mut journal,
         Box::new(feature),
         "revolution",
+    )
+}
+
+/// `pattern-linear FILE --originals F --base B --direction x|y|z --length L
+/// --occurrences N [--reversed]`: build a `PartDesign::LinearPattern`
+/// repeating feature F's tool along a direction — the boss grid, the row
+/// of holes. `Base` is the solid the copies apply to (the state before
+/// the original was applied, FreeCAD's `BaseFeature`); an additive
+/// original fuses, a pocket cuts. Patterning a pattern composes
+/// multiplicatively (see `docs/cli.md`).
+#[allow(clippy::too_many_arguments)]
+fn pattern_linear(
+    file: &str,
+    originals: &str,
+    base: &str,
+    direction: DirectionChoice,
+    length: f64,
+    occurrences: i64,
+    reversed: bool,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
+    for (label, object) in [("--originals", originals), ("--base", base)] {
+        if doc.get_by_name(object).is_none() {
+            return Err(format!(
+                "{label} object '{object}' not found in the document; available: {}",
+                names_list(&doc)
+            ));
+        }
+    }
+    let mut feature = LinearPatternFeature::new(name.unwrap_or("LinearPattern"));
+    feature.container.set(
+        "Originals",
+        Property::LinkSub(originals.to_string(), Vec::new()),
+    );
+    feature
+        .container
+        .set("Base", Property::Link(base.to_string()));
+    feature.container.set(
+        "Direction",
+        Property::Vector(match direction {
+            DirectionChoice::X => Vector3::new(1.0, 0.0, 0.0),
+            DirectionChoice::Y => Vector3::Y,
+            DirectionChoice::Z => Vector3::Z,
+        }),
+    );
+    feature.container.set("Length", Property::Float(length));
+    feature
+        .container
+        .set("Occurrences", Property::Integer(occurrences));
+    if reversed {
+        feature.container.set("Reversed", Property::Bool(true));
+    }
+    add_partdesign_feature(
+        file,
+        &mut doc,
+        &mut journal,
+        Box::new(feature),
+        "pattern-linear",
+    )
+}
+
+/// `pattern-polar FILE --originals F --base B --axis z|y --angle A
+/// --occurrences N [--reversed]`: build a `PartDesign::PolarPattern`
+/// repeating feature F's tool around an axis through the origin — the
+/// bolt circle. A full 360° spaces occurrences `360/N` apart (the last
+/// copy never stacks on the first); a partial arc spans
+/// `Angle/(N−1)`.
+#[allow(clippy::too_many_arguments)]
+fn pattern_polar(
+    file: &str,
+    originals: &str,
+    base: &str,
+    axis: AxisChoice,
+    angle: f64,
+    occurrences: i64,
+    reversed: bool,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let (mut doc, _) = load(file)?;
+    let mut journal = Journal::read(file)?;
+    for (label, object) in [("--originals", originals), ("--base", base)] {
+        if doc.get_by_name(object).is_none() {
+            return Err(format!(
+                "{label} object '{object}' not found in the document; available: {}",
+                names_list(&doc)
+            ));
+        }
+    }
+    let mut feature = PolarPatternFeature::new(name.unwrap_or("PolarPattern"));
+    feature.container.set(
+        "Originals",
+        Property::LinkSub(originals.to_string(), Vec::new()),
+    );
+    feature
+        .container
+        .set("Base", Property::Link(base.to_string()));
+    feature.container.set(
+        "Axis",
+        Property::Vector(match axis {
+            AxisChoice::Z => Vector3::Z,
+            AxisChoice::Y => Vector3::Y,
+        }),
+    );
+    feature.container.set("Angle", Property::Float(angle));
+    feature
+        .container
+        .set("Occurrences", Property::Integer(occurrences));
+    if reversed {
+        feature.container.set("Reversed", Property::Bool(true));
+    }
+    add_partdesign_feature(
+        file,
+        &mut doc,
+        &mut journal,
+        Box::new(feature),
+        "pattern-polar",
     )
 }
 

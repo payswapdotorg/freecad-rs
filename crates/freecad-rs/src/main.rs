@@ -203,6 +203,60 @@ pub enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// PartDesign::LinearPattern — repeat a feature's tool along a
+    /// direction (the boss grid, the row of holes).
+    PatternLinear {
+        file: String,
+        /// The feature being patterned (its tool gets copied).
+        #[arg(long)]
+        originals: String,
+        /// The solid the copies apply to (the state before the original
+        /// was applied — FreeCAD's BaseFeature).
+        #[arg(long)]
+        base: String,
+        /// Pattern direction.
+        #[arg(long, value_enum, default_value_t = DirectionChoice::X)]
+        direction: DirectionChoice,
+        /// Span between first and last occurrence (mm).
+        #[arg(long, default_value_t = 20.0)]
+        length: f64,
+        /// Number of occurrences (>= 2; occurrence 1 is the original).
+        #[arg(long, default_value_t = 2)]
+        occurrences: i64,
+        /// Pattern along -direction.
+        #[arg(long)]
+        reversed: bool,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// PartDesign::PolarPattern — repeat a feature's tool around an
+    /// axis (the bolt circle).
+    PatternPolar {
+        file: String,
+        /// The feature being patterned (its tool gets copied).
+        #[arg(long)]
+        originals: String,
+        /// The solid the copies apply to (the state before the original
+        /// was applied — FreeCAD's BaseFeature).
+        #[arg(long)]
+        base: String,
+        /// Rotation axis (through the origin).
+        #[arg(long, value_enum, default_value_t = AxisChoice::Z)]
+        axis: AxisChoice,
+        /// Swept arc in degrees (360 spaces occurrences 360/N apart).
+        #[arg(long, default_value_t = 360.0)]
+        angle: f64,
+        /// Number of occurrences (>= 2; occurrence 1 is the original).
+        #[arg(long, default_value_t = 2)]
+        occurrences: i64,
+        /// Pattern around -axis.
+        #[arg(long)]
+        reversed: bool,
+        /// Object name (auto-uniquified when taken).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Document metadata.
     Info { file: String },
     /// Per-object analytic volume / surface area.
@@ -271,6 +325,17 @@ pub enum AxisChoice {
     Z,
     /// The sketch's vertical axis (3D Y).
     Y,
+}
+
+/// The linear pattern direction choices (`pattern-linear --direction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DirectionChoice {
+    /// 3D X axis.
+    X,
+    /// 3D Y axis.
+    Y,
+    /// 3D Z axis.
+    Z,
 }
 
 #[derive(Subcommand)]

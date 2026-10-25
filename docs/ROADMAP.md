@@ -4,7 +4,7 @@ Honest, incremental, no vaporware.
 
 > **Verified baseline** — v0.1.7 (counted 2026-10-24; the counts
 > include the v0.1.8 exact seam weld in flight at count time): nine
-> crates, **497 tests** (per-crate counts and method in
+> crates, **512 tests** (per-crate counts and method in
 > [`VERIFICATION.md`](VERIFICATION.md) — the authoritative green run
 > is CI: `cargo build` / `cargo test --workspace --locked` /
 > `clippy --workspace --all-targets -- -D warnings` / `cargo fmt
@@ -214,7 +214,7 @@ Honest, incremental, no vaporware.
       tests), and **`fc-studio`** ([`studio/`](../studio/)), the
       workbench over it: document tree with status badges, property
       editor with live set→recompute and per-property expression
-      binding, add × 13 feature kinds (primitives, booleans,
+      binding, add × 15 feature kinds (primitives, booleans,
       sketch→pad/pocket/revolution, mirroring), undo/redo, `.FCStd`
       in/out (drag-and-drop), STL/OBJ export — all computed
       client-side, the viewport hand-rolled WebGL (zero JS
@@ -229,6 +229,33 @@ Honest, incremental, no vaporware.
       embedded as base64 — no server, works from `file://`), gated by
       a CI `studio` job (build + package + sanity checks) and a
       `release` workflow job that attaches the asset
+- [x] **v0.2.2** Feature patterns — the mechanical workflow
+      (recommendation #5 of the external review):
+      `PartDesign::LinearPattern` (Direction/Length/Occurrences —
+      spacing `Length/(N−1)`, occurrence 1 untransformed) and
+      `PartDesign::PolarPattern` (Axis/Angle/Occurrences — FreeCAD's
+      360° = 360/N rule so the last copy never stacks on the first).
+      The original's **tool** is re-derived from live properties on
+      every recompute (patterns are parametric through the whole
+      chain); additive originals fuse their copies, pockets cut them;
+      **nested patterns compose multiplicatively** (FreeCAD
+      `Transformed` semantics — the 2×2 hole grid from one pocket via
+      two chained linear patterns). Copies fold into one tool union
+      applied in a single boolean — set-theoretically identical to
+      per-copy folds and ~140× faster (the polar bolt circle went
+      from >4 min to 1.7 s). CLI verbs `pattern-linear` /
+      `pattern-polar`, `.FCStd` persistence round-trip, wasm kinds +
+      the studio Add menu. Acceptance-first (recommendation #6): the
+      E2E test `tests/mechanical_cli.rs` — the bracket plate (120×80
+      plate, 4 corner holes via nested patterns, 6-hole bolt circle
+      via polar, every intermediate volume asserted against
+      engine-measured tool volumes, parametric cascade, undo,
+      reload) — was written BEFORE the implementation and watched
+      fail. Browser-verified end-to-end in fc-studio: the same
+      bracket built through the real dialogs, exact volumes at every
+      step, the parametric cascade live, VLM-verified clean render
+      (the viewport now draws the tip — FreeCAD's Body→Tip rule —
+      instead of every cumulative solid, which z-fought)
 
 ## Next: the kernel exactness program (K1–K5)
 

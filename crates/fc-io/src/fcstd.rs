@@ -14,7 +14,9 @@ use fc_part::features::{
     BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature, MeshFeature,
     MirroringFeature, MultiFuseFeature, SphereFeature, TorusFeature, TransformFeature,
 };
-use fc_part::partdesign::{PadFeature, PocketFeature, RevolutionFeature};
+use fc_part::partdesign::{
+    LinearPatternFeature, PadFeature, PocketFeature, PolarPatternFeature, RevolutionFeature,
+};
 use fc_part::{TopoShape, DEFAULT_DEFLECTION};
 use fc_sketcher::constraint::Constraint;
 use fc_sketcher::geometry::Geometry;
@@ -1179,6 +1181,10 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<RevolutionFeature>() {
         f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<LinearPatternFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
+    } else if let Some(f) = any.downcast_ref::<PolarPatternFeature>() {
+        f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<MeshFeature>() {
         f.shape.clone()
     } else {
@@ -1316,6 +1322,8 @@ fn expects_geometry(type_name: &str) -> bool {
             | "PartDesign::Pad"
             | "PartDesign::Pocket"
             | "PartDesign::Revolution"
+            | "PartDesign::LinearPattern"
+            | "PartDesign::PolarPattern"
     )
 }
 
@@ -3920,6 +3928,16 @@ fn attach_shape(
             TopoShape::Mesh(mesh) => Some(mesh),
             other => Some(other.tessellate(DEFAULT_DEFLECTION)),
         };
+    } else if let Some(f) = any.downcast_mut::<LinearPatternFeature>() {
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
+    } else if let Some(f) = any.downcast_mut::<PolarPatternFeature>() {
+        f.result = match shape {
+            TopoShape::Mesh(mesh) => Some(mesh),
+            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
+        };
     } else {
         report.warnings.push(format!(
             "{owner}: object type carries no shape field — geometry skipped"
@@ -3955,6 +3973,8 @@ pub(crate) fn build_object(type_id: &str, name: &str) -> Option<Box<dyn fc_app::
         "PartDesign::Pad" => Some(Box::new(PadFeature::new(name))),
         "PartDesign::Pocket" => Some(Box::new(PocketFeature::new(name))),
         "PartDesign::Revolution" => Some(Box::new(RevolutionFeature::new(name))),
+        "PartDesign::LinearPattern" => Some(Box::new(LinearPatternFeature::new(name))),
+        "PartDesign::PolarPattern" => Some(Box::new(PolarPatternFeature::new(name))),
         "Sketcher::SketchObject" => Some(Box::new(SketchObject::new(name))),
         // Container / link / origin types: no geometry semantics of our
         // own — loaded as plain property containers (see `LoadContainer`)
