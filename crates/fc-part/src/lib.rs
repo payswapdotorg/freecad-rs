@@ -7,9 +7,11 @@
 //! serialization ("FCBREP"), and the classic part features wired into the
 //! `fc-app` recompute loop.
 //!
-//! What is **not** implemented (and honestly so): NURBS, fillets,
-//! chamfers, STEP/BREP interoperability with OCCT. Booleans run on
-//! tessellations with exact classification (see [`exact`]) — the
+//! What is **not** implemented (and honestly so): fillets, chamfers,
+//! OCCT BRep interoperability, and B-spline *booleans* (the exact
+//! topology model with NURBS curves/surfaces exists — [`topology`],
+//! K1 — but general intersections on it are K3/K4 work). Booleans run
+//! on tessellations with exact classification (see [`exact`]) — the
 //! volumes of curved operands agree to their deflection, and planar
 //! operands exactly.
 
@@ -21,8 +23,9 @@ pub mod features;
 pub mod partdesign;
 pub mod profile;
 pub mod shape;
+pub mod topology;
 
-pub use brep::{read_shape_bytes, write_shape, BrpError, BrpFormat};
+pub use brep::{read_brep_bytes, read_shape_bytes, write_brep, write_shape, BrpError, BrpFormat};
 pub use features::{
     mesh_of, shape_of, BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature,
     MeshFeature, MirroringFeature, SphereFeature, TorusFeature, TransformFeature,
@@ -33,3 +36,4 @@ pub use profile::{
     DEFAULT_PROFILE_DEFLECTION, DEFAULT_TOLERANCE,
 };
 pub use shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
+pub use topology::{Curve, ExactBRep, Surface, TopoEdge, TopoFace, TopoVertex, TopoWire, WireEdge};

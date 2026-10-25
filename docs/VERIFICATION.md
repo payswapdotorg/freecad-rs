@@ -9,9 +9,10 @@ because an external assessment (2026-10-24) demanded exactly that
 distinction; it is maintained by the same discipline as the honest
 list: a claim with no evidence gets marked, not made.
 
-- **As of:** 2026-10-24, `main` = v0.1.7 (575f3b4) plus the v0.1.8
-  exact-seam-weld diff in flight (the fc-part counts below include
-  its formerly-`#[ignore]`d crossing test, now running).
+- **As of:** 2026-10-25, `main` = the K1 exact-topology landing (after
+  v0.2.2's 03c6ce3): `fc-part` gains `topology.rs` (the exact BRep
+  model) and FCBREP v2 (the structural payload), with the 17
+  acceptance-first tests in `tests/topology.rs`.
 - **The authoritative green run is CI**
   ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)):
   `cargo build` / `cargo test --workspace --locked` /
@@ -26,9 +27,11 @@ list: a claim with no evidence gets marked, not made.
 | ◐ | verified against the real FreeCAD 1.0 binary (AppImage r39109) per [`EQUIVALENCE.md`](EQUIVALENCE.md) — manual/local today, the target of the `parity` gate |
 | ✗ | documented, no committed test |
 
-## Test counts (measured 2026-10-24)
+## Test counts (measured 2026-10-25)
 
-**497 tests** across ten crates. Method: `cargo test -p <crate> --
+**527 tests** across ten crates (516 built and listed locally on this
+station; `fc-wasm`'s 11 run in CI — this sandbox lacks the
+`wasm32-unknown-unknown` target). Method: `cargo test -p <crate> --
 --list` for the five crates this sandbox can build (exact: includes
 unit, integration and doc-test targets); `#[test]`-function count via
 grep for the four crates whose dependency builds did not fit the
@@ -40,15 +43,15 @@ or doc tests those counts would miss.
 |---|---:|---:|---:|---:|---|
 | `fc-base` | 0 | 58 (`tests/base.rs` 19, `tests/quantity.rs` 39) | 2 | **60** | listed |
 | `fc-app` | 60 (`expression.rs` 54, `recompute.rs` 6) | 37 (`tests/app.rs` 16, `tests/transaction.rs` 21) | 3 | **100** | listed |
-| `fc-part` | 94 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 15, `exact.rs` 8) | 15 (`tests/part.rs`) | 0 | **109** | listed |
+| `fc-part` | 102 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8) | 32 (`tests/part.rs` 15, `tests/topology.rs` 17) | 0 | **134** | listed |
 | `fc-sketcher` | 74 (`solver.rs` 40, `xml.rs` 11, `constraint.rs` 8, `sketch_object.rs` 9, `geometry.rs` 6) | 0 | 1 | **75** | listed |
-| `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 43 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2) | 0 | **63** | listed |
+| `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 46 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3) | 0 | **66** | listed |
 | `fc-step` | 0 | 6 (`tests/step.rs`) | 0 | **6** | grep |
 | `fc-viewer` | 16 (`camera.rs` 12, `scene.rs` 2, `pick.rs` 2) | 9 (`tests/scene_cpu.rs` 7, `tests/gpu_render.rs` 2) | 0 | **25** | grep |
 | `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | grep |
-| `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 19 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3) | 0 | **30** | grep |
+| `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 21 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3, `tests/mechanical_cli.rs` 2) | 0 | **32** | listed |
 | `fc-wasm` | 11 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths) | 0 | 0 | **11** | listed |
-| **Total** | | | | **497** | |
+| **Total** | | | | **527** | |
 
 Notes, honestly: `#[ignore]`d tests — none anywhere in `crates/**`
 at this writing (the one that used to exist, the rotated-crossing
@@ -88,6 +91,7 @@ without it they self-skip with a message and pass trivially.
 | 21 | Viewer — offscreen rendering, cameras, picking, error flags | ✔ `fc-viewer` `tests/scene_cpu.rs` (7: `demo_scene_loads_all_four_objects`, `ball_centroid_pixel_picks_the_nearest_object`, `error_doc_scene_flags_the_broken_object_with_geometry`, …); unit `camera.rs` (12: `world_to_camera_of_standard_views_is_svg_matrix`, `orbit_keeps_target_fixed_and_basis_orthonormal`, …), `pick.rs` (2); `tests/gpu_render.rs`: `golden_iso_frame_matches`, `error_doc_renders_without_crashing_and_shows_the_flag` — assert only under `FC_VIEWER_GPU=1` | CPU suite: CI build job; GPU pair: CI viewer job (lavapipe) | — (rendering parity is against our own SVG cameras and committed goldens, not the FreeCAD binary) | — |
 | 22 | Rhai embedded scripting (`fc-script`) | ✔ `fc-script` `tests/api.rs` (18: `primitives_add_recompute_and_exact_stats`, `sandbox_operation_budget_stops_runaway_loops`, `recompute_failure_is_recorded_and_stats_fail_honestly`, `save_and_open_round_trip_exactly`, …); CLI `tests/script_cli.rs` (5: `example_script_builds_document_with_exact_stats`, `script_with_failed_recompute_exits_nonzero_with_the_error`, …) | CI build job | — (the script API is our own surface; it drives the same tested document engine) | — |
 | 23 | CLI (`FreeCADCmd` distillate) — verbs, exit codes, journals | ✔ `freecad-rs` `tests/sketch_cli.rs`, `tests/mirroring_cli.rs`, `tests/partdesign_cli.rs`, `tests/script_cli.rs` (19 total, e.g. `cli_sketch_golden_path_from_new_to_export`, `cli_revolution_sweeps_a_half_disc_into_a_sphere`); unit `src/calc.rs` (11); `fc-app` `tests/transaction.rs`'s two `cli_*` tests | CI build job | ◐ via the file format (every CLI verb's output is verified by loading what it wrote in real FreeCAD — [EQUIVALENCE](EQUIVALENCE.md) both-direction sections) | — |
+| 24 | Exact topology model (K1) — vertices/edges/faces with parametric curves & surfaces; exact primitive generators; FCBREP v2 round-trip | ✔ `fc-part` `tests/topology.rs` (17, acceptance-first): `box_topology_is_exact_and_closed`, `cylinder_topology_is_exact_and_closed`, `cone_frustum_topology_is_exact_and_closed`, `plain_cone_topology_has_a_degenerate_apex`, `sphere_topology_has_a_seam_and_degenerate_poles`, `torus_topology_has_two_periodic_seams`, `bspline_curve_evaluation_is_de_boor`, `bspline_surface_bilinear_patch`, `brep_round_trip_all_primitives_is_byte_identical`, `bspline_payloads_round_trip`, `malformed_v2_payloads_report_line_numbers`, `v1_and_v2_readers_reject_cross_versions`, `mesh_shapes_have_no_exact_topology`, `validate_catches_structural_breaks`, `surface_evaluation_matches_analytic_geometry`, `sphere_evaluation_is_spherical_coordinates`, `curve_derivatives_have_the_right_magnitudes` | CI build job | — (the model's parameterizations follow the OCCT conventions the EQUIVALENCE table already pins for the analytic kinds; no FreeCAD round-trip of v2 payloads yet) | — |
 
 ## What is only manual today
 

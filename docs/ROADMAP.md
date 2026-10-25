@@ -265,10 +265,29 @@ pure-Rust exactness as its own program, with its own milestones —
 not an OCCT wrapper. Each lands with committed tests; K2 is already
 behind us.
 
-- [ ] **K1** exact topology model — vertices/edges/faces carrying
-      parametric curves & surfaces (line, circle, ellipse, plane,
-      cylinder, cone, sphere, torus, B-spline); structural BRep
-      payload round-trip
+- [x] **K1** exact topology model — `fc-part` `topology.rs` + FCBREP v2:
+      vertices/edges/faces carrying parametric curves & surfaces (line,
+      circle, ellipse, plane, cylinder, cone, sphere, torus, rational
+      B-spline — de Boor evaluation and derivatives, quotient rule for
+      the weighted ones). Exact generators for the five analytic
+      primitives: closed edges carry one vertex, the sphere poles and
+      plain-cone apex are zero-radius degenerate circles (excluded from
+      the Euler count — `V − E_nd + F` gives 2/2/2/2/0), every
+      non-degenerate edge is used exactly twice (closed shells), edge
+      endpoints are bit-exact against the vertex table (a closed edge's
+      range end denotes the closure — full-turn trig is not
+      bit-reproducible at 2π, and the model says so), wires are closed
+      vertex-continuous loops, and the structural payload round-trips
+      byte-identically (FCBREP v2 in `brep.rs`, strict line-numbered
+      parser; v1 primitive payloads still parse, cross-version reads
+      refuse honestly). The sphere's surface follows OCCT's latitude
+      convention (`p = r·(cos v·ring(u) + sin v·axis)`, ∂u×∂v outward).
+      Acceptance-first: the 17-test suite in
+      `crates/fc-part/tests/topology.rs` was written and watched
+      failing before the implementation; it caught the sphere
+      parameterization bug (a colatitude/latitude mixup that
+      double-covered the northern hemisphere) and the torus/sphere
+      ring-component swaps before they could ship
 - [x] **K2** robust predicates — **done in v0.1.7**: exact
       classification (`crates/fc-part/src/exact.rs`; the 1e-6
       blind-spot golden test)
