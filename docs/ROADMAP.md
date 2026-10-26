@@ -354,9 +354,36 @@ behind us.
       own stored axis — wrong by the apex offset for every
       antiparallel-stored (contracting-frustum) cone; fixed with
       signed slopes in `cylinder_cone` and `cone_cone`
-- [ ] **K3 (remaining)** exact booleans on analytic surfaces
-      composing the K3a sections — the intersections half of K3's
-      acceptance (the OCCT differential corpus) is now closed
+- [x] **K3c-1 (landing 2026-10-26)** exact B-rep booleans composing
+      the sections — the sphere×sphere family
+      (`crates/fc-part/src/brep_boolean.rs`): the three booleans are
+      the four face choices around the shared radical-plane circle
+      (the K3a construction, reused bit-identically as the single
+      edge) — Common = both caps (the lens), Cut = A's complement +
+      the tool's cap as the cut wall (the crescent), Fuse = both
+      complements (the peanut) — each a 2-face, 1-edge, 1-vertex
+      closed solid with Euler 2 and `validate()` green. The wire
+      orientation convention (kept region on the left of the
+      traversal viewed from the face's OUTWARD normal) encodes what
+      OCCT calls TopoDS_REVERSED, which is why trimmed faces need no
+      extra orientation field — and the cut wall (solid on the
+      OUTSIDE of the tool sphere) is the case that exercises it.
+      Exact non-secant classification (expansion signs) with honest
+      pass-throughs (whole spheres, empty results) and refusals by
+      name: contained cuts (an internal void needs a face-orientation
+      flag for untrimmed periodic faces — K4 territory) and
+      disjoint/tangent fuses (multi-shell compounds, point
+      junctions). 7 acceptance-first tests (`tests/brep_boolean.rs`):
+      topology, validation, the bit-identical K3a circle, opposite
+      traversals, cap-apex side checks, cap-formula volume partition
+      identities (V_lens + V_(A−B) = V_a; V_fuse + V_lens = V_a +
+      V_b), FCBREP v2 round-trip, and the d1 line probe. They caught
+      the author's own inverted containment sign and the missing
+      cut-wall reversal before either could ship
+- [ ] **K3 (remaining)** exact booleans on the wider analytic-pair
+      set (plane-cut primitives, cylinder×cylinder, coaxial
+      families) and the OCCT differential corpus for the boolean
+      results; exact volume/area on composed B-reps
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets

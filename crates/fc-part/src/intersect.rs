@@ -105,14 +105,14 @@ const PARALLEL_BAND: f64 = 4.414_273_778_205_676e-15; // 2^-48
 // ---------------------------------------------------------------------------
 
 /// The exact product `a·b` as a (value, error) pair.
-fn two_prod(a: f64, b: f64) -> (f64, f64) {
+pub(crate) fn two_prod(a: f64, b: f64) -> (f64, f64) {
     let p = a * b;
     let e = a.mul_add(b, -p);
     (p, e)
 }
 
 /// The exact sum `a + b` as a (value, error) pair.
-fn two_sum(a: f64, b: f64) -> (f64, f64) {
+pub(crate) fn two_sum(a: f64, b: f64) -> (f64, f64) {
     let s = a + b;
     let bb = s - a;
     let e = (a - (s - bb)) + (b - bb);
@@ -137,7 +137,7 @@ fn accumulate(partials: &mut Vec<f64>, mut x: f64) {
 }
 
 /// The sign of the exact sum of `terms` (−1, 0, +1).
-fn exact_sum_sign(terms: &[f64]) -> i8 {
+pub(crate) fn exact_sum_sign(terms: &[f64]) -> i8 {
     let mut partials: Vec<f64> = Vec::with_capacity(terms.len());
     for &t in terms {
         accumulate(&mut partials, t);
@@ -157,7 +157,7 @@ fn exact_sum_sign(terms: &[f64]) -> i8 {
 
 /// The exact sum of `terms`, rounded to one `f64` (partials summed
 /// smallest-first; correctly rounded to ≤ 1 ulp in all cases).
-fn exact_sum_rounded(terms: &[f64]) -> f64 {
+pub(crate) fn exact_sum_rounded(terms: &[f64]) -> f64 {
     let mut partials: Vec<f64> = Vec::with_capacity(terms.len());
     for &t in terms {
         accumulate(&mut partials, t);
@@ -195,7 +195,7 @@ fn diff_products_rounded(a: f64, b: f64, c: f64, d: f64) -> f64 {
 
 /// The exact dot product's terms, as expansion input: the six exact
 /// halves of the three coordinate products.
-fn dot_terms(a: Vector3, b: Vector3) -> Vec<f64> {
+pub(crate) fn dot_terms(a: Vector3, b: Vector3) -> Vec<f64> {
     let (xh, xe) = two_prod(a.x, b.x);
     let (yh, ye) = two_prod(a.y, b.y);
     let (zh, ze) = two_prod(a.z, b.z);
@@ -272,7 +272,7 @@ fn lex_after(a: &[f64], b: &[f64]) -> bool {
 }
 
 /// The squared length's exact expansion terms (three `two_prod`s).
-fn length_squared_terms(v: Vector3) -> Vec<f64> {
+pub(crate) fn length_squared_terms(v: Vector3) -> Vec<f64> {
     let (xh, xe) = two_prod(v.x, v.x);
     let (yh, ye) = two_prod(v.y, v.y);
     let (zh, ze) = two_prod(v.z, v.z);

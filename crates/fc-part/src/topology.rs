@@ -1546,7 +1546,7 @@ fn cone_topology(r1: f64, r2: f64, h: f64) -> ExactBRep {
 /// degenerate pole circles are centered on exactly those points, so
 /// every endpoint stays bit-exact (the poles carry trigonometry's
 /// last-ulp noise by construction — see the module docs).
-fn sphere_topology(r: f64) -> ExactBRep {
+pub(crate) fn sphere_topology(r: f64) -> ExactBRep {
     let mut b = EdgeBuilder::new();
 
     // The seam runs south → north through +X (axis −Y so increasing

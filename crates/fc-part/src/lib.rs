@@ -20,6 +20,7 @@ mod exact;
 
 pub mod boolean;
 pub mod brep;
+pub mod brep_boolean;
 pub mod features;
 pub mod intersect;
 pub mod partdesign;
