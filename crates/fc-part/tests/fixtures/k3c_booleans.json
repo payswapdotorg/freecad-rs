@@ -1,0 +1,356 @@
+{
+ "cases": [
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cylinder_oblique_general",
+   "plane_normal": [
+    0.6,
+    0.0,
+    0.8
+   ],
+   "plane_point": [
+    0.5,
+    -0.3,
+    3.5
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "height": 5.0,
+    "kind": "Cylinder",
+    "origin": [
+     0.5,
+     -0.3,
+     1.0
+    ],
+    "radius": 2.0
+   },
+   "results": [
+    {
+     "area": 59.690260510858174,
+     "empty": false,
+     "op": "cut",
+     "volume": 31.41592663793313
+    },
+    {
+     "area": 59.69026032555394,
+     "empty": false,
+     "op": "common",
+     "volume": 31.41592643386273
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cylinder_oblique_flipped",
+   "plane_normal": [
+    -0.6,
+    0.0,
+    -0.8
+   ],
+   "plane_point": [
+    0.5,
+    -0.3,
+    3.5
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "height": 5.0,
+    "kind": "Cylinder",
+    "origin": [
+     0.5,
+     -0.3,
+     1.0
+    ],
+    "radius": 2.0
+   },
+   "results": [
+    {
+     "area": 59.69026032419594,
+     "empty": false,
+     "op": "cut",
+     "volume": 31.415926432970252
+    },
+    {
+     "area": 59.69026051221618,
+     "empty": false,
+     "op": "common",
+     "volume": 31.415926638825606
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cylinder_oblique_tilted_axis",
+   "plane_normal": [
+    0.5050762722761053,
+    -0.3030457633656632,
+    0.8081220356417687
+   ],
+   "plane_point": [
+    0.6513240262614719,
+    0.375662013130736,
+    1.8566201313073598
+   ],
+   "primitive": {
+    "axis": [
+     0.19518001458970666,
+     0.09759000729485333,
+     0.9759000729485332
+    ],
+    "height": 4.0,
+    "kind": "Cylinder",
+    "origin": [
+     0.3,
+     0.2,
+     0.1
+    ],
+    "radius": 1.5
+   },
+   "results": [
+    {
+     "area": 32.2749600637003,
+     "empty": false,
+     "op": "cut",
+     "volume": 12.723450190791633
+    },
+    {
+     "area": 36.044871431752775,
+     "empty": false,
+     "op": "common",
+     "volume": 15.550883691516521
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cylinder_perpendicular",
+   "plane_normal": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "plane_point": [
+    0.5,
+    -0.3,
+    3.0
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "height": 5.0,
+    "kind": "Cylinder",
+    "origin": [
+     0.5,
+     -0.3,
+     1.0
+    ],
+    "radius": 2.0
+   },
+   "results": [
+    {
+     "area": 50.26548245743668,
+     "empty": false,
+     "op": "cut",
+     "volume": 25.13274122871834
+    },
+    {
+     "area": 62.831853071795855,
+     "empty": false,
+     "op": "common",
+     "volume": 37.69911184307752
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cone_oblique_plain",
+   "plane_normal": [
+    0.28,
+    0.0,
+    0.96
+   ],
+   "plane_point": [
+    0.0,
+    0.0,
+    2.0
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "base_radius": 3.0,
+    "height": 4.0,
+    "kind": "Cone",
+    "origin": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "top_radius": 0.0
+   },
+   "results": [
+    {
+     "area": 70.64317007542364,
+     "empty": false,
+     "op": "cut",
+     "volume": 32.62705465447177
+    },
+    {
+     "area": 20.605232379531557,
+     "empty": false,
+     "op": "common",
+     "volume": 5.072057197862938
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cone_oblique_frustum",
+   "plane_normal": [
+    0.28,
+    0.0,
+    0.96
+   ],
+   "plane_point": [
+    0.0,
+    0.0,
+    2.0
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "base_radius": 3.0,
+    "height": 4.0,
+    "kind": "Cone",
+    "origin": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "top_radius": 1.0
+   },
+   "results": [
+    {
+     "area": 75.99651254930157,
+     "empty": false,
+     "op": "cut",
+     "volume": 39.24442921128767
+    },
+    {
+     "area": 38.65580456534899,
+     "empty": false,
+     "op": "common",
+     "volume": 15.209843448742962
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cone_oblique_frustum_flipped",
+   "plane_normal": [
+    -0.28,
+    0.0,
+    -0.96
+   ],
+   "plane_point": [
+    0.0,
+    0.0,
+    2.0
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "base_radius": 3.0,
+    "height": 4.0,
+    "kind": "Cone",
+    "origin": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "top_radius": 1.0
+   },
+   "results": [
+    {
+     "area": 38.655804534081405,
+     "empty": false,
+     "op": "cut",
+     "volume": 15.209843433171782
+    },
+    {
+     "area": 75.99651258056922,
+     "empty": false,
+     "op": "common",
+     "volume": 39.24442923617886
+    }
+   ]
+  },
+  {
+   "freecad": "1.0.0 (conda AppImage r39109)",
+   "name": "cone_perpendicular_plain",
+   "plane_normal": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "plane_point": [
+    0.0,
+    0.0,
+    2.0
+   ],
+   "primitive": {
+    "axis": [
+     0.0,
+     0.0,
+     1.0
+    ],
+    "base_radius": 3.0,
+    "height": 4.0,
+    "kind": "Cone",
+    "origin": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "top_radius": 0.0
+   },
+   "results": [
+    {
+     "area": 70.68583470577035,
+     "empty": false,
+     "op": "cut",
+     "volume": 32.98672286269282
+    },
+    {
+     "area": 18.84955592153876,
+     "empty": false,
+     "op": "common",
+     "volume": 4.71238898038469
+    }
+   ]
+  }
+ ],
+ "freecad": "1.0.0 (conda AppImage r39109)",
+ "generator": "scripts/parity/regen_k3c_booleans.py",
+ "note": "OCCT's Volume()/Area() on analytic B-reps is adaptive quadrature; the Rust differential pins the observed agreement (see tests/measure_differential.rs).",
+ "tool": "Part.cut / Part.common with a generous box proxying the +n halfspace"
+}

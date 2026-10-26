@@ -465,11 +465,23 @@ behind us.
       + 2 in `tests/measure.rs`); the measure-recognition refusals
       pinned by hand-built shells (an ellipse not on the surface, a
       sinusoid touching the rim).
+- [x] **K3c differential (landing 2026-10-26)** the OCCT corpus for
+      the boolean results — `scripts/parity/regen_k3c_booleans.py`
+      generates, through the parity gate's pinned FreeCAD 1.0
+      AppImage, OCCT's own `cut`/`common` volumes and boundary areas
+      for the eight canonical plane-cut configurations (general
+      oblique, flipped normals, a tilted cylinder axis, perpendicular
+      sections; the plain cone, the frustum) into the committed
+      `crates/fc-part/tests/fixtures/k3c_booleans.json`. The
+      differential (`tests/measure_differential.rs`): our exact
+      composition + closed-form measure agrees with OCCT's quadrature
+      to 4.4e-9 relative (volume) / 2.8e-9 (area) — the perpendicular
+      sections came out bit-exact. The halfspace tool is proxied by a
+      generous box (an order of magnitude larger than the operand),
+      one face ON the cutting plane — the honest proxy is recorded in
+      the JSON itself.
 - [ ] **K3 (remaining)** the wider analytic-pair booleans
-      (cylinder×cylinder, the coaxial families) and the OCCT
-      differential corpus for the boolean results (volumes vs
-      FreeCAD's `cut`/`common`/`fuse` — the measure module is the
-      comparison side)
+      (cylinder×cylinder, the coaxial families)
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets
