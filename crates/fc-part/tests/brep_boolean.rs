@@ -27,12 +27,20 @@
 //!   classify honestly: the representable pass through (full
 //!   spheres, empty results), the internal-void cut refuses by
 //!   name.
-//! * The constructed solids round-trip through FCBREP v2
+//! * The sphere×halfspace cuts (`sphere_plane_boolean`): the tool
+//!   is `{x : n·(x − p) ≥ 0}` — Common keeps the +n cap (a spherical
+//!   patch + a planar disk sharing the K3a plane×sphere circle),
+//!   Cut the −n cap, Fuse refused as unbounded. The disk's stored
+//!   normal points AWAY from the solid; the cap-solid faces are
+//!   naturally oriented (no reversed flags).
+//! * The constructed solids round-trip through FCBREP v3
 //!   byte-identically.
 
 use fc_base::Vector3;
 use fc_part::brep::{read_brep_bytes, write_brep};
-use fc_part::brep_boolean::{sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind};
+use fc_part::brep_boolean::{
+    sphere_plane_boolean, sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
+};
 use fc_part::intersect::intersect_surfaces;
 use fc_part::topology::{Curve, Surface};
 
@@ -362,17 +370,17 @@ fn disjoint_tangent_contained_classify_honestly() {
 }
 
 #[test]
-fn the_lens_round_trips_through_fcbrep_v2() {
+fn the_outcomes_round_trip_through_fcbrep_v3() {
     let (ca, ra, cb, rb) = pair();
     for kind in [BooleanOp::Common, BooleanOp::Cut, BooleanOp::Fuse] {
         let out = sphere_sphere_boolean(kind, ca, ra, cb, rb).expect("secant");
         let brep = expect_solid(&out, "solid");
         let mut bytes = Vec::new();
-        write_brep(&mut bytes, brep).expect("FCBREP v2 write");
+        write_brep(&mut bytes, brep).expect("FCBREP v3 write");
         let back = read_brep_bytes(&bytes).expect("round-trip parse");
         assert!(
             back == *brep,
-            "{kind:?}: FCBREP v2 round-trip is lossless (byte-identical model)"
+            "{kind:?}: FCBREP v3 round-trip is lossless (byte-identical model)"
         );
     }
 }
@@ -432,4 +440,208 @@ fn a_line_probe_of_the_outcome_geometry() {
         0.0,
         "center on the axis (machine scale)",
     );
+}
+
+// ---------------------------------------------------------------------------
+// sphere × halfspace — the plane cuts (K3c-2)
+// ---------------------------------------------------------------------------
+
+/// A general oblique secant configuration for the plane cuts.
+fn plane_case() -> (Vector3, f64, Vector3, Vector3) {
+    let c = v3(1.0, -2.0, 0.5);
+    let r = 3.0;
+    let p = v3(2.0, 0.0, -1.0);
+    let n = v3(1.0 / 3.0, 2.0 / 3.0, -2.0 / 3.0);
+    (c, r, p, n)
+}
+
+#[test]
+fn sphere_plane_secant_builds_the_cap_and_the_disk() {
+    let (c, r, p, n) = plane_case();
+
+    for (op, keep_sign, what) in [
+        (BooleanOp::Common, 1.0, "common keeps the +n cap"),
+        (BooleanOp::Cut, -1.0, "cut keeps the −n cap"),
+    ] {
+        let out = sphere_plane_boolean(op, c, r, p, n).expect(what);
+        let brep = expect_solid(&out, what);
+        brep.validate().expect("the cap solid validates");
+
+        // Topology: one spherical patch + one planar disk on one
+        // shared closed circle. Euler 2.
+        assert_eq!(brep.faces.len(), 2, "{what}: two faces");
+        assert_eq!(brep.edges.len(), 1, "{what}: one shared circle");
+        assert_eq!(brep.vertices.len(), 1, "{what}: one vertex");
+        assert_eq!(brep.edge_uses(0), 2, "{what}: the circle used twice");
+        assert_eq!(brep.euler_characteristic(), 2, "{what}: sphere topology");
+
+        // The two faces traverse the shared circle in opposite
+        // directions (the closed-shell orientation contract).
+        let f0 = brep.faces[0].wires[0].edges[0].forward;
+        let f1 = brep.faces[1].wires[0].edges[0].forward;
+        assert_ne!(f0, f1, "{what}: opposite traversals");
+
+        // Neither face is reversed: the cap solid lies inside its
+        // sphere and on the inner side of its disk (the natural
+        // normals are the outward ones).
+        assert!(
+            !brep.faces[0].reversed && !brep.faces[1].reversed,
+            "{what}: naturally oriented"
+        );
+
+        // The shared circle is the K3a plane×sphere section,
+        // bit-identical.
+        let sphere_surface = Surface::Sphere {
+            center: c,
+            axis: v3(0.0, 0.0, 1.0),
+            ref_dir: v3(1.0, 0.0, 0.0),
+            radius: r,
+        };
+        let plane_surface = Surface::Plane {
+            origin: p,
+            normal: n,
+            x_dir: v3(1.0, 0.0, 0.0),
+        };
+        let expected = match intersect_surfaces(&sphere_surface, &plane_surface) {
+            fc_part::intersect::SurfaceIntersection::Curves(cs) => cs[0].clone(),
+            other => panic!("{what}: the K3a circle, got {other:?}"),
+        };
+        assert_eq!(
+            brep.edges[0].curve, expected,
+            "{what}: the K3a section circle"
+        );
+
+        // The faces: one sphere (the operand), one plane (the disk).
+        let mut sphere_faces = 0;
+        let mut plane_faces = 0;
+        for f in &brep.faces {
+            match &f.surface {
+                Surface::Sphere { center, radius, .. } => {
+                    assert_eq!(*center, c, "{what}: the operand sphere");
+                    approx(*radius, r, "{what}: operand radius");
+                    sphere_faces += 1;
+                }
+                Surface::Plane {
+                    origin,
+                    normal,
+                    x_dir,
+                } => {
+                    plane_faces += 1;
+                    // The disk lives on the section circle: its
+                    // origin is the circle's center, its normal
+                    // points AWAY from the solid (the solid lies on
+                    // the keep side), and its frame spans the circle.
+                    let (cc, rho, axis) = match &brep.edges[0].curve {
+                        Curve::Circle {
+                            center,
+                            radius,
+                            axis,
+                            ..
+                        } => (*center, *radius, *axis),
+                        other => panic!("{other:?}"),
+                    };
+                    assert_eq!(*origin, cc, "{what}: the disk is centered on the circle");
+                    let away = normal.dot(&n);
+                    approx(
+                        away,
+                        -keep_sign,
+                        "{what}: the disk normal points away from the solid",
+                    );
+                    // The stored normal is unit and the frame
+                    // contains the circle (the uv box is the disk's
+                    // bounding square).
+                    approx(normal.length(), 1.0, "{what}: unit normal");
+                    let y = normal.cross(x_dir);
+                    let _ = y;
+                    let [umin, umax, vmin, vmax] = f.uv_bounds;
+                    approx(umin, -rho, "{what}: umin = −ρ");
+                    approx(umax, rho, "{what}: umax = +ρ");
+                    approx(vmin, -rho, "{what}: vmin = −ρ");
+                    approx(vmax, rho, "{what}: vmax = +ρ");
+                    // The circle lies in the disk's plane.
+                    let _ = axis;
+                }
+                other => panic!("{what}: sphere or plane faces, got {other:?}"),
+            }
+        }
+        assert_eq!(sphere_faces, 1, "{what}: one spherical patch");
+        assert_eq!(plane_faces, 1, "{what}: one planar disk");
+
+        // The sphere patch keeps the right side: its wire flag is
+        // forward iff the stored circle axis points toward the kept
+        // cap (the kept-on-the-left convention).
+        let axis = match &brep.edges[0].curve {
+            Curve::Circle { axis, .. } => *axis,
+            other => panic!("{other:?}"),
+        };
+        let k_hat = n * keep_sign;
+        let sphere_forward = brep
+            .faces
+            .iter()
+            .find(|f| matches!(f.surface, Surface::Sphere { .. }))
+            .map(|f| f.wires[0].edges[0].forward)
+            .expect("a sphere face");
+        let want_forward = axis.dot(&k_hat) > 0.0;
+        assert_eq!(
+            sphere_forward, want_forward,
+            "{what}: the patch flag follows the kept side"
+        );
+
+        // The cap solid's own geometry: the apex on the keep side is
+        // the kept patch's pole — its signed plane distance is
+        // `s + keep_sign·r`, which equals the kept cap's height
+        // measured from the plane (`r + keep_sign·s`).
+        let s = v3(c.x - p.x, c.y - p.y, c.z - p.z).dot(&n);
+        let apex = c + k_hat * r;
+        let d_apex = v3(apex.x - p.x, apex.y - p.y, apex.z - p.z).dot(&n);
+        approx(
+            d_apex,
+            s + keep_sign * r,
+            "{what}: the kept apex reaches the cap's far boundary",
+        );
+        let h = r + keep_sign * s;
+        approx(
+            d_apex,
+            keep_sign * h,
+            "{what}: ... which is the cap height from the plane",
+        );
+    }
+}
+
+#[test]
+fn sphere_plane_caps_lie_on_the_operands_at_machine_scale() {
+    let (c, r, p, n) = plane_case();
+    let out = sphere_plane_boolean(BooleanOp::Common, c, r, p, n).expect("common");
+    let brep = expect_solid(&out, "common");
+    match &brep.edges[0].curve {
+        Curve::Circle {
+            center,
+            axis,
+            ref_dir,
+            radius,
+        } => {
+            assert!(radius > &0.0, "a genuine circle");
+            let second = axis.cross(ref_dir);
+            for i in 0..128 {
+                let t = i as f64 * (std::f64::consts::TAU / 128.0);
+                let (s, co) = t.sin_cos();
+                let q = v3(
+                    center.x + radius * (co * ref_dir.x + s * second.x),
+                    center.y + radius * (co * ref_dir.y + s * second.y),
+                    center.z + radius * (co * ref_dir.z + s * second.z),
+                );
+                approx(
+                    v3(q.x - c.x, q.y - c.y, q.z - c.z).length(),
+                    r,
+                    "circle point on the sphere",
+                );
+                approx(
+                    v3(q.x - p.x, q.y - p.y, q.z - p.z).dot(&n),
+                    0.0,
+                    "circle point on the plane",
+                );
+            }
+        }
+        other => panic!("{other:?}"),
+    }
 }

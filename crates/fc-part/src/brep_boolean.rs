@@ -16,22 +16,37 @@
 //! **left of the outer wire's traversal viewed from the face's
 //! OUTWARD normal** (away from the solid; the K1 sphere's `∂u×∂v` is
 //! outward, so faces whose solid lies inside their sphere use it
-//! directly, and faces whose solid lies OUTSIDE — a cut wall — read
-//! it negated). The wire traversal flag thereby encodes what OCCT
-//! calls `TopoDS_REVERSED`; that is why trimmed faces need no extra
-//! orientation field, and why the two faces of any outcome traverse
-//! the shared circle in opposite directions — the closed-shell edge
-//! contract `validate()` checks.
+//! directly). K3c-1 believed the wire flag alone sufficed — it does
+//! not: Cut and Fuse of a secant pair emitted byte-identical face
+//! lists (the crescent's cut wall and the peanut's complement face
+//! share surface, wire, and flag, and differ only in which side of
+//! the surface the solid lies on). K3c-2 therefore carries the
+//! orientation explicitly on [`TopoFace::reversed`] — what OCCT
+//! calls `TopoDS_REVERSED` — and the wire flags are set against the
+//! OUTWARD normal, `reversed` telling the reader which normal that
+//! is. The two faces of any outcome still traverse the shared
+//! circle in opposite directions — the closed-shell edge contract
+//! `validate()` checks.
 //!
 //! Honest refusals, by name:
 //! * a **contained cut** leaves an internal void — the K1 model has
 //!   no face-orientation flag for untrimmed periodic faces yet;
 //! * a **disjoint or tangent fuse** is a multi-shell compound or a
-//!   point-junction — not a single closed shell.
+//!   point-junction — not a single closed shell;
+//! * a **halfspace fuse** (`sphere_plane_boolean`) is an unbounded
+//!   solid.
 //!
 //! Non-secant but representable configurations pass through: the
 //! whole-sphere generators (translated to their centers) and empty
 //! results.
+//!
+//! The plane cuts (K3c-2): `sphere_plane_boolean` composes the K3a
+//! plane×sphere section circle into a cap solid — a spherical patch
+//! and a planar disk sharing the circle (Common keeps the +normal
+//! cap, Cut the −normal one). The disk's plane frame is the
+//! circle's own (`x_dir` = the circle's `ref_dir`), so its UV box is
+//! exactly `[−ρ, ρ]²`. Both faces are naturally oriented — the cap
+//! solid lies inside its sphere and on the inner side of its disk.
 
 use fc_base::Vector3;
 
@@ -108,7 +123,9 @@ fn v3(x: f64, y: f64, z: f64) -> Vector3 {
 }
 
 /// Exact helpers re-used from the K3a classification tier.
-use crate::intersect::{exact_sum_rounded, exact_sum_sign, length_squared_terms, two_prod};
+use crate::intersect::{
+    dot_terms, exact_sum_rounded, exact_sum_sign, length_squared_terms, two_prod,
+};
 
 /// The sign of `d² − (r1 + r2)²` exactly (both squares exact).
 fn cmp_exterior(c1: Vector3, c2: Vector3, r1: f64, r2: f64) -> i8 {
@@ -274,7 +291,7 @@ pub fn sphere_sphere_boolean(
         end: 0,
     };
 
-    let face_of = |surface: Surface, forward: bool| TopoFace {
+    let face_of = |surface: Surface, forward: bool, reversed: bool| TopoFace {
         surface,
         uv_bounds: [
             0.0,
@@ -285,6 +302,7 @@ pub fn sphere_sphere_boolean(
         wires: vec![TopoWire {
             edges: vec![WireEdge { edge: 0, forward }],
         }],
+        reversed,
     };
     let surface_a = Surface::Sphere {
         center: ca,
@@ -303,19 +321,28 @@ pub fn sphere_sphere_boolean(
     // region lies on the LEFT of the traversal viewed from the face's
     // OUTWARD normal (away from the solid). Four face-uses exist; the
     // tool's cap in a cut is the one REVERSED face — the solid lies
-    // on the OUTSIDE of the tool sphere there, flipping its traversal
-    // a second time (the wire flag encodes what OCCT would call
-    // TopoDS_REVERSED, which is why no face-orientation field is
-    // needed for trimmed faces).
+    // on the OUTSIDE of the tool sphere there, so the outward normal
+    // is the natural one negated and the traversal is set against
+    // THAT (the `reversed` flag is what makes the pair readable;
+    // before it, Cut and Fuse were byte-identical — see K3c-2).
     let cap_a = a_forward; // A's cap, solid inside A
     let cap_b = !a_forward; // B's cap, solid inside B
     let hole_a = !cap_a; // A's complement, solid inside A
     let cut_wall_b = !cap_b; // B's cap as a cut wall: solid OUTSIDE B
 
     let faces = match op {
-        BooleanOp::Common => vec![face_of(surface_a, cap_a), face_of(surface_b, cap_b)],
-        BooleanOp::Cut => vec![face_of(surface_a, hole_a), face_of(surface_b, cut_wall_b)],
-        BooleanOp::Fuse => vec![face_of(surface_a, hole_a), face_of(surface_b, !cap_b)],
+        BooleanOp::Common => vec![
+            face_of(surface_a, cap_a, false),
+            face_of(surface_b, cap_b, false),
+        ],
+        BooleanOp::Cut => vec![
+            face_of(surface_a, hole_a, false),
+            face_of(surface_b, cut_wall_b, true),
+        ],
+        BooleanOp::Fuse => vec![
+            face_of(surface_a, hole_a, false),
+            face_of(surface_b, !cap_b, false),
+        ],
     };
 
     let brep = ExactBRep {
@@ -351,4 +378,198 @@ fn circle_point(c: &Curve, t: f64) -> Vector3 {
         }
         other => panic!("circle_point on a non-circle {other:?}"),
     }
+}
+
+/// The exact B-rep boolean of a sphere with the halfspace tool
+/// `{x : n·(x − p) ≥ 0}` (`n` must be unit — the K1 frame contract).
+///
+/// * `Common` keeps the `+n` cap: the spherical patch beyond the
+///   plane plus the planar disk the section circle cuts out — a
+///   two-face solid sharing the K3a plane×sphere circle.
+/// * `Cut` keeps the `−n` cap (the sphere minus the tool).
+/// * `Fuse` is refused by name: the union with a halfspace is an
+///   unbounded solid.
+///
+/// The secant/tangent/disjoint classification is exact (the sign of
+/// `d − r` and `d + r` through expansion arithmetic, `d` the signed
+/// distance of the sphere's center from the plane). Tangency is
+/// honest at measure zero: the tangent point is not a solid, so
+/// `Common` there is empty and `Cut` is the whole sphere.
+pub fn sphere_plane_boolean(
+    op: BooleanOp,
+    center: Vector3,
+    radius: f64,
+    plane_point: Vector3,
+    plane_normal: Vector3,
+) -> Result<BooleanOutcome, String> {
+    let n_len = plane_normal.length();
+    if (n_len - 1.0).abs() > 1e-9 {
+        return Err(format!(
+            "the halfspace normal must be unit (the K1 frame contract), |n| = {n_len}"
+        ));
+    }
+    let whole_sphere = || BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(sphere_brep_at(center, radius)),
+    };
+    let unbounded = || {
+        refused(
+            "fusing a halfspace — the result is an unbounded solid, not representable in \
+             the K1 model",
+        )
+    };
+
+    // The exact classification: sign(d − r) and sign(d + r), with d
+    // = (c − p)·n accumulated in expansion arithmetic.
+    let dv = v3(
+        center.x - plane_point.x,
+        center.y - plane_point.y,
+        center.z - plane_point.z,
+    );
+    let mut minus_terms = dot_terms(dv, plane_normal);
+    minus_terms.push(-radius);
+    let sign_minus = exact_sum_sign(&minus_terms);
+    let mut plus_terms = dot_terms(dv, plane_normal);
+    plus_terms.push(radius);
+    let sign_plus = exact_sum_sign(&plus_terms);
+
+    if sign_minus == 0 {
+        // d == r: tangent with the sphere wholly on the tool side —
+        // the closed tool contains every point of it.
+        return Ok(match op {
+            BooleanOp::Common => whole_sphere(),
+            BooleanOp::Cut => empty(),
+            BooleanOp::Fuse => unbounded(),
+        });
+    }
+    if sign_plus == 0 {
+        // d == −r: tangent with the sphere wholly outside the tool
+        // (the tangent point lies on the tool boundary and is not a
+        // solid).
+        return Ok(match op {
+            BooleanOp::Common => empty(),
+            BooleanOp::Cut => whole_sphere(),
+            BooleanOp::Fuse => unbounded(),
+        });
+    }
+    if sign_minus > 0 {
+        // d > r: disjoint, the sphere entirely inside the tool's
+        // halfspace.
+        return Ok(match op {
+            BooleanOp::Common => whole_sphere(),
+            BooleanOp::Cut => empty(),
+            BooleanOp::Fuse => unbounded(),
+        });
+    }
+    if sign_plus < 0 {
+        // d < −r: disjoint, the sphere entirely outside the tool.
+        return Ok(match op {
+            BooleanOp::Common => empty(),
+            BooleanOp::Cut => whole_sphere(),
+            BooleanOp::Fuse => unbounded(),
+        });
+    }
+
+    // Secant: compose the K3a plane×sphere section circle,
+    // bit-identical.
+    let sphere_surface = Surface::Sphere {
+        center,
+        axis: v3(0.0, 0.0, 1.0),
+        ref_dir: v3(1.0, 0.0, 0.0),
+        radius,
+    };
+    let plane_surface = Surface::Plane {
+        origin: plane_point,
+        normal: plane_normal,
+        x_dir: crate::intersect::any_perpendicular(plane_normal),
+    };
+    let circle = match intersect_surfaces(&sphere_surface, &plane_surface) {
+        SurfaceIntersection::Curves(cs) if cs.len() == 1 => cs[0].clone(),
+        other => return Err(format!("the K3a plane×sphere circle is missing: {other:?}")),
+    };
+    let (circle_center, circle_axis, circle_ref, rho) = match &circle {
+        Curve::Circle {
+            center,
+            axis,
+            ref_dir,
+            radius,
+        } => (*center, *axis, *ref_dir, *radius),
+        other => return Err(format!("a non-circle section: {other:?}")),
+    };
+
+    // The kept cap: +n for Common, −n for Cut.
+    let keep_sign = match op {
+        BooleanOp::Common => 1.0,
+        BooleanOp::Cut => -1.0,
+        BooleanOp::Fuse => return Ok(unbounded()),
+    };
+    let k_hat = v3(
+        plane_normal.x * keep_sign,
+        plane_normal.y * keep_sign,
+        plane_normal.z * keep_sign,
+    );
+
+    // One vertex on the circle; one closed edge.
+    let vertex = TopoVertex {
+        point: circle_point(&circle, 0.0),
+    };
+    let edge = TopoEdge {
+        curve: circle,
+        range: (0.0, std::f64::consts::TAU),
+        start: 0,
+        end: 0,
+    };
+
+    // The spherical patch keeps the cap on the k̂ side: forward iff
+    // the stored circle axis points that way (the kept-on-the-left
+    // convention, σ = +1 — the cap solid lies inside its sphere).
+    let patch_forward = circle_axis.dot(&k_hat) > 0.0;
+    // The disk's outward normal points away from the solid: −k̂. Its
+    // frame is the circle's own, so the UV box is exactly [−ρ, ρ]².
+    let disk_normal = v3(-k_hat.x, -k_hat.y, -k_hat.z);
+    let disk_forward = !patch_forward;
+
+    let faces = vec![
+        TopoFace {
+            surface: sphere_surface,
+            uv_bounds: [
+                0.0,
+                std::f64::consts::TAU,
+                -std::f64::consts::FRAC_PI_2,
+                std::f64::consts::FRAC_PI_2,
+            ],
+            wires: vec![TopoWire {
+                edges: vec![WireEdge {
+                    edge: 0,
+                    forward: patch_forward,
+                }],
+            }],
+            reversed: false,
+        },
+        TopoFace {
+            surface: Surface::Plane {
+                origin: circle_center,
+                normal: disk_normal,
+                x_dir: circle_ref,
+            },
+            uv_bounds: [-rho, rho, -rho, rho],
+            wires: vec![TopoWire {
+                edges: vec![WireEdge {
+                    edge: 0,
+                    forward: disk_forward,
+                }],
+            }],
+            reversed: false,
+        },
+    ];
+
+    let brep = ExactBRep {
+        vertices: vec![vertex],
+        edges: vec![edge],
+        faces,
+    };
+    brep.validate()
+        .map_err(|e| format!("the constructed cap solid failed validation: {e}"))?;
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
 }

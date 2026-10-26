@@ -754,12 +754,26 @@ pub struct TopoWire {
 /// A topology face: a parametric surface trimmed by UV bounds and
 /// wires. `wires[0]` is the outer boundary, the rest are holes; a face
 /// with no wires is an untrimmed (fully periodic) surface.
+///
+/// `reversed` is the face's orientation relative to the stored
+/// surface's natural normal (`∂u×∂v`): `false` — the natural normal
+/// is the OUTWARD normal (away from the solid); `true` — the solid
+/// lies on the natural normal's side and the outward normal is its
+/// negation (what OCCT calls a REVERSED `TopoDS_Face`). The wire
+/// traversal flags are always set against the OUTWARD normal (kept
+/// region on the left of the traversal), so a reversed face and an
+/// unreversed one keep different sides of the same wire — without
+/// this field the two would be indistinguishable, which is exactly
+/// the K3c-2 finding: Cut and Fuse of a secant sphere pair produced
+/// byte-identical face lists until it existed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopoFace {
     pub surface: Surface,
     /// `[umin, umax, vmin, vmax]`.
     pub uv_bounds: [f64; 4],
     pub wires: Vec<TopoWire>,
+    /// The orientation flag: the outward normal is `∂u×∂v` negated.
+    pub reversed: bool,
 }
 
 /// The exact boundary representation: vertices, edges, faces.
@@ -1250,6 +1264,7 @@ fn face(surface: Surface, uv: [f64; 4], wires: Vec<TopoWire>) -> TopoFace {
         surface,
         uv_bounds: uv,
         wires,
+        reversed: false,
     }
 }
 

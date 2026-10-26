@@ -365,9 +365,11 @@ behind us.
       closed solid with Euler 2 and `validate()` green. The wire
       orientation convention (kept region on the left of the
       traversal viewed from the face's OUTWARD normal) encodes what
-      OCCT calls TopoDS_REVERSED, which is why trimmed faces need no
-      extra orientation field — and the cut wall (solid on the
-      OUTSIDE of the tool sphere) is the case that exercises it.
+      OCCT calls TopoDS_REVERSED — K3c-1 believed that was enough
+      for trimmed faces; K3c-2 found it was not (see below) and
+      the orientation now lives explicitly on `TopoFace::reversed`.
+      The cut wall (solid on the OUTSIDE of the tool sphere) is
+      the case that exercises it.
       Exact non-secant classification (expansion signs) with honest
       pass-throughs (whole spheres, empty results) and refusals by
       name: contained cuts (an internal void needs a face-orientation
@@ -377,13 +379,64 @@ behind us.
       topology, validation, the bit-identical K3a circle, opposite
       traversals, cap-apex side checks, cap-formula volume partition
       identities (V_lens + V_(A−B) = V_a; V_fuse + V_lens = V_a +
-      V_b), FCBREP v2 round-trip, and the d1 line probe. They caught
+      V_b), FCBREP round-trip, and the d1 line probe. They caught
       the author's own inverted containment sign and the missing
       cut-wall reversal before either could ship
-- [ ] **K3 (remaining)** exact booleans on the wider analytic-pair
-      set (plane-cut primitives, cylinder×cylinder, coaxial
-      families) and the OCCT differential corpus for the boolean
-      results; exact volume/area on composed B-reps
+- [x] **K3c-2 (landing 2026-10-26)** exact measure on composed
+      B-reps + the sphere×halfspace plane cuts — and the
+      face-orientation model both forced
+      (`crates/fc-part/src/measure.rs`, `brep_boolean.rs`):
+      * **The model fix.** Writing the volume tests exposed a real
+        K3c-1 defect: Cut and Fuse of a secant pair produced
+        byte-identical face lists — the crescent's cut wall and
+        the peanut's complement face share surface, wire, and flag,
+        differing only in which side of the surface the solid lies
+        on. `TopoFace` now carries `reversed: bool` (the OCCT
+        REVERSED-face flag: the outward normal is the natural
+        `∂u×∂v` negated); FCBREP v3 serializes it (v2 payloads
+        still read, defaulting unreversed; the version-strict
+        parser rejects v3 lines under a v2 header).
+      * **`measure.rs`**: `brep_volume`/`brep_area` — the
+        divergence theorem `V = (1/3)∮p·n̂dA` per face kind in
+        closed form, reading every trim from the WIRES (never the
+        uv boxes): plane polygons (shoelace) and disks (`p·n̂` is
+        constant on a plane — no centroids ever), sphere full/cap
+        (the patch's vector area `πr(r²−s²)k̂` makes any oblique
+        circle exact), cylinder strips (`∫r̂du = 0` kills the
+        origin term), cone frusta (all tangent planes through the
+        apex — the definite integral collapses), the full torus.
+        Honest refusals by name: B-splines (K4), untrimmed
+        planes/cylinders (unbounded), unrecognized rims.
+      * **`sphere_plane_boolean`**: the halfspace tool
+        `{x : n·(x−p) ≥ 0}` — Common keeps the +n cap (spherical
+        patch + planar disk on the K3a plane×sphere circle,
+        bit-identical), Cut the −n cap; exact secant/tangent/
+        disjoint classification (expansion signs); Fuse refused as
+        unbounded. The disk's frame is the circle's own, so its UV
+        box is exactly `[−ρ, ρ]²`.
+      * 10 acceptance-first tests (8 in `tests/measure.rs` + 2 in
+        `tests/brep_boolean.rs`): every K1 primitive measures what
+        `TopoShape::volume()/surface_area()` report (two
+        independent computations agreeing, including the
+        contracting-frustum signed-slope case); the lens/crescent/
+        peanut measure their classical cap compositions with
+        `V(peanut) − V(crescent) = V(b)` exactly — the identity that
+        is IMPOSSIBLE on the pre-fix byte-identical B-reps; plane
+        caps verify through `πh²(3r−h)/3` for oblique normals,
+        negative offsets, and exact hemispheres; FCBREP v3
+        round-trips byte-identically with v2 back-compat. They
+        caught the author's own test-side errors too (a sign slip
+        in the cap-height expectation — the +n cap's height is
+        `r + s`, not `r − s` — and a "hemisphere" whose plane
+        missed the center: the measure returned the exact cap
+        volume for the actual offset, 30.025 vs the intended
+        16.755, which is how the setup error was found)
+- [ ] **K3 (remaining)** the wider analytic-pair booleans
+      (cylinder×cylinder, coaxial families, the oblique
+      cylinder/cone plane cuts with elliptical rims) and the OCCT
+      differential corpus for the boolean results (volumes vs
+      FreeCAD's `cut`/`common`/`fuse` — the measure module is the
+      comparison side)
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets

@@ -462,19 +462,22 @@ impl<'a> LineReader<'a> {
 }
 
 // ===========================================================================
-// FCBREP v2 — the structural BRep payload (K1)
+// FCBREP v3 — the structural BRep payload (K1; v3 = v2 + the face
+// orientation flag — K3c-2)
 // ===========================================================================
 //
-// Grammar (version 2, line-oriented, UTF-8, strict):
+// Grammar (version 3, line-oriented, UTF-8, strict; version 2 is
+// identical without the trailing `<reversed:0|1>` face token and is
+// still read, defaulting the flag to `false`):
 //
 // ```text
-// FCBREP 2
+// FCBREP 3
 // vertices <n>
 // v <x> <y> <z>                            ; x n
 // edges <n>
 // e <curve> <t0> <t1> <start-vertex> <end-vertex>   ; x n
 // faces <n>
-// f <surface> <umin> <umax> <vmin> <vmax> <wire-count>  ; x n
+// f <surface> <umin> <umax> <vmin> <vmax> <wire-count> <reversed:0|1>  ; x n
 // w <edge-count> (<edge-index> <fwd>) ...   ; x wire-count
 // end
 // ```
@@ -505,9 +508,9 @@ impl<'a> LineReader<'a> {
 // write→read→write cycle is byte-identical. The parser is strict and
 // line-numbered like v1: every deviation is a `Malformed` error.
 
-/// Serialize `brep` as FCBREP v2 (the structural BRep payload).
+/// Serialize `brep` as FCBREP v3 (the structural BRep payload).
 pub fn write_brep<W: std::io::Write>(w: &mut W, brep: &ExactBRep) -> std::io::Result<()> {
-    writeln!(w, "FCBREP 2")?;
+    writeln!(w, "FCBREP 3")?;
     writeln!(w, "vertices {}", brep.vertices.len())?;
     for v in &brep.vertices {
         let p = v.point;
@@ -524,7 +527,16 @@ pub fn write_brep<W: std::io::Write>(w: &mut W, brep: &ExactBRep) -> std::io::Re
         write!(w, "f ")?;
         write_surface(w, &f.surface)?;
         let [umin, umax, vmin, vmax] = f.uv_bounds;
-        writeln!(w, " {} {} {} {} {}", umin, umax, vmin, vmax, f.wires.len())?;
+        writeln!(
+            w,
+            " {} {} {} {} {} {}",
+            umin,
+            umax,
+            vmin,
+            vmax,
+            f.wires.len(),
+            if f.reversed { 1 } else { 0 }
+        )?;
         for wire in &f.wires {
             write!(w, "w {}", wire.edges.len())?;
             for we in &wire.edges {
@@ -730,27 +742,28 @@ fn write_surface<W: std::io::Write>(w: &mut W, s: &Surface) -> std::io::Result<(
     }
 }
 
-/// Parse an FCBREP v2 structural BRep payload (bytes). OCCT/unknown
-/// payloads and v1 primitive-shape payloads return the corresponding
-/// errors.
+/// Parse an FCBREP v2/v3 structural BRep payload (bytes). v2 faces
+/// default unreversed. OCCT/unknown payloads and v1 primitive-shape
+/// payloads return the corresponding errors.
 pub fn read_brep_bytes(data: &[u8]) -> Result<ExactBRep, BrpError> {
     match probe_format(data) {
-        BrpFormat::FcBrep => parse_fcbrp_v2(data),
+        BrpFormat::FcBrep => parse_fcbrp_structural(data),
         BrpFormat::OcctBrep => Err(BrpError::UnsupportedOcct),
         BrpFormat::Unknown => Err(BrpError::UnknownFormat),
     }
 }
 
-fn parse_fcbrp_v2(data: &[u8]) -> Result<ExactBRep, BrpError> {
+fn parse_fcbrp_structural(data: &[u8]) -> Result<ExactBRep, BrpError> {
     let text = std::str::from_utf8(data).map_err(|_| malformed(1, "payload is not valid UTF-8"))?;
     let mut reader = LineReader::new(text);
 
-    // Line 1: "FCBREP 2".
+    // Line 1: "FCBREP 2" or "FCBREP 3".
     let (line, header) = reader
         .next_line()
         .ok_or_else(|| malformed(1, "empty payload"))?;
-    match header.split_whitespace().collect::<Vec<_>>().as_slice() {
-        ["FCBREP", "2"] => {}
+    let version = match header.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["FCBREP", "2"] => 2u8,
+        ["FCBREP", "3"] => 3u8,
         ["FCBREP", "1"] => {
             return Err(malformed(
                 line,
@@ -764,7 +777,7 @@ fn parse_fcbrp_v2(data: &[u8]) -> Result<ExactBRep, BrpError> {
             ))
         }
         _ => return Err(malformed(line, "expected 'FCBREP <version>'")),
-    }
+    };
 
     // "vertices <n>" then n vertex lines.
     let nv = read_count(&mut reader, "vertices")?;
@@ -839,16 +852,32 @@ fn parse_fcbrp_v2(data: &[u8]) -> Result<ExactBRep, BrpError> {
         })?;
         face_lines.push(line);
         let toks = body.split_whitespace().collect::<Vec<_>>();
-        let (surface, tail) = parse_surface_tokens(&toks, line)?;
-        if tail.len() != 5 {
+        let want_tail = if version == 3 { 6 } else { 5 };
+        let (surface, tail) = parse_surface_tokens(&toks, line, want_tail)?;
+        if tail.len() != want_tail {
             return Err(malformed(
                 line,
                 format!(
-                    "face expects <umin> <umax> <vmin> <vmax> <wire-count> after the surface, found {} more tokens",
+                    "face expects <umin> <umax> <vmin> <vmax> <wire-count>{} after the surface, found {} more tokens",
+                    if version == 3 { " <reversed>" } else { "" },
                     tail.len()
                 ),
             ));
         }
+        let reversed = if version == 3 {
+            match tail[5] {
+                "1" => true,
+                "0" => false,
+                other => {
+                    return Err(malformed(
+                        line,
+                        format!("face orientation must be 0 or 1, found '{other}'"),
+                    ))
+                }
+            }
+        } else {
+            false
+        };
         let mut uv = [0.0f64; 4];
         for (slot, tok) in uv.iter_mut().zip(&tail[0..4]) {
             *slot = parse_f64(tok, line)?;
@@ -913,6 +942,7 @@ fn parse_fcbrp_v2(data: &[u8]) -> Result<ExactBRep, BrpError> {
             surface,
             uv_bounds: uv,
             wires,
+            reversed,
         });
     }
 
@@ -1137,16 +1167,17 @@ fn parse_curve_tokens<'a>(
 fn parse_surface_tokens<'a>(
     toks: &[&'a str],
     line: usize,
+    tail_wanted: usize,
 ) -> Result<(Surface, Vec<&'a str>), BrpError> {
     if toks.is_empty() || toks[0] != "f" {
         return Err(malformed(line, "expected 'f <surface> …'"));
     }
     match toks.get(1) {
         Some(&"plane") => {
-            if toks.len() != 16 {
+            if toks.len() != 2 + 9 + tail_wanted {
                 return Err(malformed(
                     line,
-                    "plane face needs 9 surface params + 5 tail tokens",
+                    format!("plane face needs 9 surface params + {tail_wanted} tail tokens"),
                 ));
             }
             Ok((
@@ -1159,10 +1190,10 @@ fn parse_surface_tokens<'a>(
             ))
         }
         Some(&"cylinder") => {
-            if toks.len() != 17 {
+            if toks.len() != 2 + 10 + tail_wanted {
                 return Err(malformed(
                     line,
-                    "cylinder face needs 10 surface params + 5 tail tokens",
+                    format!("cylinder face needs 10 surface params + {tail_wanted} tail tokens"),
                 ));
             }
             Ok((
@@ -1176,10 +1207,10 @@ fn parse_surface_tokens<'a>(
             ))
         }
         Some(&"cone") => {
-            if toks.len() != 18 {
+            if toks.len() != 2 + 11 + tail_wanted {
                 return Err(malformed(
                     line,
-                    "cone face needs 11 surface params + 5 tail tokens",
+                    format!("cone face needs 11 surface params + {tail_wanted} tail tokens"),
                 ));
             }
             Ok((
@@ -1194,10 +1225,10 @@ fn parse_surface_tokens<'a>(
             ))
         }
         Some(&"sphere") => {
-            if toks.len() != 17 {
+            if toks.len() != 2 + 10 + tail_wanted {
                 return Err(malformed(
                     line,
-                    "sphere face needs 10 surface params + 5 tail tokens",
+                    format!("sphere face needs 10 surface params + {tail_wanted} tail tokens"),
                 ));
             }
             Ok((
@@ -1211,10 +1242,10 @@ fn parse_surface_tokens<'a>(
             ))
         }
         Some(&"torus") => {
-            if toks.len() != 18 {
+            if toks.len() != 2 + 11 + tail_wanted {
                 return Err(malformed(
                     line,
-                    "torus face needs 11 surface params + 5 tail tokens",
+                    format!("torus face needs 11 surface params + {tail_wanted} tail tokens"),
                 ));
             }
             Ok((
@@ -1260,7 +1291,8 @@ fn parse_surface_tokens<'a>(
                     ))
                 }
             };
-            let expected = 9 + nuk + nvk + 3 * npu * npv + if rational { npu * npv } else { 0 } + 5;
+            let expected =
+                9 + nuk + nvk + 3 * npu * npv + if rational { npu * npv } else { 0 } + tail_wanted;
             if toks.len() != expected {
                 return Err(malformed(
                     line,

@@ -214,7 +214,7 @@ fn dot_exactly_zero(a: Vector3, b: Vector3) -> bool {
 
 /// Any unit direction ⊥ `axis` (canonical: the coordinate axis of
 /// the smallest `axis` component, made orthogonal).
-fn any_perpendicular(axis: Vector3) -> Vector3 {
+pub(crate) fn any_perpendicular(axis: Vector3) -> Vector3 {
     let probe = if axis.x.abs() < 0.9 {
         Vector3::new(1.0, 0.0, 0.0)
     } else {

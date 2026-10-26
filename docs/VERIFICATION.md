@@ -9,8 +9,8 @@ because an external assessment (2026-10-24) demanded exactly that
 distinction; it is maintained by the same discipline as the honest
 list: a claim with no evidence gets marked, not made.
 
-- **As of:** 2026-10-26, `main` = the K3a + K3b + K3c-1 landings (after
-  K1's 88957b9): `fc-part` gains `intersect.rs` — exact closed-form
+- **As of:** 2026-10-26, `main` = the K3a + K3b + K3c-1 + K3c-2 landings
+  (after K1's 88957b9): `fc-part` gains `intersect.rs` — exact closed-form
   intersections of the analytic surface pairs (plane/cylinder/cone/
   sphere/torus × plane/sphere/cylinder/cone/torus where the section
   curve is a line/circle/ellipse), every configuration classified by
@@ -48,13 +48,14 @@ aggregated; `#[test]`-function grep cross-check found no
 `#[cfg]`-gated or doc tests the run would miss). The K3b differential
 pair (`tests/intersect_differential.rs`, 2 tests) lands on top:
 576 with it counted; the K3c-1 boolean pair (`tests/brep_boolean.rs`,
-7 tests) on top of that: 583.
+now 9 tests) on top of that: 583; the K3c-2 measure pair
+(`tests/measure.rs` 8 tests) on top of that: 593.
 
 | Crate | Unit | Integration | Doc-tests | Total | Method |
 |---|---:|---:|---:|---:|---|
 | `fc-base` | 0 | 58 (`tests/base.rs` 19, `tests/quantity.rs` 39) | 2 | **60** | run |
 | `fc-app` | 60 (`expression.rs` 54, `recompute.rs` 6) | 37 (`tests/app.rs` 16, `tests/transaction.rs` 21) | 3 | **100** | run |
-| `fc-part` | 108 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8, `intersect.rs` 6) | 80 (`tests/part.rs` 15, `tests/topology.rs` 17, `tests/intersect.rs` 39, `tests/intersect_differential.rs` 2, `tests/brep_boolean.rs` 7) | 0 | **188** | run |
+| `fc-part` | 108 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8, `intersect.rs` 6) | 90 (`tests/part.rs` 15, `tests/topology.rs` 17, `tests/intersect.rs` 39, `tests/intersect_differential.rs` 2, `tests/brep_boolean.rs` 9, `tests/measure.rs` 8) | 0 | **198** | run |
 | `fc-sketcher` | 74 (`solver.rs` 40, `xml.rs` 11, `constraint.rs` 8, `sketch_object.rs` 9, `geometry.rs` 6) | 0 | 1 | **75** | run |
 | `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 46 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3) | 0 | **66** | run |
 | `fc-step` | 0 | 6 (`tests/step.rs`) | 0 | **6** | run |
@@ -62,7 +63,7 @@ pair (`tests/intersect_differential.rs`, 2 tests) lands on top:
 | `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | run |
 | `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 21 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3, `tests/mechanical_cli.rs` 2) | 0 | **32** | run |
 | `fc-wasm` | 13 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths — the two pattern verbs added in v0.2.2 included) | 0 | 0 | **13** | run |
-| **Total** | | | | **574** | |
+| **Total** | | | | **593** | |
 
 Notes, honestly: `#[ignore]`d tests — none anywhere in `crates/**`
 at this writing (the one that used to exist, the rotated-crossing
@@ -105,7 +106,8 @@ without it they self-skip with a message and pass trivially.
 | 24 | Exact topology model (K1) — vertices/edges/faces with parametric curves & surfaces; exact primitive generators; FCBREP v2 round-trip | ✔ `fc-part` `tests/topology.rs` (17, acceptance-first): `box_topology_is_exact_and_closed`, `cylinder_topology_is_exact_and_closed`, `cone_frustum_topology_is_exact_and_closed`, `plain_cone_topology_has_a_degenerate_apex`, `sphere_topology_has_a_seam_and_degenerate_poles`, `torus_topology_has_two_periodic_seams`, `bspline_curve_evaluation_is_de_boor`, `bspline_surface_bilinear_patch`, `brep_round_trip_all_primitives_is_byte_identical`, `bspline_payloads_round_trip`, `malformed_v2_payloads_report_line_numbers`, `v1_and_v2_readers_reject_cross_versions`, `mesh_shapes_have_no_exact_topology`, `validate_catches_structural_breaks`, `surface_evaluation_matches_analytic_geometry`, `sphere_evaluation_is_spherical_coordinates`, `curve_derivatives_have_the_right_magnitudes` | CI build job | — (the model's parameterizations follow the OCCT conventions the EQUIVALENCE table already pins for the analytic kinds; no FreeCAD round-trip of v2 payloads yet) | — |
 | 25 | Exact analytic intersections (K3a/K3b) — plane/cylinder/cone/sphere/torus pair sections in closed form (lines, circles, ellipses), exact tangency/disjointness/coincidence classification, honest refusals of quartics/hyperbolas/Villarceau cuts | ✔ `fc-part` `tests/intersect.rs` (39, acceptance-first): `plane_sphere_secant_is_the_projection_circle`, `sphere_sphere_secant_is_the_radical_plane_circle`, `plane_cylinder_oblique_is_the_stretched_ellipse`, `plane_cone_oblique_secant_is_the_ellipse`, `plane_cone_through_apex_two_generator_lines`, `plane_cone_perpendicular_below_apex_hits_the_mirror_nappe`, `plane_torus_perpendicular_two_circles_tangent_one`, `cylinder_cylinder_parallel_two_lines`, `sphere_cone_coaxial_is_two_circles`, `torus_torus_coaxial_same_radii_two_circles`, `tangency_classification_is_exact_not_tolerant`, `cylinder_tangency_classification_is_exact`, `intersection_is_symmetric`, …; unit `intersect.rs` (6: the EFT expansion suite — `two_prod_is_exact`, `exact_sum_sign_catches_cancellation`, `cmp_squares_is_exact_at_one_ulp`, …) | CI build job | ◐ the differential corpus: `tests/fixtures/k3_sections.json` generated through the real FreeCAD 1.0 (r39109 AppImage, `BRepAlgoAPI_Section`) — `tests/intersect_differential.rs`: `occt_section_samples_lie_on_our_closed_form_curves` (28 curves / 924 points), `our_curve_count_is_at_least_occts` — the differential caught and forced the fix of the antiparallel-cone apex defect | — |
 
-| 26 | Exact B-rep booleans, sphere×sphere (K3c-1) — the lens / crescent / peanut composing the radical-plane circle; exact non-secant classification; honest void/disjoint refusals | ✔ `fc-part` `tests/brep_boolean.rs` (7, acceptance-first): `common_is_the_lens_two_caps_one_shared_circle`, `cut_and_fuse_are_the_crescent_and_peanut_partition`, `the_crescents_partition_both_spheres`, `disjoint_tangent_contained_classify_honestly`, `the_lens_round_trips_through_fcbrep_v2`, `the_lens_circle_lies_on_both_spheres_at_machine_scale`, `a_line_probe_of_the_outcome_geometry` | CI build job | ◐ indirectly: the shared circle is the OCCT-differential-certified K3a construction (row 25); a boolean-results corpus (volumes vs FreeCAD's `cut`/`common`/`fuse`) is the recorded next step | — |
+| 26 | Exact B-rep booleans, sphere×sphere (K3c-1) — the lens / crescent / peanut composing the radical-plane circle; exact non-secant classification; honest void/disjoint refusals | ✔ `fc-part` `tests/brep_boolean.rs` (7, acceptance-first): `common_is_the_lens_two_caps_one_shared_circle`, `cut_and_fuse_are_the_crescent_and_peanut_partition`, `the_crescents_partition_both_spheres`, `disjoint_tangent_contained_classify_honestly`, `the_outcomes_round_trip_through_fcbrep_v3`, `the_lens_circle_lies_on_both_spheres_at_machine_scale`, `a_line_probe_of_the_outcome_geometry`, `sphere_plane_secant_builds_the_cap_and_the_disk`, `sphere_plane_caps_lie_on_the_operands_at_machine_scale` | CI build job | ◐ indirectly: the shared circle is the OCCT-differential-certified K3a construction (row 25); a boolean-results corpus (volumes vs FreeCAD's `cut`/`common`/`fuse`) is the recorded next step | — |
+| 27 | Exact measure on composed B-reps + sphere×halfspace cuts + the face-orientation model (K3c-2) — `brep_volume`/`brep_area` by the divergence theorem in closed form per face kind; `sphere_plane_boolean` (cap + disk on the K3a circle); `TopoFace::reversed` (the OCCT REVERSED-face flag) with FCBREP v3 | ✔ `fc-part` `tests/measure.rs` (8, acceptance-first): `primitive_breps_measure_what_the_shape_module_reports`, `primitive_volumes_match_the_classical_closed_forms`, `sphere_sphere_outcomes_measure_their_cap_compositions` (the crescent≠peanut identity that forced the orientation fix), `sphere_plane_common_and_cut_partition_the_sphere`, `sphere_plane_hemispheres_when_the_plane_cuts_the_center`, `sphere_plane_classifications_are_exact`, `measure_refuses_what_it_cannot_close_by_name`, `fcbrep_v3_round_trips_the_orientation_flag` | CI build job | ◐ the measure is the comparison side for the planned boolean-results corpus (FreeCAD's `cut`/`common`/`fuse` volumes vs ours — K3 remaining); today the evidence is the double-computation agreement with `TopoShape::volume()` and the classical closed forms | — |
 
 ## What is only manual today
 

@@ -871,6 +871,7 @@ fn bspline_payloads_round_trip() {
             uv_bounds: [0.0, 1.0, 0.0, 1.0],
             // A face with no wires is legal (an untrimmed surface).
             wires: vec![],
+            reversed: false,
         }],
     };
     brep.validate().expect("hand-built validates");
@@ -911,18 +912,19 @@ fn v1_and_v2_readers_reject_cross_versions() {
         "error names the version: {err}"
     );
 
-    // A v2 payload is not a TopoShape.
+    // A structural payload (v3 since K3c-2) is not a TopoShape: the
+    // v1 reader refuses it by version.
     let brep = ExactBRep::from_shape(&TopoShape::Box {
         length: 1.,
         width: 1.,
         height: 1.,
     })
     .unwrap();
-    let mut v2 = Vec::new();
-    write_brep(&mut v2, &brep).unwrap();
-    let err = read_shape_bytes(&v2).expect_err("v2 is not a v1 payload");
+    let mut structural = Vec::new();
+    write_brep(&mut structural, &brep).unwrap();
+    let err = read_shape_bytes(&structural).expect_err("a structural payload is not a v1 shape");
     assert!(
-        err.to_string().contains("v2"),
+        err.to_string().contains("version"),
         "error names the version: {err}"
     );
 }
@@ -945,8 +947,8 @@ fn malformed_v2_payloads_report_line_numbers() {
         "empty: {err}"
     );
 
-    // Unsupported version.
-    let err = read_brep_bytes(b"FCBREP 3\n").expect_err("version");
+    // Unsupported version (v3 is current; the next one is not).
+    let err = read_brep_bytes(b"FCBREP 4\n").expect_err("version");
     assert!(err.to_string().contains("version"), "{err}");
 
     // Non-finite float (the first vertex line is payload line 3).
@@ -1108,6 +1110,7 @@ fn validate_catches_structural_breaks() {
                     },
                 ],
             }],
+            reversed: false,
         }],
     };
     let err = broken.validate().expect_err("discontinuous wire");

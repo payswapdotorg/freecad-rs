@@ -14,7 +14,9 @@
 //! intersection pairs are K3a, [`intersect`]). Booleans run
 //! on tessellations with exact classification (see [`exact`]) — the
 //! volumes of curved operands agree to their deflection, and planar
-//! operands exactly.
+//! operands exactly. Exact B-rep booleans on the analytic pairs and
+//! exact measurement of the composed solids are the K3 series
+//! ([`brep_boolean`], [`measure`]).
 
 mod exact;
 
@@ -23,6 +25,7 @@ pub mod brep;
 pub mod brep_boolean;
 pub mod features;
 pub mod intersect;
+pub mod measure;
 pub mod partdesign;
 pub mod profile;
 pub mod shape;
