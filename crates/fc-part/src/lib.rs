@@ -10,7 +10,8 @@
 //! What is **not** implemented (and honestly so): fillets, chamfers,
 //! OCCT BRep interoperability, and B-spline *booleans* (the exact
 //! topology model with NURBS curves/surfaces exists — [`topology`],
-//! K1 — but general intersections on it are K3/K4 work). Booleans run
+//! K1 — and general intersections on it are K3/K4 work; the analytic
+//! intersection pairs are K3a, [`intersect`]). Booleans run
 //! on tessellations with exact classification (see [`exact`]) — the
 //! volumes of curved operands agree to their deflection, and planar
 //! operands exactly.
@@ -20,6 +21,7 @@ mod exact;
 pub mod boolean;
 pub mod brep;
 pub mod features;
+pub mod intersect;
 pub mod partdesign;
 pub mod profile;
 pub mod shape;

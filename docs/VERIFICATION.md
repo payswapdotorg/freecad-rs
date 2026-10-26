@@ -9,10 +9,14 @@ because an external assessment (2026-10-24) demanded exactly that
 distinction; it is maintained by the same discipline as the honest
 list: a claim with no evidence gets marked, not made.
 
-- **As of:** 2026-10-25, `main` = the K1 exact-topology landing (after
-  v0.2.2's 03c6ce3): `fc-part` gains `topology.rs` (the exact BRep
-  model) and FCBREP v2 (the structural payload), with the 17
-  acceptance-first tests in `tests/topology.rs`.
+- **As of:** 2026-10-26, `main` = the K3a landing (after K1's
+  88957b9): `fc-part` gains `intersect.rs` — exact closed-form
+  intersections of the analytic surface pairs (plane/cylinder/cone/
+  sphere/torus × plane/sphere/cylinder/cone/torus where the section
+  curve is a line/circle/ellipse), every configuration classified by
+  exact integer-sign expansion arithmetic (Shewchuk-style EFT),
+  non-analytic pairs refused by name. 39 acceptance-first tests in
+  `tests/intersect.rs` + 6 expansion-arithmetic unit tests.
 - **The authoritative green run is CI**
   ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)):
   `cargo build` / `cargo test --workspace --locked` /
@@ -27,31 +31,28 @@ list: a claim with no evidence gets marked, not made.
 | ◐ | verified against the real FreeCAD 1.0 binary (AppImage r39109) per [`EQUIVALENCE.md`](EQUIVALENCE.md) — manual/local today, the target of the `parity` gate |
 | ✗ | documented, no committed test |
 
-## Test counts (measured 2026-10-25)
+## Test counts (measured 2026-10-26)
 
-**527 tests** across ten crates (516 built and listed locally on this
-station; `fc-wasm`'s 11 run in CI — this sandbox lacks the
-`wasm32-unknown-unknown` target). Method: `cargo test -p <crate> --
---list` for the five crates this sandbox can build (exact: includes
-unit, integration and doc-test targets); `#[test]`-function count via
-grep for the four crates whose dependency builds did not fit the
-sandbox disk (`ruststep` / `wgpu` / `rhai` / the CLI binary) — CI
-builds and runs them, and a grep cross-check found no `#[cfg]`-gated
-or doc tests those counts would miss.
+**574 tests** across ten crates, all built and run locally on this
+station (`fc-wasm`'s suite — 13 tests — now builds natively as well
+as on `wasm32-unknown-unknown` in CI; method: a full
+`cargo test --workspace --locked` run, per-binary `test result` lines
+aggregated; `#[test]`-function grep cross-check found no
+`#[cfg]`-gated or doc tests the run would miss).
 
 | Crate | Unit | Integration | Doc-tests | Total | Method |
 |---|---:|---:|---:|---:|---|
-| `fc-base` | 0 | 58 (`tests/base.rs` 19, `tests/quantity.rs` 39) | 2 | **60** | listed |
-| `fc-app` | 60 (`expression.rs` 54, `recompute.rs` 6) | 37 (`tests/app.rs` 16, `tests/transaction.rs` 21) | 3 | **100** | listed |
-| `fc-part` | 102 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8) | 32 (`tests/part.rs` 15, `tests/topology.rs` 17) | 0 | **134** | listed |
-| `fc-sketcher` | 74 (`solver.rs` 40, `xml.rs` 11, `constraint.rs` 8, `sketch_object.rs` 9, `geometry.rs` 6) | 0 | 1 | **75** | listed |
-| `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 46 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3) | 0 | **66** | listed |
-| `fc-step` | 0 | 6 (`tests/step.rs`) | 0 | **6** | grep |
-| `fc-viewer` | 16 (`camera.rs` 12, `scene.rs` 2, `pick.rs` 2) | 9 (`tests/scene_cpu.rs` 7, `tests/gpu_render.rs` 2) | 0 | **25** | grep |
-| `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | grep |
-| `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 21 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3, `tests/mechanical_cli.rs` 2) | 0 | **32** | listed |
-| `fc-wasm` | 11 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths) | 0 | 0 | **11** | listed |
-| **Total** | | | | **527** | |
+| `fc-base` | 0 | 58 (`tests/base.rs` 19, `tests/quantity.rs` 39) | 2 | **60** | run |
+| `fc-app` | 60 (`expression.rs` 54, `recompute.rs` 6) | 37 (`tests/app.rs` 16, `tests/transaction.rs` 21) | 3 | **100** | run |
+| `fc-part` | 108 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8, `intersect.rs` 6) | 71 (`tests/part.rs` 15, `tests/topology.rs` 17, `tests/intersect.rs` 39) | 0 | **179** | run |
+| `fc-sketcher` | 74 (`solver.rs` 40, `xml.rs` 11, `constraint.rs` 8, `sketch_object.rs` 9, `geometry.rs` 6) | 0 | 1 | **75** | run |
+| `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 46 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3) | 0 | **66** | run |
+| `fc-step` | 0 | 6 (`tests/step.rs`) | 0 | **6** | run |
+| `fc-viewer` | 16 (`camera.rs` 12, `scene.rs` 2, `pick.rs` 2) | 9 (`tests/scene_cpu.rs` 7, `tests/gpu_render.rs` 2) | 0 | **25** | run |
+| `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | run |
+| `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 21 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3, `tests/mechanical_cli.rs` 2) | 0 | **32** | run |
+| `fc-wasm` | 13 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths — the two pattern verbs added in v0.2.2 included) | 0 | 0 | **13** | run |
+| **Total** | | | | **574** | |
 
 Notes, honestly: `#[ignore]`d tests — none anywhere in `crates/**`
 at this writing (the one that used to exist, the rotated-crossing
@@ -92,6 +93,7 @@ without it they self-skip with a message and pass trivially.
 | 22 | Rhai embedded scripting (`fc-script`) | ✔ `fc-script` `tests/api.rs` (18: `primitives_add_recompute_and_exact_stats`, `sandbox_operation_budget_stops_runaway_loops`, `recompute_failure_is_recorded_and_stats_fail_honestly`, `save_and_open_round_trip_exactly`, …); CLI `tests/script_cli.rs` (5: `example_script_builds_document_with_exact_stats`, `script_with_failed_recompute_exits_nonzero_with_the_error`, …) | CI build job | — (the script API is our own surface; it drives the same tested document engine) | — |
 | 23 | CLI (`FreeCADCmd` distillate) — verbs, exit codes, journals | ✔ `freecad-rs` `tests/sketch_cli.rs`, `tests/mirroring_cli.rs`, `tests/partdesign_cli.rs`, `tests/script_cli.rs` (19 total, e.g. `cli_sketch_golden_path_from_new_to_export`, `cli_revolution_sweeps_a_half_disc_into_a_sphere`); unit `src/calc.rs` (11); `fc-app` `tests/transaction.rs`'s two `cli_*` tests | CI build job | ◐ via the file format (every CLI verb's output is verified by loading what it wrote in real FreeCAD — [EQUIVALENCE](EQUIVALENCE.md) both-direction sections) | — |
 | 24 | Exact topology model (K1) — vertices/edges/faces with parametric curves & surfaces; exact primitive generators; FCBREP v2 round-trip | ✔ `fc-part` `tests/topology.rs` (17, acceptance-first): `box_topology_is_exact_and_closed`, `cylinder_topology_is_exact_and_closed`, `cone_frustum_topology_is_exact_and_closed`, `plain_cone_topology_has_a_degenerate_apex`, `sphere_topology_has_a_seam_and_degenerate_poles`, `torus_topology_has_two_periodic_seams`, `bspline_curve_evaluation_is_de_boor`, `bspline_surface_bilinear_patch`, `brep_round_trip_all_primitives_is_byte_identical`, `bspline_payloads_round_trip`, `malformed_v2_payloads_report_line_numbers`, `v1_and_v2_readers_reject_cross_versions`, `mesh_shapes_have_no_exact_topology`, `validate_catches_structural_breaks`, `surface_evaluation_matches_analytic_geometry`, `sphere_evaluation_is_spherical_coordinates`, `curve_derivatives_have_the_right_magnitudes` | CI build job | — (the model's parameterizations follow the OCCT conventions the EQUIVALENCE table already pins for the analytic kinds; no FreeCAD round-trip of v2 payloads yet) | — |
+| 25 | Exact analytic intersections (K3a) — plane/cylinder/cone/sphere/torus pair sections in closed form (lines, circles, ellipses), exact tangency/disjointness/coincidence classification, honest refusals of quartics/hyperbolas/Villarceau cuts | ✔ `fc-part` `tests/intersect.rs` (39, acceptance-first): `plane_sphere_secant_is_the_projection_circle`, `sphere_sphere_secant_is_the_radical_plane_circle`, `plane_cylinder_oblique_is_the_stretched_ellipse`, `plane_cone_oblique_secant_is_the_ellipse`, `plane_cone_through_apex_two_generator_lines`, `plane_cone_perpendicular_below_apex_hits_the_mirror_nappe`, `plane_torus_perpendicular_two_circles_tangent_one`, `cylinder_cylinder_parallel_two_lines`, `sphere_cone_coaxial_is_two_circles`, `torus_torus_coaxial_same_radii_two_circles`, `tangency_classification_is_exact_not_tolerant`, `cylinder_tangency_classification_is_exact`, `intersection_is_symmetric`, …; unit `intersect.rs` (6: the EFT expansion suite — `two_prod_is_exact`, `exact_sum_sign_catches_cancellation`, `cmp_squares_is_exact_at_one_ulp`, …) | CI build job | — (K3's differential OCCT fixture corpus is the next slice, K3b; the constructions' residuals are verified against both operands' implicit equations at machine scale by the acceptance suite itself) | — |
 
 ## What is only manual today
 

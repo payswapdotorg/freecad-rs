@@ -291,9 +291,50 @@ behind us.
 - [x] **K2** robust predicates — **done in v0.1.7**: exact
       classification (`crates/fc-part/src/exact.rs`; the 1e-6
       blind-spot golden test)
-- [ ] **K3** exact intersections & booleans on analytic surfaces —
-      differential-tested against a committed OCCT-generated fixture
-      corpus with expected results
+- [x] **K3a (landing 2026-10-26)** exact intersections of the
+      analytic surface pairs — `fc-part` `intersect.rs`:
+      `intersect_surfaces` computes, in closed form from the
+      operands' parameters (no iteration, no tolerance, no
+      sampling), the section curves of every pair whose section is
+      representable in the K1 curve set — plane×plane (the
+      cross-product line), plane×sphere (projection circle),
+      sphere×sphere (radical-plane circle), plane×cylinder (the
+      three alignments: axis-meet circle / two-or-tangent generator
+      lines / stretched ellipse), plane×cone (axis-meet circles on
+      **both nappes** of the OCCT double-cone parameterization,
+      generator line pairs / tangent generator / apex point for
+      bit-exact apex planes, the oblique section ellipse from the
+      completed quadratic), plane×torus (axis-perpendicular z-cuts),
+      and the coaxial families (cylinder×sphere, cylinder×cone,
+      cylinder×torus, sphere×cone, cone×cone, torus×torus with
+      identical radii). Every configuration decision — secant /
+      tangent / disjoint / coincident — is an **exact integer-sign
+      computation** over the stored `f64`s (error-free-transform
+      expansions, Shewchuk-style: `two_prod`/`two_sum`/partial
+      accumulation — the `exact.rs` discipline at the classification
+      tier), so the one-ulp-off tangencies classify honestly
+      (`tangency_classification_is_exact_not_tolerant`). Pairs whose
+      sections are quartic space curves (Steinmetz
+      cylinder pairs, non-coaxial mixes), hyperbolas/parabolas
+      (steep plane×cone), oblique Villarceau torus cuts and B-spline
+      surfaces are **refused by name** — `NotAnalytic { why }` —
+      never approximated. Same-kind pairs canonicalize operand
+      order lexicographically, so `intersect(a, b)` and
+      `intersect(b, a)` are bit-identical. Acceptance-first: the
+      39-test suite in `crates/fc-part/tests/intersect.rs` (every
+      returned curve dense-sampled against **both** operands'
+      implicit equations, distinguished points re-derived
+      test-side from the classical constructions) was written
+      before the implementation; it caught the author's own
+      double-cone blindspot (cone×cylinder coaxial is **two**
+      circles, one per nappe, and same-semi shifted-apex cones meet
+      in **one** circle, not none) before it could ship. Remaining
+      for full K3 closure: K3b — the differential OCCT fixture
+      corpus (committed FreeCAD 1.0 section results) — and K3c —
+      booleans composing the sections
+- [ ] **K3 (remaining)** exact intersections & booleans on analytic
+      surfaces — differential-tested against a committed
+      OCCT-generated fixture corpus with expected results
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets
