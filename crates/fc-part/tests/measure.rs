@@ -610,3 +610,288 @@ fn fcbrep_v3_round_trips_the_orientation_flag() {
         "v2 rejects the orientation token"
     );
 }
+
+// ---------------------------------------------------------------------------
+// K3c-3 — measuring the oblique plane cuts: elliptical disks and
+// ellipse-rimmed cylinder/cone strips
+// ---------------------------------------------------------------------------
+//
+// Written BEFORE the implementation (the acceptance-first discipline).
+// The contract:
+//
+// * A plane face trimmed by a single closed ELLIPSE lying in the plane
+//   measures its conic area `πab` — the flux is `d·πab` with `d` the
+//   plane's signed offset (`p·n̂` is constant on a plane; no centroid).
+// * A cylinder strip trimmed by an elliptical rim reads the rim's own
+//   plane (the ellipse's stored axis and center) — never the UV box —
+//   and reduces to the sinusoid `v(u) = z₀ + A·cos u + B·sin u` in the
+//   cylinder's own frame, exact from the stored vectors: area
+//   `2πR·|z₀ − v_rim|` (Cavalieri), flux `R·(R·2πΔv̄ + π(A·oₓ + B·o_y))`.
+// * A cone strip trimmed by an elliptical rim reads the Möbius trim
+//   `v_e(u) = (δ − n·o − r₁·m(u))/(cosφ·ν + sinφ·m(u))` in closed form
+//   (the standard `∫du/(κ + M̃·cosθ)` families) — the volumes verify
+//   against the classical oblique-cone formula through the booleans
+//   (tests/brep_boolean.rs, K3c-3).
+// * Refusals, by name, never by approximation: an ellipse rim not
+//   lying on the face's surface, an ellipse disk not lying in the
+//   face's plane, a rim whose sinusoid is not strictly on one side of
+//   the circle rim.
+
+fn v3m(x: f64, y: f64, z: f64) -> Vector3 {
+    Vector3::new(x, y, z)
+}
+
+/// The degree-1 B-spline seam: `p(0)` and `p(1)` are the control points
+/// exactly (the de Boor endpoint property — the seam's arithmetic is
+/// bit-exact by construction, which a Line's origin+direction pair
+/// cannot guarantee for arbitrary placements).
+fn seam_edge(a: Vector3, b: Vector3, ia: usize, ib: usize) -> TopoEdge {
+    TopoEdge {
+        curve: Curve::Bspline {
+            degree: 1,
+            knots: vec![0.0, 0.0, 1.0, 1.0],
+            points: vec![a, b],
+            weights: None,
+        },
+        range: (0.0, 1.0),
+        start: ia,
+        end: ib,
+    }
+}
+
+#[test]
+fn ellipse_disk_and_strip_recognition_refuses_dishonest_trims() {
+    // A shell whose cylinder strip carries an "ellipse" that is not a
+    // section of the cylinder (minor radius 1.5 on a radius-2 surface).
+    // The structure is valid (validate green, edges used twice) — the
+    // recognition tier must refuse the rim by name.
+    let ellipse = Curve::Ellipse {
+        center: v3m(0.0, 0.0, 1.0),
+        axis: v3m(0.6, 0.0, 0.8),
+        major_dir: v3m(-0.8, 0.0, 0.6),
+        major_radius: 2.5,
+        minor_radius: 1.5, // ≠ R: not a section of the radius-2 cylinder
+    };
+    let rim = Curve::Circle {
+        center: v3m(0.0, 0.0, 0.0),
+        axis: v3m(0.0, 0.0, 1.0),
+        ref_dir: v3m(1.0, 0.0, 0.0),
+        radius: 2.0,
+    };
+    let v_ell = TopoVertex {
+        point: ellipse.point(0.0),
+    };
+    let v_rim = TopoVertex {
+        point: rim.point(0.0),
+    };
+    let shell = ExactBRep {
+        vertices: vec![v_ell, v_rim],
+        edges: vec![
+            TopoEdge {
+                curve: ellipse.clone(),
+                range: (0.0, std::f64::consts::TAU),
+                start: 0,
+                end: 0,
+            },
+            TopoEdge {
+                curve: rim.clone(),
+                range: (0.0, std::f64::consts::TAU),
+                start: 1,
+                end: 1,
+            },
+            seam_edge(ellipse.point(0.0), rim.point(0.0), 0, 1),
+        ],
+        faces: vec![
+            // The strip: one wire, four legs (seam up, rim, seam down,
+            // ellipse) — the composed-strip structure.
+            TopoFace {
+                surface: Surface::Cylinder {
+                    origin: v3m(0.0, 0.0, 0.0),
+                    axis: v3m(0.0, 0.0, 1.0),
+                    ref_dir: v3m(1.0, 0.0, 0.0),
+                    radius: 2.0,
+                },
+                uv_bounds: [0.0, std::f64::consts::TAU, 0.0, 1.5],
+                wires: vec![TopoWire {
+                    edges: vec![
+                        WireEdge {
+                            edge: 2,
+                            forward: true,
+                        },
+                        WireEdge {
+                            edge: 1,
+                            forward: false,
+                        },
+                        WireEdge {
+                            edge: 2,
+                            forward: false,
+                        },
+                        WireEdge {
+                            edge: 0,
+                            forward: true,
+                        },
+                    ],
+                }],
+                reversed: false,
+            },
+            TopoFace {
+                surface: Surface::Plane {
+                    origin: v3m(0.0, 0.0, 0.0),
+                    normal: v3m(0.0, 0.0, -1.0),
+                    x_dir: v3m(1.0, 0.0, 0.0),
+                },
+                uv_bounds: [-2.0, 2.0, -2.0, 2.0],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 1,
+                        forward: false,
+                    }],
+                }],
+                reversed: false,
+            },
+            TopoFace {
+                surface: Surface::Plane {
+                    origin: v3m(0.0, 0.0, 1.0),
+                    normal: v3m(0.6, 0.0, 0.8),
+                    x_dir: v3m(-0.8, 0.0, 0.6),
+                },
+                uv_bounds: [-2.5, 2.5, -1.5, 1.5],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 0,
+                        forward: true,
+                    }],
+                }],
+                reversed: false,
+            },
+        ],
+    };
+    shell.validate().expect("the shell structure is valid");
+    assert_eq!(
+        shell.edge_uses(0),
+        2,
+        "the ellipse shared by strip and disk"
+    );
+    assert_eq!(shell.edge_uses(1), 2, "the rim shared by strip and cap");
+    assert_eq!(shell.edge_uses(2), 2, "the seam used twice by the strip");
+    let err = brep_volume(&shell).expect_err("the ellipse is not a cylinder section");
+    assert!(
+        err.contains("not a section") || err.contains("not on") || err.contains("unrecognized"),
+        "the refusal names the bad rim: {err}"
+    );
+}
+
+#[test]
+fn cylinder_strip_with_rim_touching_ellipse_refuses() {
+    // A genuine on-cylinder ellipse whose sinusoid TOUCHES the circle
+    // rim (v(u) = 0.5 − 0.5·cos u on the unit cylinder, rim at v = 1:
+    // the sinusoid's maximum equals the rim). The "strip" degenerates —
+    // the measure must refuse rather than fabricate a zero-mean area.
+    let n = v3m(0.4472135954999579, 0.0, 0.8944271909999159); // (1,0,2)/√5
+    let ellipse = Curve::Ellipse {
+        center: v3m(0.0, 0.0, 0.5),
+        axis: n,
+        major_dir: v3m(-0.8944271909999159, 0.0, 0.4472135954999579),
+        major_radius: 1.118033988749895, // R/|n·ẑ| with R = 1
+        minor_radius: 1.0,
+    };
+    let rim = Curve::Circle {
+        center: v3m(0.0, 0.0, 1.0),
+        axis: v3m(0.0, 0.0, 1.0),
+        ref_dir: v3m(1.0, 0.0, 0.0),
+        radius: 1.0,
+    };
+    let shell = ExactBRep {
+        vertices: vec![
+            TopoVertex {
+                point: ellipse.point(0.0),
+            },
+            TopoVertex {
+                point: rim.point(0.0),
+            },
+        ],
+        edges: vec![
+            TopoEdge {
+                curve: ellipse.clone(),
+                range: (0.0, std::f64::consts::TAU),
+                start: 0,
+                end: 0,
+            },
+            TopoEdge {
+                curve: rim.clone(),
+                range: (0.0, std::f64::consts::TAU),
+                start: 1,
+                end: 1,
+            },
+            seam_edge(ellipse.point(0.0), rim.point(0.0), 0, 1),
+        ],
+        faces: vec![
+            TopoFace {
+                surface: Surface::Cylinder {
+                    origin: v3m(0.0, 0.0, 0.0),
+                    axis: v3m(0.0, 0.0, 1.0),
+                    ref_dir: v3m(1.0, 0.0, 0.0),
+                    radius: 1.0,
+                },
+                uv_bounds: [0.0, std::f64::consts::TAU, 0.0, 1.5],
+                wires: vec![TopoWire {
+                    edges: vec![
+                        WireEdge {
+                            edge: 2,
+                            forward: true,
+                        },
+                        WireEdge {
+                            edge: 1,
+                            forward: false,
+                        },
+                        WireEdge {
+                            edge: 2,
+                            forward: false,
+                        },
+                        WireEdge {
+                            edge: 0,
+                            forward: true,
+                        },
+                    ],
+                }],
+                reversed: false,
+            },
+            TopoFace {
+                surface: Surface::Plane {
+                    origin: v3m(0.0, 0.0, 1.0),
+                    normal: v3m(0.0, 0.0, 1.0),
+                    x_dir: v3m(1.0, 0.0, 0.0),
+                },
+                uv_bounds: [-1.0, 1.0, -1.0, 1.0],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 1,
+                        forward: true,
+                    }],
+                }],
+                reversed: false,
+            },
+            TopoFace {
+                surface: Surface::Plane {
+                    origin: v3m(0.0, 0.0, 0.5),
+                    normal: n,
+                    x_dir: v3m(-0.8944271909999159, 0.0, 0.4472135954999579),
+                },
+                uv_bounds: [-1.2, 1.2, -1.0, 1.0],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 0,
+                        forward: true,
+                    }],
+                }],
+                reversed: false,
+            },
+        ],
+    };
+    shell.validate().expect("structurally valid");
+    let err = brep_volume(&shell).expect_err("the sinusoid touches the rim");
+    assert!(
+        err.contains("one side") || err.contains("not strictly"),
+        "the refusal names the degeneracy: {err}"
+    );
+}

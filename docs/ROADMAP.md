@@ -431,9 +431,42 @@ behind us.
         missed the center: the measure returned the exact cap
         volume for the actual offset, 30.025 vs the intended
         16.755, which is how the setup error was found)
+- [x] **K3c-3 (landing 2026-10-26)** the oblique cylinder/cone
+      plane cuts with elliptical rims
+      (`cylinder_plane_boolean` / `cone_plane_boolean` in
+      `brep_boolean.rs`): the halfspace tool composed around the K3a
+      section curve, bit-identically. The cylinder pieces verify by
+      **Cavalieri** (`V = πR²·(mean height)` — an oblique cut leaves
+      the mean height alone; the two pieces sum to the whole
+      cylinder); the cone's apex piece by the classical **oblique
+      cone** `V = (1/3)·πab·d(apex, plane)` — exact for any
+      obliqueness; the frustum pieces by cone subtraction. The
+      composed faces carry the cone in the apex-origin
+      parameterization (axis apex→base, semi in `(0, π/2)`,
+      ref_radius 0) so the K3a section is the curve OCCT's own
+      parameterization would name; the strip's seam — the
+      periodicity glue the Euler count needs — is a degree-1
+      B-spline whose de Boor evaluation returns its endpoints
+      exactly (a `Line`'s `origin + direction` cannot, in general).
+      `measure.rs` reads the new trims in closed form: the
+      elliptical disk (`πab`), the **sinusoid trim** on the cylinder
+      (the rim's own plane reduced in the cylinder's frame; the
+      `z0`-coupling vanishes over the turn, the `(A, B)` part
+      doesn't), and the **Möbius trim** on the cone — the plane's
+      height `v_e(u) = (γ0 − r1·m(u))/(κ + M̃·cosθ)` — through the
+      standard `∫du/(κ + M̃·cosθ)` and `∫cosθ·du/(κ + M̃·cosθ)²`
+      moment families, the catastrophically-cancelling `I_c`
+      rationalized. Every configuration classification is an exact
+      expansion sign (`g²` vs `r²(1 − β²)` through EFT products);
+      unrepresentable sections refuse by name: generator lines
+      (plane ∥ axis, secant), the hyperbola/parabola class
+      (steep cone planes), cap-clipping cuts, a plane through the
+      apex. 11 acceptance-first tests (9 in `tests/brep_boolean.rs`
+      + 2 in `tests/measure.rs`); the measure-recognition refusals
+      pinned by hand-built shells (an ellipse not on the surface, a
+      sinusoid touching the rim).
 - [ ] **K3 (remaining)** the wider analytic-pair booleans
-      (cylinder×cylinder, coaxial families, the oblique
-      cylinder/cone plane cuts with elliptical rims) and the OCCT
+      (cylinder×cylinder, the coaxial families) and the OCCT
       differential corpus for the boolean results (volumes vs
       FreeCAD's `cut`/`common`/`fuse` — the measure module is the
       comparison side)

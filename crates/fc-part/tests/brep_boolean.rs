@@ -39,9 +39,11 @@
 use fc_base::Vector3;
 use fc_part::brep::{read_brep_bytes, write_brep};
 use fc_part::brep_boolean::{
-    sphere_plane_boolean, sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
+    cone_plane_boolean, cylinder_plane_boolean, sphere_plane_boolean, sphere_sphere_boolean,
+    BooleanOp, BooleanOutcome, BooleanOutcomeKind,
 };
 use fc_part::intersect::intersect_surfaces;
+use fc_part::measure::{brep_area, brep_volume};
 use fc_part::topology::{Curve, Surface};
 
 fn v3(x: f64, y: f64, z: f64) -> Vector3 {
@@ -644,4 +646,728 @@ fn sphere_plane_caps_lie_on_the_operands_at_machine_scale() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// K3c-3 — the oblique plane cuts: cylinder×halfspace and cone×halfspace,
+// the sections with elliptical rims
+// ---------------------------------------------------------------------------
+//
+// Written BEFORE the implementation (the acceptance-first discipline).
+// The contract:
+//
+// * `cylinder_plane_boolean(op, origin, axis, radius, height, p, n)` —
+//   the finite cylinder cut by the halfspace `{x : n·(x − p) ≥ 0}`:
+//   Common keeps the +n piece, Cut the −n piece, Fuse is refused as
+//   unbounded. A clean section (the plane crosses the open axis
+//   segment, misses both cap disks) composes the K3a plane×cylinder
+//   ellipse bit-identically as the shared edge between the side strip
+//   and the new planar elliptical face; the kept cap's rim circle and a
+//   seam edge (the periodicity glue, carried as a degree-1 B-spline
+//   whose de Boor evaluation returns its endpoints exactly) close the
+//   strip. Three faces, three edges, two vertices, Euler 2, every
+//   non-degenerate edge used exactly twice with the two faces of each
+//   shared edge traversing it in opposite directions.
+// * Volumes verify by Cavalieri: the oblique cut does not change the
+//   mean height — each piece measures `πR²` times its mean height, the
+//   axis-crossing distance from its rim, and the two pieces sum to the
+//   whole cylinder exactly. Areas: the elliptical face is `πab` with
+//   `b = R`, the side strip `2πR` times the mean height.
+// * A perpendicular plane (circle section) composes the K3a axis-meet
+//   circle; the pieces are ordinary cylinders.
+// * `cone_plane_boolean(op, origin, axis, base_radius, top_radius,
+//   height, p, n)` — the same contract on the cone, where the apex-side
+//   piece of a plain cone is the oblique cone over the ellipse: its
+//   volume is the classical `(1/3)·πab·d(apex, plane)`, exact for any
+//   obliqueness. The cone's faces carry the apex-origin
+//   parameterization (axis apex→base, semi-angle in (0, π/2),
+//   ref_radius 0) so the K3a section is the same curve OCCT would name.
+// * Non-representable configurations refuse by name: a plane parallel
+//   to the axis cutting the side (generator-line sections), a steep
+//   cone plane (the hyperbola/parabola class), a section that clips a
+//   cap, a plane through the apex. Non-secant pass-throughs are
+//   honest: the whole solid or the empty set.
+
+/// A cylinder in general position: R = 2, h = 5, base (0.5, −0.3, 1.0),
+/// axis +Z. The plane `n = (0.6, 0, 0.8)` through the axis point at
+/// v* = 2.5: secant, the ellipse's v-range [1.0, 4.0] strictly inside
+/// the band, both cap disks strictly missed.
+fn cyl_case() -> (Vector3, Vector3, f64, f64, Vector3, Vector3) {
+    (
+        v3(0.5, -0.3, 1.0),
+        v3(0.0, 0.0, 1.0),
+        2.0,
+        5.0,
+        v3(0.5, -0.3, 3.5),
+        v3(0.6, 0.0, 0.8),
+    )
+}
+
+/// A plain cone: r1 = 3, r2 = 0, h = 4, base at the origin, axis +Z
+/// (apex (0, 0, 4)). The plane `n = (0.28, 0, 0.96)` through the axis
+/// point at v* = 2: secant, the base disk strictly missed (|α| = 1.92 >
+/// r1·sinγ = 0.84), the apex strictly on the +n side.
+fn cone_case() -> (Vector3, Vector3, f64, f64, f64, Vector3, Vector3) {
+    (
+        v3(0.0, 0.0, 0.0),
+        v3(0.0, 0.0, 1.0),
+        3.0,
+        0.0,
+        4.0,
+        v3(0.0, 0.0, 2.0),
+        v3(0.28, 0.0, 0.96),
+    )
+}
+
+fn expect_refused(o: &BooleanOutcome, needle: &str, what: &str) {
+    match &o.kind {
+        BooleanOutcomeKind::Refused { why } => assert!(
+            why.contains(needle),
+            "{what}: refusal must name {needle:?}, got {why:?}"
+        ),
+        other => panic!("{what}: expected a refusal, got {other:?}"),
+    }
+}
+
+fn expect_empty(o: &BooleanOutcome, what: &str) {
+    assert!(
+        matches!(o.kind, BooleanOutcomeKind::Empty),
+        "{what}: expected the empty set, got {:?}",
+        o.kind
+    );
+}
+
+fn surface_kind(face: &fc_part::topology::TopoFace) -> &'static str {
+    face.surface.kind_name()
+}
+
+#[test]
+fn cylinder_plane_oblique_cut_composes_the_k3a_ellipse() {
+    let (o, axis, r, h, p, n) = cyl_case();
+    for op in [BooleanOp::Common, BooleanOp::Cut] {
+        let out = cylinder_plane_boolean(op, o, axis, r, h, p, n).expect("secant cylinder cut");
+        let brep = expect_solid(&out, "the oblique cylinder cut");
+        brep.validate().expect("the cut solid validates");
+
+        // Topology: strip + kept cap + elliptical face; the ellipse, the
+        // kept rim circle and the seam; two vertices; Euler 2.
+        assert_eq!(brep.faces.len(), 3, "strip + cap + elliptical face");
+        assert_eq!(brep.edges.len(), 3, "ellipse + rim circle + seam");
+        assert_eq!(brep.vertices.len(), 2, "one vertex per closed rim");
+        assert_eq!(brep.euler_characteristic(), 2, "a topological ball");
+        let mut kinds: Vec<&str> = brep.faces.iter().map(surface_kind).collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["Cylinder", "Plane", "Plane"]);
+
+        for e in 0..brep.edges.len() {
+            assert_eq!(brep.edge_uses(e), 2, "edge {e} used exactly twice");
+        }
+        // The shared edges run opposite under the two faces (the
+        // closed-shell orientation contract).
+        let uses_forward = |e: usize| -> (bool, bool) {
+            let mut it = brep
+                .faces
+                .iter()
+                .flat_map(|f| &f.wires)
+                .flat_map(|w| &w.edges)
+                .filter(|we| we.edge == e);
+            let a = it.next().unwrap().forward;
+            let b = it.next().unwrap().forward;
+            (a, b)
+        };
+        for e in 0..brep.edges.len() {
+            let (a, b) = uses_forward(e);
+            assert_ne!(a, b, "edge {e} traversed opposite by its two faces");
+        }
+
+        // The elliptical edge is the K3a plane×cylinder section of the
+        // STORED cylinder surface and the input plane — bit-identical.
+        let strip = brep
+            .faces
+            .iter()
+            .find(|f| matches!(f.surface, Surface::Cylinder { .. }))
+            .expect("the strip face");
+        let plane = Surface::Plane {
+            origin: p,
+            normal: n,
+            x_dir: v3(1.0, 0.0, 0.0),
+        };
+        let expected = match intersect_surfaces(&strip.surface, &plane) {
+            fc_part::intersect::SurfaceIntersection::Curves(cs) => cs[0].clone(),
+            other => panic!("the K3a ellipse, got {other:?}"),
+        };
+        let ellipse_edge = brep
+            .edges
+            .iter()
+            .find(|e| matches!(e.curve, Curve::Ellipse { .. }))
+            .expect("the ellipse edge");
+        assert!(
+            ellipse_edge.curve == expected,
+            "the elliptical rim is the K3a construction, bit-identically"
+        );
+
+        // The kept cap follows the side: with n·axis > 0 the top center
+        // is +n, so Common keeps the top cap and Cut the bottom one.
+        let g_top = v3(
+            o.x + axis.x * h - p.x,
+            o.y + axis.y * h - p.y,
+            o.z + axis.z * h - p.z,
+        )
+        .dot(&n);
+        let keep_top = if op == BooleanOp::Common {
+            g_top > 0.0
+        } else {
+            g_top < 0.0
+        };
+        let cap = brep
+            .faces
+            .iter()
+            .find(|f| {
+                matches!(f.surface, Surface::Plane { normal, .. } if normal.dot(&axis).abs() > 0.9)
+            })
+            .expect("the cap face");
+        match &cap.surface {
+            Surface::Plane { origin, .. } => {
+                let v_cap = v3(origin.x - o.x, origin.y - o.y, origin.z - o.z).dot(&axis);
+                approx(
+                    v_cap,
+                    if keep_top { h } else { 0.0 },
+                    "the kept cap sits on the kept side's rim",
+                );
+            }
+            other => panic!("a plane cap, got {other:?}"),
+        }
+
+        // FCBREP v3 round-trips the composed solid byte-identically
+        // (the seam is a degree-1 B-spline — the format's curve set).
+        let mut bytes = Vec::new();
+        write_brep(&mut bytes, brep).expect("write");
+        let back = read_brep_bytes(&bytes).expect("read");
+        let mut bytes2 = Vec::new();
+        write_brep(&mut bytes2, &back).expect("re-write");
+        assert_eq!(bytes, bytes2, "FCBREP round-trip is byte-identical");
+    }
+}
+
+#[test]
+fn cylinder_plane_volumes_and_areas_verify_by_cavalieri() {
+    let (o, axis, r, h, p, n) = cyl_case();
+    let v_star = 2.5_f64; // the axis crossing (the plane point's height)
+    let whole = std::f64::consts::PI * r * r * h;
+
+    let common = cylinder_plane_boolean(BooleanOp::Common, o, axis, r, h, p, n).expect("common");
+    let cut = cylinder_plane_boolean(BooleanOp::Cut, o, axis, r, h, p, n).expect("cut");
+    let top = expect_solid(&common, "common");
+    let bottom = expect_solid(&cut, "cut");
+
+    // Cavalieri: an oblique cut leaves the mean height alone.
+    let v_top = std::f64::consts::PI * r * r * (h - v_star);
+    let v_bottom = std::f64::consts::PI * r * r * v_star;
+    approx(
+        brep_volume(top).unwrap(),
+        v_top,
+        "Common (the +n piece) = πR²·(h − v*)",
+    );
+    approx(brep_volume(bottom).unwrap(), v_bottom, "Cut = πR²·v*");
+    approx(
+        brep_volume(top).unwrap() + brep_volume(bottom).unwrap(),
+        whole,
+        "the pieces sum to the whole cylinder",
+    );
+
+    // Areas: the elliptical face is πab with b = R and a = R/|n·axis|;
+    // the cap is πR²; the side strip is 2πR times the mean height.
+    let beta = n.dot(&axis);
+    let a_semi = r / beta.abs();
+    let area_ellipse = std::f64::consts::PI * a_semi * r;
+    let area_cap = std::f64::consts::PI * r * r;
+    let area_side_top = 2.0 * std::f64::consts::PI * r * (h - v_star);
+    let area_side_bottom = 2.0 * std::f64::consts::PI * r * v_star;
+    approx(
+        brep_area(top).unwrap(),
+        area_ellipse + area_cap + area_side_top,
+        "Common's boundary area",
+    );
+    approx(
+        brep_area(bottom).unwrap(),
+        area_ellipse + area_cap + area_side_bottom,
+        "Cut's boundary area",
+    );
+}
+
+#[test]
+fn cylinder_plane_perpendicular_cut_composes_circles() {
+    let (o, axis, r, h, _, _) = cyl_case();
+    // A ⊥ plane through the axis point at v* = 2.
+    let p = v3(0.5, -0.3, 3.0);
+    let n = v3(0.0, 0.0, 1.0);
+    let v_star = 2.0_f64;
+
+    let common = cylinder_plane_boolean(BooleanOp::Common, o, axis, r, h, p, n).expect("common");
+    let cut = cylinder_plane_boolean(BooleanOp::Cut, o, axis, r, h, p, n).expect("cut");
+    let top = expect_solid(&common, "common");
+    let bottom = expect_solid(&cut, "cut");
+    top.validate().expect("top validates");
+    bottom.validate().expect("bottom validates");
+
+    assert_eq!(top.euler_characteristic(), 2, "a ball");
+    assert_eq!(bottom.euler_characteristic(), 2, "a ball");
+    assert!(
+        top.edges
+            .iter()
+            .all(|e| !matches!(e.curve, Curve::Ellipse { .. })),
+        "no ellipse in a perpendicular section"
+    );
+
+    // The shared rim is the K3a axis-meet circle, bit-identical.
+    let strip = top
+        .faces
+        .iter()
+        .find(|f| matches!(f.surface, Surface::Cylinder { .. }))
+        .expect("the strip");
+    let plane = Surface::Plane {
+        origin: p,
+        normal: n,
+        x_dir: v3(1.0, 0.0, 0.0),
+    };
+    let expected = match intersect_surfaces(&strip.surface, &plane) {
+        fc_part::intersect::SurfaceIntersection::Curves(cs) => cs[0].clone(),
+        other => panic!("the K3a axis-meet circle, got {other:?}"),
+    };
+    let circle_edge = top
+        .edges
+        .iter()
+        .find(|e| matches!(&e.curve, Curve::Circle { radius, .. } if *radius > 0.0))
+        .expect("the cut circle");
+    assert!(
+        circle_edge.curve == expected,
+        "the K3a circle, bit-identically"
+    );
+
+    approx(
+        brep_volume(top).unwrap(),
+        std::f64::consts::PI * r * r * (h - v_star),
+        "the top piece",
+    );
+    approx(
+        brep_volume(bottom).unwrap(),
+        std::f64::consts::PI * r * r * v_star,
+        "the bottom piece",
+    );
+}
+
+#[test]
+fn cylinder_plane_classifies_nonsecant_configurations_honestly() {
+    let (o, axis, r, h, _, _) = cyl_case();
+
+    // Fuse is always unbounded (a halfspace union).
+    let (_, _, _, _, p, n) = cyl_case();
+    let fuse = cylinder_plane_boolean(BooleanOp::Fuse, o, axis, r, h, p, n).expect("fuse");
+    expect_refused(&fuse, "unbounded", "fusing a halfspace");
+
+    // The tool is the +n halfspace: a plane strictly ABOVE with
+    // n = +z leaves the cylinder outside — Common = empty, Cut =
+    // whole.
+    let above = cylinder_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r,
+        h,
+        v3(0.5, -0.3, 9.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("above");
+    expect_empty(&above, "above the tool");
+    let cut = cylinder_plane_boolean(
+        BooleanOp::Cut,
+        o,
+        axis,
+        r,
+        h,
+        v3(0.5, -0.3, 9.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("cut above");
+    approx(
+        brep_volume(expect_solid(&cut, "cut above")).unwrap(),
+        std::f64::consts::PI * r * r * h,
+        "the whole cylinder",
+    );
+
+    // Strictly below (the tool contains the cylinder): Common =
+    // whole, Cut = empty.
+    let below = cylinder_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r,
+        h,
+        v3(0.5, -0.3, -4.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("below");
+    approx(
+        brep_volume(expect_solid(&below, "below the tool")).unwrap(),
+        std::f64::consts::PI * r * r * h,
+        "the whole cylinder",
+    );
+    let cut_below = cylinder_plane_boolean(
+        BooleanOp::Cut,
+        o,
+        axis,
+        r,
+        h,
+        v3(0.5, -0.3, -4.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("cut below");
+    expect_empty(&cut_below, "cut below the solid");
+
+    // A plane parallel to the axis, missing the cylinder.
+    let miss = cylinder_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r,
+        h,
+        v3(3.5, -0.3, 1.0),
+        v3(1.0, 0.0, 0.0),
+    )
+    .expect("parallel miss");
+    expect_empty(&miss, "a parallel plane beyond the radius");
+
+    // A plane parallel to the axis, tangent along a generator: the
+    // intersection is a line, not a solid.
+    let tangent = cylinder_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r,
+        h,
+        v3(2.5, -0.3, 1.0),
+        v3(1.0, 0.0, 0.0),
+    )
+    .expect("parallel tangent");
+    expect_empty(&tangent, "the tangent line is not a solid");
+
+    // A plane parallel to the axis, secant: the section is two
+    // generator lines — refused by name.
+    let secant = cylinder_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r,
+        h,
+        v3(1.0, -0.3, 1.0),
+        v3(1.0, 0.0, 0.0),
+    )
+    .expect("parallel secant");
+    expect_refused(
+        &secant,
+        "generator lines",
+        "a line-section cut of the cylinder",
+    );
+
+    // An oblique plane whose section clips a cap rim: refused by name.
+    let straddle = cylinder_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r,
+        h,
+        v3(0.5, -0.3, 1.4),
+        v3(0.8, 0.0, 0.6),
+    )
+    .expect("cap-straddling");
+    expect_refused(&straddle, "cap", "a section that clips a cap");
+}
+
+#[test]
+fn cone_plane_oblique_cut_composes_the_k3a_ellipse() {
+    let (o, axis, r1, r2, h, p, n) = cone_case();
+    for op in [BooleanOp::Common, BooleanOp::Cut] {
+        let out = cone_plane_boolean(op, o, axis, r1, r2, h, p, n).expect("secant cone cut");
+        let brep = expect_solid(&out, "the oblique cone cut");
+        brep.validate().expect("the cut solid validates");
+
+        // Common keeps the apex piece (the apex is +n here): strip +
+        // elliptical face; Cut keeps the base piece: strip + base cap
+        // + elliptical face.
+        let want_faces = if op == BooleanOp::Common { 2 } else { 3 };
+        assert_eq!(brep.faces.len(), want_faces, "the {op:?} piece's faces");
+        assert_eq!(brep.euler_characteristic(), 2, "a topological ball");
+        for e in 0..brep.edges.len() {
+            if brep.is_degenerate(e) {
+                continue;
+            }
+            assert_eq!(brep.edge_uses(e), 2, "edge {e} used exactly twice");
+        }
+
+        // The elliptical rim is the K3a section of the STORED cone
+        // surface and the input plane, bit-identically. The stored
+        // cone is the apex-origin parameterization (axis apex→base).
+        let strip = brep
+            .faces
+            .iter()
+            .find(|f| matches!(f.surface, Surface::Cone { .. }))
+            .expect("the strip face");
+        let plane = Surface::Plane {
+            origin: p,
+            normal: n,
+            x_dir: v3(1.0, 0.0, 0.0),
+        };
+        let expected = match intersect_surfaces(&strip.surface, &plane) {
+            fc_part::intersect::SurfaceIntersection::Curves(cs) => cs[0].clone(),
+            other => panic!("the K3a ellipse, got {other:?}"),
+        };
+        let ellipse_edge = brep
+            .edges
+            .iter()
+            .find(|e| matches!(e.curve, Curve::Ellipse { .. }))
+            .expect("the ellipse edge");
+        assert!(
+            ellipse_edge.curve == expected,
+            "the elliptical rim is the K3a construction, bit-identically"
+        );
+
+        // The stored cone's apex is the geometric apex of the operand.
+        match &strip.surface {
+            Surface::Cone {
+                origin, axis: sa, ..
+            } => {
+                let apex = v3(o.x + axis.x * h, o.y + axis.y * h, o.z + axis.z * h);
+                assert_eq!(*origin, apex, "the cone's parameter origin is the apex");
+                approx(sa.dot(&axis), -1.0, "the stored axis points apex→base");
+            }
+            other => panic!("a cone strip, got {other:?}"),
+        }
+
+        // FCBREP round-trip.
+        let mut bytes = Vec::new();
+        write_brep(&mut bytes, brep).expect("write");
+        let back = read_brep_bytes(&bytes).expect("read");
+        let mut bytes2 = Vec::new();
+        write_brep(&mut bytes2, &back).expect("re-write");
+        assert_eq!(bytes, bytes2, "FCBREP round-trip is byte-identical");
+    }
+}
+
+#[test]
+fn cone_plane_volumes_verify_by_the_oblique_cone_formula() {
+    let (o, axis, r1, _r2, h, p, n) = cone_case();
+    let apex = v3(o.x + axis.x * h, o.y + axis.y * h, o.z + axis.z * h);
+    let d_apex = v3(apex.x - p.x, apex.y - p.y, apex.z - p.z).dot(&n).abs();
+
+    let common = cone_plane_boolean(BooleanOp::Common, o, axis, r1, 0.0, h, p, n).expect("common");
+    let cut = cone_plane_boolean(BooleanOp::Cut, o, axis, r1, 0.0, h, p, n).expect("cut");
+    let apex_piece = expect_solid(&common, "the apex piece");
+    let base_piece = expect_solid(&cut, "the base piece");
+
+    // The classical oblique cone: V = (1/3)·(ellipse area)·(apex
+    // height over the plane) — exact for any obliqueness.
+    let (a_semi, b_semi) = match &apex_piece
+        .edges
+        .iter()
+        .find(|e| matches!(e.curve, Curve::Ellipse { .. }))
+        .unwrap()
+        .curve
+    {
+        Curve::Ellipse {
+            major_radius,
+            minor_radius,
+            ..
+        } => (*major_radius, *minor_radius),
+        other => panic!("{other:?}"),
+    };
+    let v_apex_piece = std::f64::consts::PI * a_semi * b_semi * d_apex / 3.0;
+    approx(
+        brep_volume(apex_piece).unwrap(),
+        v_apex_piece,
+        "V(apex piece) = (1/3)·πab·d(apex, plane)",
+    );
+
+    let v_whole = std::f64::consts::PI * r1 * r1 * h / 3.0;
+    approx(
+        brep_volume(base_piece).unwrap(),
+        v_whole - v_apex_piece,
+        "the base piece completes the cone",
+    );
+    approx(
+        brep_volume(apex_piece).unwrap() + brep_volume(base_piece).unwrap(),
+        v_whole,
+        "the pieces sum to the whole cone",
+    );
+}
+
+#[test]
+fn cone_plane_frustum_volumes_verify_by_cone_subtraction() {
+    // The frustum r1 = 3 → r2 = 1, h = 4, cut by the same oblique
+    // plane. The +n (top) piece is the oblique cone over the ellipse
+    // from the extended apex, minus the small right cone above the
+    // top rim — both classical.
+    let (o, axis, r1, _r2, h, p, n) = cone_case();
+    let r2 = 1.0_f64;
+    let h_apex = h * r1 / (r1 - r2); // 6: the extended apex height
+    let apex = v3(
+        o.x + axis.x * h_apex,
+        o.y + axis.y * h_apex,
+        o.z + axis.z * h_apex,
+    );
+    let d_apex = v3(apex.x - p.x, apex.y - p.y, apex.z - p.z).dot(&n).abs();
+
+    let common = cone_plane_boolean(BooleanOp::Common, o, axis, r1, r2, h, p, n).expect("common");
+    let cut = cone_plane_boolean(BooleanOp::Cut, o, axis, r1, r2, h, p, n).expect("cut");
+    let top = expect_solid(&common, "the top piece");
+    let base = expect_solid(&cut, "the base piece");
+    top.validate().expect("top validates");
+    base.validate().expect("base validates");
+
+    let (a_semi, b_semi) = match &top
+        .edges
+        .iter()
+        .find(|e| matches!(e.curve, Curve::Ellipse { .. }))
+        .unwrap()
+        .curve
+    {
+        Curve::Ellipse {
+            major_radius,
+            minor_radius,
+            ..
+        } => (*major_radius, *minor_radius),
+        other => panic!("{other:?}"),
+    };
+    let v_top = std::f64::consts::PI * a_semi * b_semi * d_apex / 3.0
+        - std::f64::consts::PI * r2 * r2 * (h_apex - h) / 3.0;
+    approx(
+        brep_volume(top).unwrap(),
+        v_top,
+        "the top piece by cone subtraction",
+    );
+    let v_whole = std::f64::consts::PI * h * (r1 * r1 + r1 * r2 + r2 * r2) / 3.0;
+    approx(
+        brep_volume(base).unwrap(),
+        v_whole - v_top,
+        "the base piece completes the frustum",
+    );
+    approx(
+        brep_volume(top).unwrap() + brep_volume(base).unwrap(),
+        v_whole,
+        "the pieces sum to the whole frustum",
+    );
+}
+
+#[test]
+fn cone_plane_perpendicular_cut_composes_frusta() {
+    let (o, axis, r1, _r2, h, _, _) = cone_case();
+    let p = v3(0.0, 0.0, 2.0);
+    let n = v3(0.0, 0.0, 1.0);
+
+    let common = cone_plane_boolean(BooleanOp::Common, o, axis, r1, 0.0, h, p, n).expect("common");
+    let cut = cone_plane_boolean(BooleanOp::Cut, o, axis, r1, 0.0, h, p, n).expect("cut");
+    let top = expect_solid(&common, "the apex piece");
+    let bottom = expect_solid(&cut, "the base piece");
+    top.validate().expect("top validates");
+    bottom.validate().expect("bottom validates");
+
+    // The section circle has radius r1·(1 − v*/h) = 1.5.
+    let rho = r1 * (1.0 - 2.0 / h);
+    approx(
+        brep_volume(top).unwrap(),
+        std::f64::consts::PI * rho * rho * 2.0 / 3.0,
+        "the apex piece is the short cone",
+    );
+    approx(
+        brep_volume(bottom).unwrap(),
+        std::f64::consts::PI * 2.0 * (r1 * r1 + r1 * rho + rho * rho) / 3.0,
+        "the base piece is the frustum",
+    );
+}
+
+#[test]
+fn cone_plane_classifies_nonsecant_configurations_honestly() {
+    let (o, axis, r1, _r2, h, _, _) = cone_case();
+
+    // A steep plane (hyperbola class) through the axis segment.
+    let steep = cone_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r1,
+        0.0,
+        h,
+        v3(0.0, 0.0, 2.0),
+        v3(0.96, 0.0, 0.28),
+    )
+    .expect("steep");
+    expect_refused(&steep, "hyperbola", "a steep-plane section");
+
+    // A plane through the apex.
+    let through = cone_plane_boolean(
+        BooleanOp::Cut,
+        o,
+        axis,
+        r1,
+        0.0,
+        h,
+        v3(0.0, 0.0, 4.0),
+        v3(0.6, 0.0, 0.8),
+    )
+    .expect("through the apex");
+    expect_refused(&through, "apex", "a plane through the apex");
+
+    // The plane strictly above the apex (the cone outside the +n
+    // halfspace): Common = empty, Cut = whole.
+    let above = cone_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r1,
+        0.0,
+        h,
+        v3(0.0, 0.0, 9.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("above");
+    expect_empty(&above, "above the tool");
+    let cut_above = cone_plane_boolean(
+        BooleanOp::Cut,
+        o,
+        axis,
+        r1,
+        0.0,
+        h,
+        v3(0.0, 0.0, 9.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("cut above");
+    approx(
+        brep_volume(expect_solid(&cut_above, "the whole cone")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h / 3.0,
+        "the whole cone",
+    );
+
+    // The plane strictly below the base (the tool contains the cone):
+    // Common = whole, Cut = empty.
+    let below = cone_plane_boolean(
+        BooleanOp::Common,
+        o,
+        axis,
+        r1,
+        0.0,
+        h,
+        v3(0.0, 0.0, -3.0),
+        v3(0.0, 0.0, 1.0),
+    )
+    .expect("below");
+    approx(
+        brep_volume(expect_solid(&below, "the whole cone")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h / 3.0,
+        "the whole cone",
+    );
+
+    // Fuse is unbounded.
+    let (_, _, _, _, _, p, n) = cone_case();
+    let fuse = cone_plane_boolean(BooleanOp::Fuse, o, axis, r1, 0.0, h, p, n).expect("fuse");
+    expect_refused(&fuse, "unbounded", "fusing a halfspace");
 }

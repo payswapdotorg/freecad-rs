@@ -98,7 +98,7 @@ pub enum SurfaceIntersection {
 /// are "parallel" for the structural classifications (the induced
 /// geometry differs from the band answer by < `1e-9·scale` over any
 /// representable extent; derivation in the module doc).
-const PARALLEL_BAND: f64 = 4.414_273_778_205_676e-15; // 2^-48
+pub(crate) const PARALLEL_BAND: f64 = 4.414_273_778_205_676e-15; // 2^-48
 
 // ---------------------------------------------------------------------------
 // exact float expansions (Shewchuk-style; the classification tier)
