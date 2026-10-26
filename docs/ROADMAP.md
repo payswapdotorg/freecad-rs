@@ -332,9 +332,31 @@ behind us.
       for full K3 closure: K3b — the differential OCCT fixture
       corpus (committed FreeCAD 1.0 section results) — and K3c —
       booleans composing the sections
-- [ ] **K3 (remaining)** exact intersections & booleans on analytic
-      surfaces — differential-tested against a committed
-      OCCT-generated fixture corpus with expected results
+- [x] **K3b (landing 2026-10-26)** the differential OCCT fixture
+      corpus — `scripts/parity/regen_k3_sections.py` generates, via
+      the parity gate's own pinned FreeCAD 1.0.0 AppImage (r39109),
+      OCCT's `BRepAlgoAPI_Section` curves for the 17 canonical pairs
+      (finite primitives generous enough that the wanted sections
+      are interior; cap/rim edges filtered by a majority-interior
+      rule), recording each curve's parameters and 33 sample points
+      from OCCT's own edge parameterization into
+      `crates/fc-part/tests/fixtures/k3_sections.json` (committed,
+      regenerable). The differential —
+      `crates/fc-part/tests/intersect_differential.rs` — is honest
+      about direction: OCCT intersected finite shapes, we intersect
+      the infinite surfaces, so our answer is a superset; the
+      contract is **every OCCT sample point lies within machine
+      scale of a closed-form curve** (28 curves, 924 points, all
+      covered; lines and circles analytically, ellipses by
+      coarse-scan + bisection refinement). It caught a real defect
+      before it could ship: `cylinder_cone_coaxial` computed the
+      cone's apex along the canonical axis instead of the cone's
+      own stored axis — wrong by the apex offset for every
+      antiparallel-stored (contracting-frustum) cone; fixed with
+      signed slopes in `cylinder_cone` and `cone_cone`
+- [ ] **K3 (remaining)** exact booleans on analytic surfaces
+      composing the K3a sections — the intersections half of K3's
+      acceptance (the OCCT differential corpus) is now closed
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets

@@ -11,3 +11,6 @@ rust-version.workspace = true
 fc-base.workspace = true
 fc-app.workspace = true
 fc-sketcher.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

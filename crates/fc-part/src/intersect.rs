@@ -715,14 +715,26 @@ fn cylinder_cone(
     if sin_semi <= 0.0 {
         return not_analytic("degenerate cone (semi_angle ≤ 0): no analytic section");
     }
-    let apex = o_cone - a * (ref_radius * (cos_semi / sin_semi));
+    let t = sin_semi / cos_semi;
+    // The cone's apex in ITS OWN axis frame (the stored axis may be
+    // antiparallel to the canonical one — contracting frusta are
+    // recorded flipped so the semi-angle stays positive).
+    let apex = o_cone - cone_axis * (ref_radius / t);
     if radius == 0.0 {
         return SurfaceIntersection::Point(apex);
     }
-    let t = sin_semi / cos_semi; // tan(semi)
+    // Signed slope along the canonical axis: radius(z) = ref +
+    // (z − z_o)·σ·t with σ = sign(cone_axis · a).
+    let sigma = cone_axis.dot(&a);
+    if sigma == 0.0 {
+        return not_analytic("cone axis perpendicular to the common axis");
+    }
+    let slope = sigma * t;
+    let z_o = o_cone.dot(&a);
+    let center_at = |z: f64| o_cone + a * (z - z_o);
     SurfaceIntersection::Curves(vec![
-        circle(apex + a * (radius / t), a, radius),
-        circle(apex - a * (radius / t), a, radius),
+        circle(center_at(z_o + (radius - ref_radius) / slope), a, radius),
+        circle(center_at(z_o + (-radius - ref_radius) / slope), a, radius),
     ])
 }
 
@@ -831,14 +843,15 @@ fn cone_cone(
         );
     };
     // Canonical operand order (after the order-independent coaxial
-    // test): the root listing must not permute with the call.
-    let ((o1, semi1, ref1), (o2, semi2, ref2)) = if lex_after(
+    // test): the root listing must not permute with the call. The
+    // axes travel with their cones (the apex math is frame-local).
+    let ((o1, a1, semi1, ref1), (o2, a2, semi2, ref2)) = if lex_after(
         &[o1.x, o1.y, o1.z, semi1, ref1],
         &[o2.x, o2.y, o2.z, semi2, ref2],
     ) {
-        ((o2, semi2, ref2), (o1, semi1, ref1))
+        ((o2, a2, semi2, ref2), (o1, a1, semi1, ref1))
     } else {
-        ((o1, semi1, ref1), (o2, semi2, ref2))
+        ((o1, a1, semi1, ref1), (o2, a2, semi2, ref2))
     };
     let (s1, c1s) = semi1.sin_cos();
     let (s2, c2s) = semi2.sin_cos();
@@ -847,35 +860,38 @@ fn cone_cone(
     }
     let t1 = s1 / c1s;
     let t2 = s2 / c2s;
-    let apex1 = o1 - a * (ref1 * (c1s / s1));
-    let apex2 = o2 - a * (ref2 * (c2s / s2));
+    // Apexes in each cone's OWN axis frame (stored axes may be
+    // antiparallel to the canonical one).
+    let apex1 = o1 - a1 * (ref1 / t1);
+    let apex2 = o2 - a2 * (ref2 / t2);
     if t1 == t2 && apex1 == apex2 {
         return SurfaceIntersection::Coincident;
     }
-    // Radius at axial height z (measured from apex_i along a):
-    // |t_i·(z − z_ai)|. Agreement |u1(z)| = |u2(z)| splits into two
-    // linear equations.
-    let za1 = (apex1 - o1).dot(&a) + 0.0; // apex1's axial coord relative to o1
-    let _ = za1;
-    // Work in global axial coordinates along a measured from apex1.
-    // u1(z) = t1·z (z from apex1); u2(z) = t2·(z − dz) (dz = signed
-    // apex2 − apex1 along a).
-    let dz = (apex2 - apex1).dot(&a);
-    let mut zs: Vec<f64> = Vec::new();
-    // L1: t1·z = t2·(z − dz) → (t1 − t2)·z = −t2·dz
-    if t1 != t2 {
-        zs.push(-t2 * dz / (t1 - t2));
+    // Radius at canonical height z: u_i(z) = ref_i + (z − z_i)·σ_i·t_i
+    // (σ_i = sign of the stored axis against the canonical one).
+    let z1 = o1.dot(&a);
+    let z2 = o2.dot(&a);
+    let slope1 = a1.dot(&a) * t1;
+    let slope2 = a2.dot(&a) * t2;
+    if slope1 == 0.0 || slope2 == 0.0 {
+        return not_analytic("cone axis perpendicular to the common axis");
     }
-    // L2: t1·z = −t2·(z − dz) → (t1 + t2)·z = t2·dz
-    zs.push(t2 * dz / (t1 + t2));
+    // |u1| = |u2| splits into u1 = ±u2, each linear in z.
+    let mut zs: Vec<f64> = Vec::new();
+    if slope1 != slope2 {
+        zs.push((ref2 - ref1 + slope1 * z1 - slope2 * z2) / (slope1 - slope2));
+    }
+    if slope1 + slope2 != 0.0 {
+        zs.push((-ref2 - ref1 + slope1 * z1 + slope2 * z2) / (slope1 + slope2));
+    }
     let mut curves = Vec::new();
     for &z in &zs {
-        let rho = t1 * z;
+        let rho = ref1 + (z - z1) * slope1;
         if rho == 0.0 {
             // Both radii vanish together only at a shared apex.
             return SurfaceIntersection::Point(apex1);
         }
-        let center = apex1 + a * z;
+        let center = o1 + a * (z - z1);
         curves.push(circle(center, a, rho.abs()));
     }
     if curves.len() == 2 && curves[0] == curves[1] {
