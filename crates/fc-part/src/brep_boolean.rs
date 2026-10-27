@@ -2006,10 +2006,37 @@ pub fn cylinder_cylinder_boolean(
                 BooleanOp::Cut => empty(),
             });
         }
-        return Ok(refused(
-            "coincident cylinders with staggered ranges — the end-to-end piece \
-             compositions are the next slice",
-        ));
+        // Staggered ranges: the end-to-end pieces.
+        // Common: the overlap piece. Fuse: the hull when the ranges
+        // meet. Cut: the part of a outside b — one piece when b clips
+        // an end of a, empty when b covers a, two pieces (refused)
+        // when b sits strictly inside.
+        let hull_lo = s2.min(0.0);
+        let hull_hi = (s2 + h2).max(h1);
+        return Ok(match op {
+            BooleanOp::Common => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(cylinder_piece(o1, a, r1, v_lo, v_hi)),
+            },
+            BooleanOp::Fuse if v_lo < v_hi => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(cylinder_piece(o1, a, r1, hull_lo, hull_hi)),
+            },
+            BooleanOp::Fuse => disjoint_fuse(),
+            BooleanOp::Cut if b_covers_a => empty(),
+            BooleanOp::Cut if s2 > 0.0 && s2 + h2 < h1 => refused(
+                "the coincident cut with b strictly inside — two pieces, a \
+                 two-shell compound",
+            ),
+            BooleanOp::Cut if v_lo < v_hi => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(if s2 <= 0.0 {
+                    cylinder_piece(o1, a, r1, v_hi, h1)
+                } else {
+                    cylinder_piece(o1, a, r1, 0.0, v_lo)
+                }),
+            },
+            BooleanOp::Cut => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(whole_a()),
+            },
+        });
     }
 
     // ---- nested cross-sections (or their internal tangency) ------------

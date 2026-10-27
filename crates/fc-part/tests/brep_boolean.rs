@@ -1898,12 +1898,18 @@ fn cyl_cyl_classifies_nonsecant_configurations_honestly() {
         .expect("staggered");
     expect_refused(&fuse, "staggered", "the staggered fuse");
 
-    // Coincident cylinders with staggered ranges: refused by name.
+    // Coincident cylinders with staggered ranges: the end-to-end
+    // pieces (the overlap for the common — the full battery is the
+    // coincident-staggered test's own).
     let shift2 = v3(a.x * 2.0, a.y * 2.0, a.z * 2.0);
     let oc = v3(o1.x + shift2.x, o1.y + shift2.y, o1.z + shift2.z);
     let out = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, oc, a, r1, 5.0)
         .expect("coincident");
-    expect_refused(&out, "staggered", "coincident cylinders, staggered ranges");
+    approx(
+        brep_volume(expect_solid(&out, "the overlap piece")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * 3.0,
+        "coincident staggered common: the overlap piece",
+    );
 }
 
 #[test]
@@ -1998,4 +2004,89 @@ fn cyl_cyl_one_sided_and_edge_drills_refuse_by_name() {
     let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2u, a, r2, 2.0)
         .expect("one-sided out");
     expect_refused(&cut, "slice", "the one-sided out drill");
+}
+
+#[test]
+fn cyl_cyl_coincident_staggered_composes_the_pieces() {
+    // Coaxial, equal radii, staggered ranges: the end-to-end
+    // compositions — the common is the overlap piece, the fuse the
+    // hull, the cut the part of a outside b (one piece when b clips
+    // one end, two when it sits strictly inside — refused).
+    let a = v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0);
+    let o1 = v3(0.5, -1.0, 2.0);
+    let r = 2.0;
+    let h1 = 5.0;
+    let shift = |d: f64| v3(o1.x + a.x * d, o1.y + a.y * d, o1.z + a.z * d);
+    let pi = std::f64::consts::PI;
+
+    // b on top: ranges [0,5] and [3,8].
+    let o2 = shift(3.0);
+    let common = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r, h1, o2, a, r, 5.0)
+        .expect("the overlap piece");
+    approx(
+        brep_volume(expect_solid(&common, "the overlap")).unwrap(),
+        pi * r * r * 2.0,
+        "coincident common: the overlap piece",
+    );
+    let fuse = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r, h1, o2, a, r, 5.0)
+        .expect("the hull piece");
+    approx(
+        brep_volume(expect_solid(&fuse, "the hull")).unwrap(),
+        pi * r * r * 8.0,
+        "coincident fuse: the hull piece",
+    );
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r, h1, o2, a, r, 5.0)
+        .expect("the below piece");
+    approx(
+        brep_volume(expect_solid(&cut, "a below b")).unwrap(),
+        pi * r * r * 3.0,
+        "coincident cut: the part below b",
+    );
+
+    // b strictly inside: [1.5, 3.5] within [0,5] — the cut is two
+    // pieces (a below and above b): refused as a two-shell compound.
+    let oi = shift(1.5);
+    let cut =
+        cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r, h1, oi, a, r, 2.0).expect("two pieces");
+    expect_refused(&cut, "two", "the strictly-inside coincident cut");
+    // Its common and fuse stay pieces.
+    let common = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r, h1, oi, a, r, 2.0)
+        .expect("the inside overlap");
+    approx(
+        brep_volume(expect_solid(&common, "the overlap")).unwrap(),
+        pi * r * r * 2.0,
+        "the strictly-inside coincident common",
+    );
+    let fuse = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r, h1, oi, a, r, 2.0)
+        .expect("the whole a");
+    approx(
+        brep_volume(expect_solid(&fuse, "a")).unwrap(),
+        pi * r * r * h1,
+        "the strictly-inside coincident fuse is a",
+    );
+
+    // b hanging below: ranges [0,5] and [-2,3]: the cut keeps a's
+    // part above b.
+    let ob = shift(-2.0);
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r, h1, ob, a, r, 5.0)
+        .expect("the above piece");
+    approx(
+        brep_volume(expect_solid(&cut, "a above b")).unwrap(),
+        pi * r * r * 2.0,
+        "coincident cut: the part above b",
+    );
+
+    // z-disjoint coincident cylinders: the fuse is a two-shell
+    // compound — refused; the cut is the whole a.
+    let oz = shift(10.0);
+    let fuse =
+        cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r, h1, oz, a, r, 5.0).expect("disjoint");
+    expect_refused(&fuse, "two-shell", "the z-disjoint coincident fuse");
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r, h1, oz, a, r, 5.0)
+        .expect("the whole a");
+    approx(
+        brep_volume(expect_solid(&cut, "a")).unwrap(),
+        pi * r * r * h1,
+        "the z-disjoint coincident cut",
+    );
 }
