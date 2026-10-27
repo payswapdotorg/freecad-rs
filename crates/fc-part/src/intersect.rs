@@ -259,7 +259,7 @@ fn not_analytic(why: &str) -> SurfaceIntersection {
 /// same-kind pair functions canonicalize their operands with this,
 /// so `intersect(a, b)` and `intersect(b, a)` construct bit-identical
 /// answers even where the dispatch cannot reorder (same-kind pairs).
-fn lex_after(a: &[f64], b: &[f64]) -> bool {
+pub(crate) fn lex_after(a: &[f64], b: &[f64]) -> bool {
     for (x, y) in a.iter().zip(b.iter()) {
         if x < y {
             return false;

@@ -480,8 +480,39 @@ behind us.
       generous box (an order of magnitude larger than the operand),
       one face ON the cutting plane — the honest proxy is recorded in
       the JSON itself.
-- [ ] **K3 (remaining)** the wider analytic-pair booleans
-      (cylinder×cylinder, the coaxial families)
+- [x] **K3d (landing 2026-10-27)** cylinder×cylinder — the
+      parallel-axis compositions. The section (the two generator
+      lines, K3a, reused bit-identically) makes every plane ⊥ the
+      axes the SAME two-circle picture, so the booleans are prisms of
+      the planar circle-circle booleans over the z-overlap: the
+      **Common** lens prism (each cylinder's inside-arc strip over
+      the clamped overlap — any z-stagger), the **Cut** with the
+      tool's z-range covering the target's (the target's outside-arc
+      strip, the tool's inside-arc wall — a REVERSED face, the solid
+      outside the tool — and the disk-minus-lens caps), the **Fuse**
+      of equal ranges (both outside-arc strips, union caps), and the
+      nested **tube** (the tool strictly inside cross-wise: the
+      target's mantle, the tool's mantle reversed, annular
+      multi-wire caps). The enabling representation: the arcs are the
+      classical **rational quadratic B-splines** (NURBS circle arcs —
+      control points [start, tangent-intersection, end], weights
+      [1, cos(sweep/2), 1], clamped knots, de Boor exact at both
+      ends), because a `Circle` parameter range cannot share the
+      crossing vertices bit-exactly across the two operands' frames;
+      sweeps wider than a quadrant split (the classical
+      conditioning rule). The measurement reads them back exactly:
+      cap areas by the closed-form line integral
+      `∫(x dy − y dx) = R²Δθ + c × Δp` per arc, strips as swept
+      angular intervals (`F = σRΔv(R|Δθ| + o·W)`). Volumes verify
+      against the classical lens-area prisms and the partition
+      identities to 1e-12. Honest refusals by name: the Steinmetz
+      quartic (non-parallel axes, K3a's own), the staggered
+      cut/fuse and drill (the notch mantles — a later slice), the
+      pinched tube of the internal cross-tangency (measure zero),
+      tangent/disjoint fuses, and the coincident-to-machine-precision
+      reading of ulp-scale axis residues. Remaining for full K3
+      closure: the coaxial boolean families (cylinder×sphere, the
+      capsule cuts) and the staggered notch mantles.
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets

@@ -306,6 +306,93 @@ fn wire_area_in_frame(
             }
         }
     }
+    // The conic-arc path (the K3d caps): exact line integrals per
+    // edge — `∫(x dy − y dx) = R²Δθ + c × Δp` over each arc (closed
+    // form), the straight terms `a × b` over each chord/bridge, the
+    // area |Σ|/2 (the shoelace generalized to arcs).
+    let has_arc = wire
+        .edges
+        .iter()
+        .any(|we| matches!(&brep.edges[we.edge].curve, Curve::Bspline { degree: 2, .. }));
+    if has_arc {
+        let pt2 = |p: Vector3| {
+            let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+            (off.dot(&x_dir), off.dot(&y_dir))
+        };
+        let mut twice = 0.0;
+        for we in &wire.edges {
+            let edge = &brep.edges[we.edge];
+            if edge.start == edge.end {
+                return Err(format!(
+                    "face {i} wire {wi}: a closed edge in an arc-trimmed plane wire"
+                ));
+            }
+            let (si, ei) = if we.forward {
+                (edge.start, edge.end)
+            } else {
+                (edge.end, edge.start)
+            };
+            let ps = pt2(brep.vertices[si].point);
+            let pe = pt2(brep.vertices[ei].point);
+            let term = match &edge.curve {
+                Curve::Line { .. } => ps.0 * pe.1 - ps.1 * pe.0,
+                Curve::Bspline {
+                    degree: 1,
+                    points,
+                    weights: None,
+                    ..
+                } if points.len() == 2 => ps.0 * pe.1 - ps.1 * pe.0,
+                Curve::Bspline {
+                    degree: 2, points, ..
+                } => {
+                    // The arc lies in the plane: its control points and
+                    // its circle's center are on it.
+                    for p in points {
+                        let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+                        if off.dot(&normal).abs() > tol {
+                            return Err(format!(
+                                "face {i} wire {wi}: an arc trim not lying in the plane"
+                            ));
+                        }
+                    }
+                    let arc = match conic_arc_of(&edge.curve)? {
+                        Some(a) => a,
+                        None => {
+                            return Err(format!(
+                                "face {i} wire {wi}: a degree-2 trim that is not a \
+                                 circular arc this reader knows"
+                            ))
+                        }
+                    };
+                    let off_c = v3(arc.center.x - o.x, arc.center.y - o.y, arc.center.z - o.z);
+                    if off_c.dot(&normal).abs() > tol {
+                        return Err(format!(
+                            "face {i} wire {wi}: an arc trim not lying in the plane"
+                        ));
+                    }
+                    let c2 = (off_c.dot(&x_dir), off_c.dot(&y_dir));
+                    // The arc's sweep is CCW around its own axis; in
+                    // the face frame (right-handed against the normal)
+                    // it runs CCW iff the axes agree.
+                    let sgn = arc.normal.dot(&normal).signum();
+                    let fwd = if we.forward { 1.0 } else { -1.0 };
+                    // The line integral over the stored direction,
+                    // negated by a reversed use: R²·(sgn·sweep) plus
+                    // the center's cross with the displacement.
+                    fwd * arc.radius * arc.radius * sgn * arc.sweep + c2.0 * (pe.1 - ps.1)
+                        - c2.1 * (pe.0 - ps.0)
+                }
+                _ => {
+                    return Err(format!(
+                        "face {i} wire {wi}: an edge the arc reader does not know ({})",
+                        edge.curve.kind_name()
+                    ))
+                }
+            };
+            twice += term;
+        }
+        return Ok(twice.abs() / 2.0);
+    }
     // The polygon: line edges, shoelace over the walk-order vertices.
     let mut points: Vec<(f64, f64)> = Vec::new();
     for we in &wire.edges {
@@ -452,6 +539,124 @@ struct StripEllipse {
 /// One section-circle rim: `(center, radius)`.
 type CircleRim = (Vector3, f64);
 
+/// A circular arc recognized from a rational quadratic B-spline (the
+/// K3d arc representation — the classical NURBS circle arc, see
+/// `brep_boolean`): its circle's center, the rotation axis the sweep
+/// runs CCW around, the radius, and the sweep in `(0, 2π)`.
+struct ConicArc {
+    center: Vector3,
+    normal: Vector3,
+    radius: f64,
+    sweep: f64,
+}
+
+/// Recognize the rational quadratic circular arc: degree 2, clamped
+/// knots `[0,0,0,1,1,1]`, three control points, weights `[1, w, 1]`
+/// with `0 < w ≤ 1`. The circle is re-derived from the control
+/// polygon — the center at the intersection of the end tangents'
+/// perpendiculars — and verified circular (equidistant ends, and the
+/// weight equal to `cos(sweep/2)`; a genuine circular arc satisfies
+/// both exactly). Anything else is not an arc this reader knows.
+fn conic_arc_of(curve: &Curve) -> Result<Option<ConicArc>, String> {
+    let Curve::Bspline {
+        degree: 2,
+        knots,
+        points,
+        weights: Some(w),
+    } = curve
+    else {
+        return Ok(None);
+    };
+    if points.len() != 3
+        || knots.as_slice() != [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+        || w[0] != 1.0
+        || w[2] != 1.0
+        || !(w[1] > 0.0 && w[1] <= 1.0)
+    {
+        return Ok(None);
+    }
+    let (p0, pm, p2) = (points[0], points[1], points[2]);
+    // The in-plane frame: e₁ along the first tangent (toward the
+    // middle control point), n̂ the plane normal, e₂ = n̂ × e₁.
+    let t0 = v3(pm.x - p0.x, pm.y - p0.y, pm.z - p0.z);
+    let t0_len = t0.length();
+    if t0_len <= 0.0 {
+        return Ok(None);
+    }
+    let e1 = t0 * (1.0 / t0_len);
+    let d2 = v3(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+    let mut n_hat = t0.cross(&d2);
+    let n_len = n_hat.length();
+    if n_len <= 0.0 {
+        return Ok(None); // collinear control polygon — not an arc
+    }
+    n_hat = n_hat * (1.0 / n_len);
+    let mut e2 = n_hat.cross(&e1);
+    let mut q = d2.dot(&e2);
+    if q < 0.0 {
+        // The same plane, the other side: flip the frame so p₂ sits
+        // off the tangent line toward +e₂.
+        n_hat = v3(-n_hat.x, -n_hat.y, -n_hat.z);
+        e2 = v3(-e2.x, -e2.y, -e2.z);
+        q = -q;
+    }
+    if q <= f64::EPSILON * t0_len.max(1.0) {
+        return Ok(None); // p₂ on the tangent line: degenerate
+    }
+    // The center: on the perpendicular to the tangent at p₀ and on
+    // the perpendicular to the tangent at p₂ (both in-plane) — two
+    // linear conditions. In the (e₁, e₂) frame with p₀ at the origin:
+    // C = (0, c_y) with c_y from the p₂ condition.
+    let p = d2.dot(&e1);
+    let m1 = t0_len;
+    let cy = (q * q + p * (p - m1)) / q;
+    let center = v3(p0.x + e2.x * cy, p0.y + e2.y * cy, p0.z + e2.z * cy);
+    let r0 = v3(p0.x - center.x, p0.y - center.y, p0.z - center.z).length();
+    let r2l = v3(p2.x - center.x, p2.y - center.y, p2.z - center.z).length();
+    if (r0 - r2l).abs() > REL_TOL * r0.max(1.0) {
+        return Ok(None); // not circular
+    }
+    // The sweep: the angle of p₂ around the center from p₀, running
+    // CCW around the axis n̂ — for a genuine arc (equidistant ends,
+    // checked above) the axis from t₀ × d₂ with q > 0 is exactly that
+    // rotation axis: the center lies on the +e₂ side (cy > 0, else the
+    // ends cannot be equidistant), and the tangent at p₀ toward m is
+    // the CCW tangent around n̂.
+    let u0 = v3(
+        (p0.x - center.x) / r0,
+        (p0.y - center.y) / r0,
+        (p0.z - center.z) / r0,
+    );
+    let y0 = n_hat.cross(&u0);
+    let u2 = v3(p2.x - center.x, p2.y - center.y, p2.z - center.z);
+    let theta2 = u2.dot(&y0).atan2(u2.dot(&u0));
+    let sweep = if theta2 > 0.0 {
+        theta2
+    } else {
+        theta2 + std::f64::consts::TAU
+    };
+    // The circularity check: a rational quadratic through these
+    // points with these tangents is the circular arc exactly when the
+    // weight is cos(sweep/2).
+    if (w[1] - (sweep / 2.0).cos()).abs() > REL_TOL {
+        return Ok(None);
+    }
+    Ok(Some(ConicArc {
+        center,
+        normal: n_hat,
+        radius: r0,
+        sweep,
+    }))
+}
+
+/// One recognized arc trim: `(edge index, the arc)`.
+type ArcRim = (usize, ConicArc);
+
+/// Everything a strip face's wires carry: the section-circle rims,
+/// at most one ellipse (the composed oblique section), and the K3d
+/// conic arcs.
+type StripTrims = (Vec<CircleRim>, Option<StripEllipse>, Vec<ArcRim>);
+
 /// The rims a strip face carries: its section circles (checked
 /// coaxial with `axis` and — when `radius` is `Some` — of the
 /// surface's radius; the cone passes `None` and checks against its
@@ -460,19 +665,22 @@ type CircleRim = (Vector3, f64);
 /// semantics: a `Line`, or the degree-1 two-point B-spline the
 /// composed strips carry (its de Boor endpoints are exact — see
 /// `brep_boolean`). The count checks live at the call sites (the
-/// ellipse-trimmed strip has ONE circle rim).
+/// ellipse-trimmed strip has ONE circle rim). The K3d strips add the
+/// rational quadratic arcs (collected; the cylinder's arc-strip
+/// reading consumes them).
 fn strip_rims(
     ctx: &FaceRef<'_>,
     o: Vector3,
     axis: Vector3,
     radius: Option<f64>,
     allow_degenerate: bool,
-) -> Result<(Vec<CircleRim>, Option<StripEllipse>), String> {
+) -> Result<StripTrims, String> {
     let FaceRef {
         brep, face, i, tol, ..
     } = *ctx;
     let mut rims: Vec<(Vector3, f64)> = Vec::new();
     let mut ellipse: Option<StripEllipse> = None;
+    let mut arcs: Vec<ArcRim> = Vec::new();
     for wire in &face.wires {
         for we in &wire.edges {
             let edge = &brep.edges[we.edge];
@@ -537,6 +745,15 @@ fn strip_rims(
                         minor_radius: *minor_radius,
                     });
                 }
+                Curve::Bspline { degree: 2, .. } => match conic_arc_of(&edge.curve)? {
+                    Some(arc) => arcs.push((we.edge, arc)),
+                    None => {
+                        return Err(format!(
+                            "face {i}: a degree-2 B-spline that is not a circular arc \
+                             this reader knows"
+                        ))
+                    }
+                },
                 // Seam glue — no region semantics. The composed strips
                 // carry the seam as a degree-1 two-point B-spline.
                 Curve::Line { .. } => {}
@@ -549,14 +766,14 @@ fn strip_rims(
                 _ => {
                     return Err(format!(
                         "face {i}: an unrecognized rim ({} edges are not section circles, \
-                         ellipses or seam glue)",
+                         ellipses, arcs or seam glue)",
                         brep.edges[we.edge].curve.kind_name()
                     ))
                 }
             }
         }
     }
-    Ok((rims, ellipse))
+    Ok((rims, ellipse, arcs))
 }
 
 fn cylinder_face(
@@ -577,7 +794,18 @@ fn cylinder_face(
             "face {i}: an untrimmed cylinder face — an unbounded region"
         ));
     }
-    let (rims, ellipse) = strip_rims(&ctx, o, axis, Some(radius), false)?;
+    let (rims, ellipse, arcs) = strip_rims(&ctx, o, axis, Some(radius), false)?;
+    if !arcs.is_empty() {
+        // The K3d arc-trimmed strip: the swept angular interval
+        // between two heights (the crossing boolean's side face).
+        if !rims.is_empty() || ellipse.is_some() {
+            return Err(format!(
+                "face {i}: a mixed rim/arc cylinder strip — the notch mantles are \
+                 a later slice"
+            ));
+        }
+        return cylinder_arc_strip(ctx, o, axis, radius, arcs);
+    }
     if let Some(e) = ellipse {
         // The composed oblique section: ONE circle rim + the elliptical
         // rim, whose plane reduces — in the cylinder's own frame — to
@@ -612,6 +840,238 @@ fn cylinder_face(
     // ∫r̂(u) du = 0 over the full turn, so the origin drops out.
     let area = 2.0 * std::f64::consts::PI * radius * h;
     let flux = sigma * 2.0 * std::f64::consts::PI * radius * radius * h;
+    Ok((area, flux))
+}
+
+/// The arc-trimmed cylinder strip (the K3d crossing booleans' side
+/// faces): the swept region `u ∈ I × v ∈ [v_lo, v_hi]`, bounded by the
+/// two arc chains at `v_lo` and `v_hi` (the same angular interval
+/// `I`, swept) and the two crossing generators between them.
+///
+/// * Area `= R·|Δθ|·(v_hi − v_lo)`.
+/// * Flux `= σR(v_hi − v_lo)(R|Δθ| + o·W)` with
+///   `W = ∫_I r̂ dθ` — `p·r̂ = o·r̂(u) + R` on the cylinder, the
+///   origin's coupling with `r̂` surviving the partial turn as `W`.
+///
+/// The arcs' circles are re-derived (`conic_arc_of`), verified
+/// coaxial and of the surface's radius; the two heights' chains must
+/// cover the same interval; the remaining edges must be generator
+/// glue (vertical, at the interval's ends).
+fn cylinder_arc_strip(
+    ctx: FaceRef<'_>,
+    o: Vector3,
+    axis: Vector3,
+    radius: f64,
+    arcs: Vec<ArcRim>,
+) -> Result<(f64, f64), String> {
+    let FaceRef {
+        brep,
+        face,
+        i,
+        sigma,
+        tol,
+    } = ctx;
+    let x_hat = match &face.surface {
+        Surface::Cylinder { ref_dir, .. } => *ref_dir,
+        _ => unreachable!("checked by the caller"),
+    };
+    let y_hat = axis.cross(&x_hat);
+    // Verify each arc against the surface, and collect its height and
+    // its signed sweep around the surface axis.
+    let mut info: Vec<(f64, f64, usize)> = Vec::with_capacity(arcs.len());
+    for (ei, arc) in &arcs {
+        let ei = *ei;
+        if (arc.radius - radius).abs() > tol {
+            return Err(format!(
+                "face {i}: an arc of radius {} on a radius-{radius} cylinder",
+                arc.radius
+            ));
+        }
+        let off = v3(arc.center.x - o.x, arc.center.y - o.y, arc.center.z - o.z);
+        let along = off.dot(&axis);
+        let residual = v3(
+            off.x - axis.x * along,
+            off.y - axis.y * along,
+            off.z - axis.z * along,
+        );
+        if residual.length() > tol {
+            return Err(format!(
+                "face {i}: an arc circle not coaxial with the cylinder"
+            ));
+        }
+        // The arc's endpoints lie on the surface and in the circle's
+        // plane ⊥ axis (the tangent-intersection control point is off
+        // the surface BY DESIGN — at R/cos(sweep/2) — so only the
+        // endpoints are checked; the chain's interior junctions are
+        // exact circle evaluations).
+        if let Curve::Bspline { points, .. } = &brep.edges[ei].curve {
+            for p in [&points[0], &points[points.len() - 1]] {
+                let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+                let along = off.dot(&axis);
+                let radial = v3(
+                    off.x - axis.x * along,
+                    off.y - axis.y * along,
+                    off.z - axis.z * along,
+                )
+                .length();
+                if (radial - radius).abs() > tol {
+                    return Err(format!(
+                        "face {i}: an arc endpoint off the cylinder surface"
+                    ));
+                }
+            }
+        }
+        let side = arc.normal.dot(&axis).signum();
+        info.push((along, side * arc.sweep, ei));
+    }
+    // Group the arcs by height (the two boundary planes).
+    let mut heights: Vec<f64> = Vec::with_capacity(2);
+    for &(v, _, _) in &info {
+        if !heights.iter().any(|&hv| (hv - v).abs() <= tol) {
+            heights.push(v);
+        }
+    }
+    if heights.len() != 2 {
+        return Err(format!(
+            "face {i}: arc trims at {} height(s) — the strip needs exactly two",
+            heights.len()
+        ));
+    }
+    let (v_lo, v_hi) = (heights[0].min(heights[1]), heights[0].max(heights[1]));
+    if v_hi - v_lo <= tol {
+        return Err(format!(
+            "face {i}: a degenerate (zero-height) arc-trimmed strip"
+        ));
+    }
+    let group_of = |v: f64| -> usize {
+        if (v - heights[0]).abs() <= (v - heights[1]).abs() {
+            0
+        } else {
+            1
+        }
+    };
+    let mut v_lo_group: Vec<usize> = Vec::new();
+    let mut v_hi_group: Vec<usize> = Vec::new();
+    for (k, &(v, _, _)) in info.iter().enumerate() {
+        if group_of(v) == 0 {
+            v_lo_group.push(k);
+        } else {
+            v_hi_group.push(k);
+        }
+    }
+
+    // Chain one group's arcs by their shared vertices (the stored
+    // direction — every arc of the chain runs the same way, from the
+    // crossing generator at the interval's start to the one at its
+    // end). Returns (θ_start, total signed sweep).
+    let chain_of = |group: &[usize]| -> Result<(f64, f64), String> {
+        // The head: an arc whose start vertex is no arc's end.
+        let head = (0..group.len())
+            .find(|&h| {
+                let sv = brep.edges[info[group[h]].2].start;
+                !group
+                    .iter()
+                    .enumerate()
+                    .any(|(a, &k)| a != h && brep.edges[info[k].2].end == sv)
+            })
+            .ok_or_else(|| format!("face {i}: arc trims that do not chain"))?;
+        // Follow the chain.
+        let mut order = Vec::with_capacity(group.len());
+        let mut current = group[head];
+        loop {
+            order.push(current);
+            let end_vx = brep.edges[info[current].2].end;
+            match group
+                .iter()
+                .find(|&&k| k != current && brep.edges[info[k].2].start == end_vx)
+            {
+                Some(&next) => current = next,
+                None => break,
+            }
+        }
+        if order.len() != group.len() {
+            return Err(format!("face {i}: arc trims that do not chain"));
+        }
+        let start_pt = brep.vertices[brep.edges[info[order[0]].2].start].point;
+        let off = v3(start_pt.x - o.x, start_pt.y - o.y, start_pt.z - o.z);
+        let theta = off.dot(&y_hat).atan2(off.dot(&x_hat));
+        let total: f64 = order.iter().map(|&k| info[k].1).sum();
+        Ok((theta, total))
+    };
+    let (th1, total1) = chain_of(&v_lo_group)?;
+    let (th2, total2) = chain_of(&v_hi_group)?;
+    let wrap = |d: f64| {
+        let mut d = d;
+        while d > std::f64::consts::PI {
+            d -= std::f64::consts::TAU;
+        }
+        while d < -std::f64::consts::PI {
+            d += std::f64::consts::TAU;
+        }
+        d
+    };
+    if wrap(th2 - th1).abs() > 1e-7 || (total2 - total1).abs() > 1e-7 {
+        return Err(format!(
+            "face {i}: the two heights' arc chains do not cover the same interval"
+        ));
+    }
+    let theta = th1;
+    let total = total1;
+    if total.abs() <= 1e-12 {
+        return Err(format!("face {i}: a zero-sweep arc-trimmed strip"));
+    }
+
+    // The remaining edges: generator glue — vertical, at the
+    // interval's two ends.
+    let arc_set: Vec<usize> = arcs.iter().map(|p| p.0).collect();
+    let end_angles = [theta, theta + total];
+    for wire in &face.wires {
+        for we in &wire.edges {
+            if arc_set.contains(&we.edge) {
+                continue;
+            }
+            let edge = &brep.edges[we.edge];
+            match &edge.curve {
+                Curve::Line { .. } | Curve::Bspline { degree: 1, .. } => {
+                    for &vx in &[edge.start, edge.end] {
+                        let p = brep.vertices[vx].point;
+                        let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+                        let v = off.dot(&axis);
+                        if (v - v_lo).abs() > tol && (v - v_hi).abs() > tol {
+                            return Err(format!(
+                                "face {i}: a non-arc edge ending off the boundary planes"
+                            ));
+                        }
+                        let th = off.dot(&y_hat).atan2(off.dot(&x_hat));
+                        if !end_angles.iter().any(|&e| wrap(th - e).abs() <= 1e-7) {
+                            return Err(format!(
+                                "face {i}: a non-arc edge off the interval's generators"
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "face {i}: an unrecognized non-arc trim on the arc strip"
+                    ))
+                }
+            }
+        }
+    }
+
+    // The swept interval, positively oriented: [a, a + |total|].
+    let a = theta + total.min(0.0);
+    let b = theta + total.max(0.0);
+    let dv = v_hi - v_lo;
+    let width = total.abs();
+    let area = radius * width * dv;
+    // W = ∫_a^b r̂ dθ = (sin b − sin a)·x̂ + (cos a − cos b)·ŷ.
+    let w = v3(
+        (b.sin() - a.sin()) * x_hat.x + (a.cos() - b.cos()) * y_hat.x,
+        (b.sin() - a.sin()) * x_hat.y + (a.cos() - b.cos()) * y_hat.y,
+        (b.sin() - a.sin()) * x_hat.z + (a.cos() - b.cos()) * y_hat.z,
+    );
+    let flux = sigma * radius * dv * (radius * width + o.dot(&w));
     Ok((area, flux))
 }
 
@@ -747,7 +1207,7 @@ fn cone_face(
     }
     // Rim check against the surface's own radius function w(v) = r1
     // + v·sin(semi), then read the slant parameters.
-    let (rims, ellipse) = strip_rims(&ctx, o, axis, None, true)?;
+    let (rims, ellipse, _arcs) = strip_rims(&ctx, o, axis, None, true)?;
     if let Some(e) = ellipse {
         if rims.len() != 1 {
             return Err(format!(

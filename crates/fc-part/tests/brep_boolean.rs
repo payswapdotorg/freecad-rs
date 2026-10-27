@@ -39,8 +39,8 @@
 use fc_base::Vector3;
 use fc_part::brep::{read_brep_bytes, write_brep};
 use fc_part::brep_boolean::{
-    cone_plane_boolean, cylinder_plane_boolean, sphere_plane_boolean, sphere_sphere_boolean,
-    BooleanOp, BooleanOutcome, BooleanOutcomeKind,
+    cone_plane_boolean, cylinder_cylinder_boolean, cylinder_plane_boolean, sphere_plane_boolean,
+    sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
 };
 use fc_part::intersect::intersect_surfaces;
 use fc_part::measure::{brep_area, brep_volume};
@@ -1370,4 +1370,532 @@ fn cone_plane_classifies_nonsecant_configurations_honestly() {
     let (_, _, _, _, _, p, n) = cone_case();
     let fuse = cone_plane_boolean(BooleanOp::Fuse, o, axis, r1, 0.0, h, p, n).expect("fuse");
     expect_refused(&fuse, "unbounded", "fusing a halfspace");
+}
+
+// ---------------------------------------------------------------------------
+// K3d — cylinder × cylinder: the parallel-axis compositions
+// ---------------------------------------------------------------------------
+//
+// Two finite cylinders whose axes are parallel (either sign) cross, when
+// their cross-sections do, along two generator lines — the K3a section,
+// reused bit-identically. Every horizontal slice is then the SAME
+// two-circle picture, so the booleans are prisms of the planar
+// circle-circle booleans:
+//
+// * **Common** — the lens prism: each cylinder's arc strip inside the
+//   other over the z-overlap, capped by the two lens faces.
+// * **Cut** (a − b, b's z-range covering a's) — the outer-arc strip of
+//   a, the inner-arc wall of b (a REVERSED face — the solid lies
+//   outside b), and the disk-minus-lens caps.
+// * **Fuse** (equal z-ranges) — both outer-arc strips and the
+//   union-region caps.
+// * **Cut** with b nested inside a cross-wise — the tube: a's mantle,
+//   b's mantle reversed, and annular caps (multi-wire plane faces).
+//
+// The shared edges are the crossing generators (degree-1 B-splines
+// through the canonical K3a line points, exact at both ends) and the
+// arcs. An arc cannot be a `Circle` parameter range here: its endpoint
+// evaluation on one operand's frame is a different float than the other
+// operand's — the bit-exact vertex contract would be violated — so the
+// arcs are the classical **rational quadratic B-splines** (NURBS arcs,
+// the representation every CAD kernel uses): control points
+// [start, tangent-intersection, end], weights [1, cos(sweep/2), 1],
+// clamped knots, de Boor exact at both ends. Sweeps wider than a
+// quadrant split into quadrant-sized segments (the classical
+// conditioning rule).
+//
+// The measurement reads the arcs back exactly: the cap areas by the
+// line integral ∫(x dy − y dx) = R²Δθ + c × Δp per arc (closed form,
+// no quadrature), the strips as swept angular intervals.
+
+/// A general crossing configuration: tilted axis, unequal radii,
+/// equal z-ranges.
+fn cc_pair() -> (Vector3, Vector3, f64, f64, Vector3, Vector3, f64, f64) {
+    let a = v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0);
+    let o1 = v3(1.0, -1.0, 2.0);
+    let r1 = 2.0;
+    let h = 5.0;
+    // A perpendicular offset of length 2.5: (2, -1, 0)·(2.5/√5).
+    let s5 = 5.0f64.sqrt();
+    let perp = v3(2.0 * 2.5 / s5, -2.5 / s5, 0.0);
+    let o2 = v3(o1.x + perp.x, o1.y + perp.y, o1.z + perp.z);
+    (o1, a, r1, h, o2, a, 1.5, 5.0)
+}
+
+/// The perpendicular center distance of [`cc_pair`].
+fn cc_d() -> f64 {
+    2.5
+}
+
+/// The classical two-circle lens area.
+fn lens_area(d: f64, r1: f64, r2: f64) -> f64 {
+    let t1 = ((d * d + r1 * r1 - r2 * r2) / (2.0 * d * r1)).clamp(-1.0, 1.0);
+    let t2 = ((d * d + r2 * r2 - r1 * r1) / (2.0 * d * r2)).clamp(-1.0, 1.0);
+    let tri = (-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2);
+    r1 * r1 * t1.acos() + r2 * r2 * t2.acos() - 0.5 * tri.max(0.0).sqrt()
+}
+
+/// The sweep of the arc of circle `r_this` lying inside disk `r_other`.
+fn arc_sweep_inside(d: f64, r_this: f64, r_other: f64) -> f64 {
+    let t = ((d * d + r_this * r_this - r_other * r_other) / (2.0 * d * r_this)).clamp(-1.0, 1.0);
+    2.0 * t.acos()
+}
+
+/// Every edge used exactly twice, by two different faces, in opposite
+/// directions (the closed-shell orientation contract).
+fn assert_oriented_closed_shell(brep: &fc_part::topology::ExactBRep, what: &str) {
+    for e in 0..brep.edges.len() {
+        let mut uses: Vec<(usize, bool)> = Vec::new();
+        for (fi, f) in brep.faces.iter().enumerate() {
+            for w in &f.wires {
+                for we in &w.edges {
+                    if we.edge == e {
+                        uses.push((fi, we.forward));
+                    }
+                }
+            }
+        }
+        assert_eq!(uses.len(), 2, "{what}: edge {e} used {} times", uses.len());
+        assert_ne!(
+            uses[0].1, uses[1].1,
+            "{what}: edge {e} traversed twice in the same direction"
+        );
+    }
+}
+
+#[test]
+fn cyl_cyl_common_is_the_lens_prism() {
+    let (o1, a, r1, h, o2, _, r2, h2) = cc_pair();
+    let out =
+        cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, o2, a, r2, h2).expect("secant");
+    let brep = expect_solid(&out, "the lens prism");
+    brep.validate().expect("the prism validates");
+
+    // Topology: two cylindrical strips + two planar caps, sphere
+    // topology, every edge shared by two faces in opposite directions.
+    assert_eq!(brep.faces.len(), 4, "four faces");
+    let kinds: Vec<&str> = brep.faces.iter().map(surface_kind).collect();
+    assert_eq!(kinds.iter().filter(|k| **k == "Cylinder").count(), 2);
+    assert_eq!(kinds.iter().filter(|k| **k == "Plane").count(), 2);
+    assert_eq!(brep.euler_characteristic(), 2, "sphere topology");
+    assert_oriented_closed_shell(brep, "the lens prism");
+
+    // Volume: the lens area times the overlap height (classical).
+    let d = cc_d();
+    approx(
+        brep_volume(brep).unwrap(),
+        lens_area(d, r1, r2) * h,
+        "the lens prism volume",
+    );
+
+    // Area: two lens faces + each cylinder's inside arc strip.
+    let th1 = arc_sweep_inside(d, r1, r2);
+    let th2 = arc_sweep_inside(d, r2, r1);
+    approx(
+        brep_area(brep).unwrap(),
+        2.0 * lens_area(d, r1, r2) + r1 * th1 * h + r2 * th2 * h,
+        "the lens prism area",
+    );
+}
+
+#[test]
+fn cyl_cyl_cut_and_fuse_partition_the_cylinders() {
+    let (o1, a, r1, h, o2, _, r2, _) = cc_pair();
+    let d = cc_d();
+    let lens = lens_area(d, r1, r2);
+    let th1 = arc_sweep_inside(d, r1, r2);
+    let th2 = arc_sweep_inside(d, r2, r1);
+
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h, o2, a, r2, 5.0).expect("cut");
+    let cut = expect_solid(&cut, "the cut");
+    cut.validate().expect("the cut validates");
+    assert_eq!(cut.euler_characteristic(), 2, "cut: sphere topology");
+    assert_oriented_closed_shell(cut, "the cut");
+    // Partition identity: V(cut) + V(common) = V(a).
+    approx(
+        brep_volume(cut).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h - lens * h,
+        "the cut volume (disk minus lens, prism)",
+    );
+    approx(
+        brep_area(cut).unwrap(),
+        2.0 * (std::f64::consts::PI * r1 * r1 - lens)
+            + r1 * (std::f64::consts::TAU - th1) * h
+            + r2 * th2 * h,
+        "the cut area",
+    );
+    // The tool's wall is the REVERSED face (the solid lies outside b).
+    let walls: Vec<&fc_part::topology::TopoFace> = cut
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Cylinder" && matches!(f.surface, fc_part::topology::Surface::Cylinder { origin, radius, .. } if (origin.y - o2.y).abs() < 1e-9 && (radius - r2).abs() < 1e-9))
+        .collect();
+    assert_eq!(walls.len(), 1, "one wall face of b");
+    assert!(walls[0].reversed, "the wall is reversed (solid outside b)");
+
+    let fuse =
+        cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h, o2, a, r2, 5.0).expect("fuse");
+    let fuse = expect_solid(&fuse, "the fuse");
+    fuse.validate().expect("the fuse validates");
+    assert_eq!(fuse.euler_characteristic(), 2, "fuse: sphere topology");
+    assert_oriented_closed_shell(fuse, "the fuse");
+    // Partition identity: V(fuse) + V(common) = V(a) + V(b).
+    approx(
+        brep_volume(fuse).unwrap(),
+        (std::f64::consts::PI * r1 * r1 + std::f64::consts::PI * r2 * r2 - lens) * h,
+        "the fuse volume",
+    );
+    approx(
+        brep_area(fuse).unwrap(),
+        2.0 * (std::f64::consts::PI * r1 * r1 + std::f64::consts::PI * r2 * r2 - lens)
+            + r1 * (std::f64::consts::TAU - th1) * h
+            + r2 * (std::f64::consts::TAU - th2) * h,
+        "the fuse area",
+    );
+    // No face of the fuse is reversed (both strips keep their solids
+    // inside their own cylinders).
+    assert!(
+        fuse.faces.iter().all(|f| !f.reversed),
+        "the fuse faces are naturally oriented"
+    );
+}
+
+#[test]
+fn cyl_cyl_arcs_lie_on_the_operands_and_the_crossing_lines() {
+    let (o1, a, r1, h, o2, _, r2, _) = cc_pair();
+    let axis_dist = |p: Vector3, o: Vector3| {
+        let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+        let along = off.dot(&a);
+        v3(
+            off.x - a.x * along,
+            off.y - a.y * along,
+            off.z - a.z * along,
+        )
+        .length()
+    };
+    for (op, a_arcs_inside_b, b_arcs_inside_a, what) in [
+        (BooleanOp::Common, true, true, "common"),
+        (BooleanOp::Cut, false, true, "cut"),
+        (BooleanOp::Fuse, false, false, "fuse"),
+    ] {
+        let out = cylinder_cylinder_boolean(op, o1, a, r1, h, o2, a, r2, 5.0).expect(what);
+        let brep = expect_solid(&out, what);
+        for (ei, edge) in brep.edges.iter().enumerate() {
+            match &edge.curve {
+                // The crossing generators: parallel to the axis and on
+                // BOTH cylinders at machine scale.
+                Curve::Bspline {
+                    degree: 1,
+                    points,
+                    weights: None,
+                    ..
+                } if points.len() == 2 => {
+                    let dir = v3(
+                        points[1].x - points[0].x,
+                        points[1].y - points[0].y,
+                        points[1].z - points[0].z,
+                    );
+                    let len = dir.length();
+                    let u = v3(dir.x / len, dir.y / len, dir.z / len);
+                    approx(
+                        u.dot(&a).abs(),
+                        1.0,
+                        "{what}: edge {ei} parallel to the axis",
+                    );
+                    for i in 0..16 {
+                        let t = i as f64 / 16.0;
+                        let p = edge
+                            .curve
+                            .point(edge.range.0 + (edge.range.1 - edge.range.0) * t);
+                        approx(axis_dist(p, o1), r1, "{what}: edge {ei} on cylinder a");
+                        approx(axis_dist(p, o2), r2, "{what}: edge {ei} on cylinder b");
+                    }
+                }
+                // The arcs: rational quadratics on their own cylinder,
+                // inside/outside the other per the operation.
+                Curve::Bspline {
+                    degree: 2,
+                    weights: Some(_),
+                    ..
+                } => {}
+                other => panic!("{what}: unexpected edge {ei}: {other:?}"),
+            }
+        }
+        // Per side face: the arcs of a's strip and b's strip/wall.
+        for f in &brep.faces {
+            let (o_mine, r_mine, is_a) = match &f.surface {
+                Surface::Cylinder { origin, radius, .. } => {
+                    let is_a = (origin.x - o1.x).abs() < 1e-9
+                        && (origin.y - o1.y).abs() < 1e-9
+                        && (origin.z - o1.z).abs() < 1e-9;
+                    (*origin, *radius, is_a)
+                }
+                _ => continue,
+            };
+            let (o_other, r_other, expect_inside) = if is_a {
+                (o2, r2, a_arcs_inside_b)
+            } else {
+                (o1, r1, b_arcs_inside_a)
+            };
+            for wire in &f.wires {
+                for we in &wire.edges {
+                    let edge = &brep.edges[we.edge];
+                    let Curve::Bspline {
+                        degree: 2,
+                        weights: Some(_),
+                        ..
+                    } = &edge.curve
+                    else {
+                        continue;
+                    };
+                    for i in 0..32 {
+                        let t = i as f64 / 32.0;
+                        let p = edge
+                            .curve
+                            .point(edge.range.0 + (edge.range.1 - edge.range.0) * t);
+                        approx(
+                            axis_dist(p, o_mine),
+                            r_mine,
+                            "{what}: an arc on its own cylinder",
+                        );
+                        // The arcs' shared endpoints sit exactly ON the
+                        // other cylinder; the interiors are strictly on
+                        // their side.
+                        let d = axis_dist(p, o_other);
+                        if expect_inside {
+                            assert!(
+                                d <= r_other + 1e-9,
+                                "{what}: an arc sample {i} inside the other cylinder (d = {d})"
+                            );
+                        } else {
+                            assert!(
+                                d >= r_other - 1e-9,
+                                "{what}: an arc sample {i} outside the other cylinder (d = {d})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cyl_cyl_swapped_operands_are_bit_identical_for_common_and_fuse() {
+    let (o1, a, r1, h, o2, _, r2, h2) = cc_pair();
+    for op in [BooleanOp::Common, BooleanOp::Fuse] {
+        let ab = cylinder_cylinder_boolean(op, o1, a, r1, h, o2, a, r2, h2).expect("ab");
+        let ba = cylinder_cylinder_boolean(op, o2, a, r2, h2, o1, a, r1, h).expect("ba");
+        assert_eq!(
+            expect_solid(&ab, "ab"),
+            expect_solid(&ba, "ba"),
+            "{op:?}: operand order canonicalized bit-identically"
+        );
+    }
+}
+
+#[test]
+fn cyl_cyl_outcomes_round_trip_through_fcbrep() {
+    let (o1, a, r1, h, o2, _, r2, _) = cc_pair();
+    for op in [BooleanOp::Common, BooleanOp::Cut, BooleanOp::Fuse] {
+        let out = cylinder_cylinder_boolean(op, o1, a, r1, h, o2, a, r2, 5.0).expect("op");
+        let brep = expect_solid(&out, "solid");
+        let mut bytes = Vec::new();
+        write_brep(&mut bytes, brep).expect("FCBREP write");
+        let back = read_brep_bytes(&bytes).expect("round-trip parse");
+        assert!(
+            back == *brep,
+            "{op:?}: FCBREP round-trip is lossless (byte-identical model)"
+        );
+    }
+}
+
+#[test]
+fn cyl_cyl_staggered_common_composes_the_clamped_lens() {
+    // b's z-range shifted along the axis: the overlap is a proper
+    // sub-interval of both, and the lens prism clamps to it.
+    let (o1, a, r1, h, o2, _, r2, _) = cc_pair();
+    let d = cc_d();
+    let shift = v3(a.x * 1.5, a.y * 1.5, a.z * 1.5);
+    let o2s = v3(o2.x + shift.x, o2.y + shift.y, o2.z + shift.z);
+    let out = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, o2s, a, r2, 3.0)
+        .expect("the clamped lens");
+    let brep = expect_solid(&out, "the clamped lens");
+    brep.validate().expect("validates");
+    assert_eq!(brep.euler_characteristic(), 2, "sphere topology");
+    assert_oriented_closed_shell(brep, "the clamped lens");
+    // The overlap: a spans [0,5], b spans [1.5, 4.5] in a's v-frame.
+    approx(
+        brep_volume(brep).unwrap(),
+        lens_area(d, r1, r2) * 3.0,
+        "the clamped lens volume (overlap 1.5..4.5)",
+    );
+}
+
+#[test]
+fn cyl_cyl_nested_cut_composes_the_tube() {
+    // b's cross-section strictly inside a's, b's z-range covering
+    // a's: the cut is the tube — a's mantle, b's mantle reversed,
+    // annular caps (multi-wire plane faces).
+    let a = v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0);
+    let o1 = v3(0.5, -0.5, 1.0);
+    let r1 = 3.0;
+    let h1 = 4.0;
+    let s5 = 5.0f64.sqrt();
+    // A perpendicular offset of length 1.5 (< r1 − r2 = 2).
+    let perp = v3(2.0 * 1.5 / s5, -1.5 / s5, 0.0);
+    // b's range [−0.5, 4.5] covers a's [0, 4].
+    let o2 = v3(
+        o1.x + perp.x - a.x * 0.5,
+        o1.y + perp.y - a.y * 0.5,
+        o1.z + perp.z - a.z * 0.5,
+    );
+    let r2 = 1.0;
+    assert!(1.5 + r2 < r1, "the nested precondition");
+
+    let out =
+        cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2, a, r2, 5.0).expect("the tube");
+    let brep = expect_solid(&out, "the tube");
+    brep.validate().expect("the tube validates");
+    assert_eq!(brep.euler_characteristic(), 2, "tube: sphere topology");
+    assert_oriented_closed_shell(brep, "the tube");
+    // The caps are annuli: two wires each.
+    for f in brep.faces.iter().filter(|f| surface_kind(f) == "Plane") {
+        assert_eq!(f.wires.len(), 2, "the tube caps are annuli (two wires)");
+    }
+    approx(
+        brep_volume(brep).unwrap(),
+        std::f64::consts::PI * (r1 * r1 - r2 * r2) * h1,
+        "the tube volume",
+    );
+    approx(
+        brep_area(brep).unwrap(),
+        std::f64::consts::TAU * (r1 + r2) * h1 + 2.0 * std::f64::consts::PI * (r1 * r1 - r2 * r2),
+        "the tube area",
+    );
+
+    // Nested with b strictly inside a (both cross-section and range):
+    // the common is b, the fuse is a.
+    let o2b = v3(
+        o1.x + perp.x + a.x * 0.5,
+        o1.y + perp.y + a.y * 0.5,
+        o1.z + perp.z + a.z * 0.5,
+    );
+    let common = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h1, o2b, a, r2, 3.0)
+        .expect("common");
+    approx(
+        brep_volume(expect_solid(&common, "b")).unwrap(),
+        std::f64::consts::PI * r2 * r2 * 3.0,
+        "nested common is b",
+    );
+    let fuse =
+        cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h1, o2b, a, r2, 3.0).expect("fuse");
+    approx(
+        brep_volume(expect_solid(&fuse, "a")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h1,
+        "nested fuse is a",
+    );
+}
+
+#[test]
+fn cyl_cyl_classifies_nonsecant_configurations_honestly() {
+    let (o1, a, r1, h, o2, _, r2, _) = cc_pair();
+
+    // Non-parallel axes: the Steinmetz quartic, refused by name.
+    let tilted = v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0 + 1e-3)
+        .normalized()
+        .unwrap();
+    let out = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, o2, tilted, r2, 5.0)
+        .expect("classified");
+    expect_refused(&out, "Steinmetz", "non-parallel axes");
+
+    // Cross-disjoint: d = 5 > 3.5.
+    let s5 = 5.0f64.sqrt();
+    let far = v3(2.0 * 5.0 / s5, -5.0 / s5, 0.0);
+    let of = v3(o1.x + far.x, o1.y + far.y, o1.z + far.z);
+    let common = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, of, a, r2, 5.0)
+        .expect("disjoint");
+    expect_empty(&common, "disjoint common");
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h, of, a, r2, 5.0)
+        .expect("disjoint cut");
+    approx(
+        brep_volume(expect_solid(&cut, "the whole a")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h,
+        "disjoint cut is the whole a",
+    );
+    let fuse = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h, of, a, r2, 5.0)
+        .expect("disjoint fuse");
+    expect_refused(&fuse, "two-shell", "disjoint fuse");
+
+    // External cross-tangency: d = r1 + r2 = 3.5, with a z-aligned
+    // axis and a rational offset so the tangency is exactly
+    // representable (d² = (r1+r2)² in the EFT classification).
+    let ez = v3(0.0, 0.0, 1.0);
+    let oe = v3(1.0, -1.0, 2.0);
+    let ot = v3(1.0 + 3.5, -1.0, 2.0);
+    let common = cylinder_cylinder_boolean(BooleanOp::Common, oe, ez, r1, h, ot, ez, r2, 5.0)
+        .expect("tangent");
+    expect_empty(&common, "tangent common (measure zero)");
+    let fuse = cylinder_cylinder_boolean(BooleanOp::Fuse, oe, ez, r1, h, ot, ez, r2, 5.0)
+        .expect("tangent fuse");
+    expect_refused(&fuse, "junction", "tangent fuse");
+
+    // Internal cross-tangency: d = r1 − r2 = 0.5 — the tube pinches;
+    // the cut refuses at measure zero, the pass-throughs stay honest.
+    let oi = v3(1.0 + 0.5, -1.0, 2.0);
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, oe, ez, r1, h, oi, ez, r2, 5.0)
+        .expect("internally tangent");
+    expect_refused(&cut, "tangent", "the pinched tube");
+
+    // A inside b entirely (cross-section and z-range): the cut is
+    // empty.
+    let s5i = 5.0f64.sqrt();
+    let perp_in = v3(2.0 * 2.0 / s5i, -2.0 / s5i, 0.0);
+    let oa = v3(-3.0, 0.5, 1.0);
+    let ob = v3(
+        oa.x + perp_in.x - a.x * 0.5,
+        oa.y + perp_in.y - a.y * 0.5,
+        oa.z + perp_in.z - a.z * 0.5,
+    );
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, oa, a, 1.0, 2.0, ob, a, 4.0, 3.0)
+        .expect("a inside b");
+    expect_empty(&cut, "a − b = ∅ when a ⊂ b");
+
+    // z-disjoint (crossing cross-sections): no interaction.
+    let s5c = 5.0f64.sqrt();
+    let perp = v3(2.0 * 2.5 / s5c, -2.5 / s5c, 0.0);
+    let up = v3(a.x * 10.0, a.y * 10.0, a.z * 10.0);
+    let oz = v3(
+        o1.x + perp.x + up.x,
+        o1.y + perp.y + up.y,
+        o1.z + perp.z + up.z,
+    );
+    let common = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, oz, a, r2, 5.0)
+        .expect("z-disjoint");
+    expect_empty(&common, "z-disjoint common");
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h, oz, a, r2, 5.0)
+        .expect("z-disjoint cut");
+    approx(
+        brep_volume(expect_solid(&cut, "the whole a")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h,
+        "z-disjoint cut is the whole a",
+    );
+
+    // Staggered cut and fuse (crossing sections, partial overlap):
+    // the notch mantles are the next slice — refused by name.
+    let shift = v3(a.x * 1.5, a.y * 1.5, a.z * 1.5);
+    let o2s = v3(o2.x + shift.x, o2.y + shift.y, o2.z + shift.z);
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h, o2s, a, r2, 3.0)
+        .expect("staggered");
+    expect_refused(&cut, "staggered", "the staggered cut");
+    let fuse = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h, o2s, a, r2, 3.0)
+        .expect("staggered");
+    expect_refused(&fuse, "staggered", "the staggered fuse");
+
+    // Coincident cylinders with staggered ranges: refused by name.
+    let shift2 = v3(a.x * 2.0, a.y * 2.0, a.z * 2.0);
+    let oc = v3(o1.x + shift2.x, o1.y + shift2.y, o1.z + shift2.z);
+    let out = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, oc, a, r1, 5.0)
+        .expect("coincident");
+    expect_refused(&out, "staggered", "coincident cylinders, staggered ranges");
 }

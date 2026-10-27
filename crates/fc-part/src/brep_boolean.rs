@@ -125,7 +125,7 @@ fn v3(x: f64, y: f64, z: f64) -> Vector3 {
 /// Exact helpers re-used from the K3a classification tier.
 use crate::intersect::{
     any_perpendicular, dot_terms, exact_sum_rounded, exact_sum_sign, length_squared_terms,
-    two_prod, two_sum, PARALLEL_BAND,
+    lex_after, two_prod, two_sum, PARALLEL_BAND,
 };
 
 /// The sign of `d² − (r1 + r2)²` exactly (both squares exact).
@@ -1818,5 +1818,1096 @@ fn placed_cone_brep(
             seam_between(v_base_pt, v_top_pt, 0, 1),
         ],
         faces,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K3d — cylinder × cylinder: the parallel-axis compositions
+// ---------------------------------------------------------------------------
+//
+// Two finite cylinders with parallel axes (either sign — the tool is
+// normalized to the target's axis direction first) have, when their
+// cross-sections cross, a section of two generator lines (the K3a
+// construction, reused bit-identically). Every plane ⊥ the axes cuts
+// the SAME two-circle picture, so the booleans are prisms of the planar
+// circle-circle booleans over the z-overlap:
+//
+// * **Common** — the lens prism: each cylinder's inside arc strip over
+//   the overlap, capped by the two lens faces.
+// * **Cut** (`a − b`, b's z-range covering a's) — a's outside-arc strip,
+//   b's inside-arc wall (a **reversed** face — the solid lies outside
+//   b), and the disk-minus-lens caps at a's planes.
+// * **Fuse** (equal z-ranges) — both outside-arc strips and the
+//   union-region caps.
+// * **Cut** with b nested inside a cross-wise (b's z-range covering
+//   a's) — the tube: a's mantle, b's mantle reversed, annular caps.
+//
+// The shared edges are the crossing generators — degree-1 B-splines
+// through the canonical K3a line points at the two boundary heights,
+// exact at both ends — and the arcs. An arc cannot be a `Circle`
+// parameter range here: its endpoint evaluation on one operand's frame
+// is a different float than the other's, and the bit-exact vertex
+// contract would be violated. The arcs are therefore the classical
+// **rational quadratic B-splines** — the NURBS circle-arc
+// representation every CAD kernel, OCCT included, uses: control points
+// [start, tangent-intersection, end], weights [1, cos(sweep/2), 1],
+// clamped knots, the de Boor evaluation exact at both ends. Sweeps
+// wider than a quadrant split into equal segments (the classical
+// conditioning rule, keeping the weights ≥ cos(π/4) and the tangent
+// intersection finite).
+//
+// The measurement ([`crate::measure`]) reads the arcs back exactly: the
+// cap areas by the line integral `∫(x dy − y dx) = R²Δθ + c × Δp` per
+// arc — closed form, no quadrature — and the strips as swept angular
+// intervals.
+//
+// Honest refusals, by name: non-parallel axes (the Steinmetz quartic
+// — K3a's own refusal, propagated), the staggered cut/fuse and the
+// staggered drill (the notch mantles — a later slice), the pinched
+// tube of an internal cross-tangency (measure zero), and the
+// tangent/disjoint fuses (non-manifold junctions / two shells).
+
+/// The exact B-rep boolean of two finite cylinders with parallel
+/// axes (the Part::Cylinder frame: origin = base center, axis
+/// base→top unit, positive height; antiparallel tools are
+/// normalized).
+///
+/// The compositions are prisms of the planar circle-circle booleans
+/// over the z-overlap (see the module doc); the section is the K3a
+/// two-line construction, reused bit-identically. Configurations the
+/// model cannot represent refuse by name, never approximately.
+#[allow(clippy::too_many_arguments)] // two Part::Cylinder parameter sets
+pub fn cylinder_cylinder_boolean(
+    op: BooleanOp,
+    o1: Vector3,
+    a1: Vector3,
+    r1: f64,
+    h1: f64,
+    o2: Vector3,
+    a2: Vector3,
+    r2: f64,
+    h2: f64,
+) -> Result<BooleanOutcome, String> {
+    require_unit(a1, "cylinder a axis")?;
+    require_unit(a2, "cylinder b axis")?;
+    for (r, h, what) in [(r1, h1, "a"), (r2, h2, "b")] {
+        if r <= 0.0 {
+            return Err(format!(
+                "the {what} cylinder radius must be positive, got {r}"
+            ));
+        }
+        if h <= 0.0 {
+            return Err(format!(
+                "the {what} cylinder height must be positive, got {h}"
+            ));
+        }
+    }
+
+    // Antiparallel tools normalized to the target's axis direction
+    // (the same solid, base and top exchanged).
+    let (o2, a2) = if a1.dot(&a2) < 0.0 {
+        (
+            v3(o2.x + a2.x * h2, o2.y + a2.y * h2, o2.z + a2.z * h2),
+            v3(-a2.x, -a2.y, -a2.z),
+        )
+    } else {
+        (o2, a2)
+    };
+    let a = a1;
+
+    // Operand-order canonicalization for the symmetric operations:
+    // `common(a, b)` and `fuse(a, b)` must be bit-identical under the
+    // swap (the target/tool roles of `Cut` are not symmetric).
+    let (o1, r1, h1, o2, r2, h2) = if matches!(op, BooleanOp::Common | BooleanOp::Fuse)
+        && lex_after(&[o1.x, o1.y, o1.z, r1], &[o2.x, o2.y, o2.z, r2])
+    {
+        (o2, r2, h2, o1, r1, h1)
+    } else {
+        (o1, r1, h1, o2, r2, h2)
+    };
+
+    // The z-analysis in a's v-frame.
+    let s2 = v3(o2.x - o1.x, o2.y - o1.y, o2.z - o1.z).dot(&a);
+    let v_lo = s2.max(0.0);
+    let v_hi = (s2 + h2).min(h1);
+    let z_disjoint = v_lo >= v_hi;
+    let equal_ranges = s2 == 0.0 && s2 + h2 == h1;
+    let b_covers_a = s2 <= 0.0 && s2 + h2 >= h1;
+
+    let whole_a = || cylinder_piece(o1, a, r1, 0.0, h1);
+    let whole_b = || cylinder_piece(o2, a, r2, 0.0, h2);
+    let disjoint_fuse =
+        || refused("disjoint fuse — a two-shell compound, not a single closed shell");
+
+    // The cross-section classification, exactly as K3a computes it.
+    let x_hat = any_perpendicular(a);
+    let surface_a = Surface::Cylinder {
+        origin: o1,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r1,
+    };
+    let surface_b = Surface::Cylinder {
+        origin: o2,
+        axis: a2,
+        ref_dir: x_hat,
+        radius: r2,
+    };
+    let section = intersect_surfaces(&surface_a, &surface_b);
+    if let SurfaceIntersection::NotAnalytic { why } = &section {
+        return Ok(refused(why));
+    }
+
+    // The perpendicular center distance, exactly (the K3a operands'
+    // own arithmetic, redone here for the classification tier).
+    let perp = {
+        let dv = v3(o2.x - o1.x, o2.y - o1.y, o2.z - o1.z);
+        let along = dv.dot(&a);
+        v3(dv.x - a.x * along, dv.y - a.y * along, dv.z - a.z * along)
+    };
+    let d2_terms = length_squared_terms(perp);
+    let mut ext = d2_terms.clone();
+    let (sh, se) = two_prod(r1 + r2, r1 + r2);
+    ext.push(-sh);
+    ext.push(-se);
+    let ext_sign = exact_sum_sign(&ext);
+    let mut inn = d2_terms.clone();
+    let (ih, ie) = two_prod(r1 - r2, r1 - r2);
+    inn.push(-ih);
+    inn.push(-ie);
+    let int_sign = exact_sum_sign(&inn);
+
+    // ---- z-disjoint: no interaction at all --------------------------
+    if z_disjoint {
+        return Ok(match op {
+            BooleanOp::Common => empty(),
+            BooleanOp::Cut => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(whole_a()),
+            },
+            BooleanOp::Fuse => disjoint_fuse(),
+        });
+    }
+
+    // ---- coincident surfaces (coaxial, equal radius) ----------------
+    // K3a's exact `Coincident` needs d² == 0 to the bit; an axis
+    // offset that differs only by the arithmetic residue of the
+    // caller's placement (d at the ulp scale) would otherwise classify
+    // as crossing and compose a lens of noise. Sub-machine d with
+    // equal radii reads as coincident — the honest reading of the
+    // intent (unequal radii stay nested, which needs no section).
+    let d_len = exact_sum_rounded(&d2_terms).max(0.0).sqrt();
+    let machine_coincident = d_len <= 1e-9 * r1.max(r2).max(1.0);
+    if matches!(section, SurfaceIntersection::Coincident) || (machine_coincident && r1 == r2) {
+        if equal_ranges {
+            return Ok(match op {
+                BooleanOp::Common | BooleanOp::Fuse => BooleanOutcome {
+                    kind: BooleanOutcomeKind::Solid(whole_a()),
+                },
+                BooleanOp::Cut => empty(),
+            });
+        }
+        return Ok(refused(
+            "coincident cylinders with staggered ranges — the end-to-end piece \
+             compositions are the next slice",
+        ));
+    }
+
+    // ---- nested cross-sections (or their internal tangency) ------------
+    // K3a reports the nested pair as `Empty`; the internally tangent
+    // pair (one disk inside the other, touching along one generator)
+    // as a single line with the interior sign exactly zero.
+    let single_line = matches!(&section, SurfaceIntersection::Curves(cs) if cs.len() == 1);
+    let internal_tangency = single_line && int_sign == 0;
+    if matches!(section, SurfaceIntersection::Empty) || internal_tangency {
+        if ext_sign > 0 {
+            // Cross-disjoint: like z-disjoint but with the cylinders
+            // side by side — the same pass-throughs.
+            return Ok(match op {
+                BooleanOp::Common => empty(),
+                BooleanOp::Cut => BooleanOutcome {
+                    kind: BooleanOutcomeKind::Solid(whole_a()),
+                },
+                BooleanOp::Fuse => disjoint_fuse(),
+            });
+        }
+        // Nested: one disk inside the other. Strictly (int_sign < 0),
+        // or at the internal tangency (int_sign == 0, measure zero).
+        let b_inside_a = r1 > r2;
+        // Common: the inner cylinder clipped to the overlap — an
+        // ordinary piece (any overlap shape; the tangency adds
+        // nothing).
+        let (oi, ri, si, _hi) = if b_inside_a {
+            (o2, r2, s2, h2)
+        } else {
+            (o1, r1, 0.0, h1)
+        };
+        if op == BooleanOp::Common {
+            let w_lo = if b_inside_a { v_lo - si } else { v_lo };
+            let w_hi = if b_inside_a { v_hi - si } else { v_hi };
+            return Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(cylinder_piece(oi, a, ri, w_lo, w_hi)),
+            });
+        }
+        // Fuse: one cylinder entirely inside the other — the outer
+        // whole piece; otherwise the notch is the next slice.
+        let (outer_contains, whole) = if b_inside_a {
+            (s2 >= 0.0 && s2 + h2 <= h1, whole_a())
+        } else {
+            (s2 <= 0.0 && s2 + h2 >= h1, whole_b())
+        };
+        if op == BooleanOp::Fuse {
+            if outer_contains {
+                return Ok(BooleanOutcome {
+                    kind: BooleanOutcomeKind::Solid(whole),
+                });
+            }
+            return Ok(refused(
+                "the staggered fuse of nested cylinders — the notch mantles \
+                 are the next slice",
+            ));
+        }
+        // Cut: b nested inside a cross-wise. The tube needs b's
+        // z-range to cover a's; anything else is the drill.
+        if !b_inside_a {
+            // a inside b cross-wise: a − b is empty when b covers a,
+            // the sticking-out pieces otherwise.
+            if b_covers_a {
+                return Ok(empty());
+            }
+            return Ok(refused(
+                "the staggered cut of cylinders nested the other way — the \
+                 sticking-out pieces are the next slice",
+            ));
+        }
+        if !b_covers_a {
+            return Ok(refused(
+                "the staggered drill — the blind hole and partial bore are \
+                 the next slice",
+            ));
+        }
+        if internal_tangency {
+            return Ok(refused(
+                "internally tangent cut — the tube pinches to a line \
+                 (measure zero), refused",
+            ));
+        }
+        return Ok(BooleanOutcome {
+            kind: BooleanOutcomeKind::Solid(nested_tube(o1, a, r1, h1, o2, r2)),
+        });
+    }
+
+    // ---- external cross-tangency: one generator line, measure zero ----
+    if single_line {
+        return Ok(match op {
+            BooleanOp::Common => empty(),
+            BooleanOp::Cut => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(whole_a()),
+            },
+            BooleanOp::Fuse => refused(
+                "tangent fuse — the shared generator line is not an \
+                 edge-manifold junction",
+            ),
+        });
+    }
+
+    // ---- the crossing section: two generator lines -------------------
+    let lines = match &section {
+        SurfaceIntersection::Curves(cs) if cs.len() == 2 => match (&cs[0], &cs[1]) {
+            (Curve::Line { .. }, Curve::Line { .. }) => (cs[0].clone(), cs[1].clone()),
+            _ => return Err("K3a returned a non-line cylinder section".into()),
+        },
+        other => return Err(format!("the K3a two-line section is missing: {other:?}")),
+    };
+
+    // The op guards on the z-configuration (Common composes over any
+    // overlap; the others need the covering/equal shapes).
+    match op {
+        BooleanOp::Common => {}
+        BooleanOp::Cut if !b_covers_a => {
+            return Ok(refused(
+                "the staggered cut — the notch mantle (a full-circle strip \
+                 beyond the tool's range) is the next slice",
+            ))
+        }
+        BooleanOp::Fuse if !equal_ranges => {
+            return Ok(refused(
+                "the staggered fuse — the notch mantles are the next slice",
+            ))
+        }
+        _ => {}
+    }
+
+    // The canonical crossing lines, at a's v-parameters. K3a's lines
+    // run along `a` (both stored axes are `a` after normalization);
+    // each line's origin sits in a plane ⊥ a through one of the
+    // (canonically ordered) origins, so the point at v-parameter `v` is
+    // the exact line evaluation at `v − v₀`.
+    let line_at = |c: &Curve, v: f64| -> Vector3 {
+        match c {
+            Curve::Line { origin, direction } => {
+                let v0 = v3(origin.x - o1.x, origin.y - o1.y, origin.z - o1.z).dot(&a);
+                let t = v - v0;
+                v3(
+                    origin.x + direction.x * t,
+                    origin.y + direction.y * t,
+                    origin.z + direction.z * t,
+                )
+            }
+            _ => unreachable!("checked above"),
+        }
+    };
+    // The angle of a line's crossing offset, in the given cylinder's
+    // frame (x_hat, y_hat shared: the axes coincide).
+    let y_hat = a.cross(&x_hat);
+    let theta_on = |c: &Curve, o: Vector3| -> f64 {
+        match c {
+            Curve::Line { origin, .. } => {
+                let off = v3(origin.x - o.x, origin.y - o.y, origin.z - o.z);
+                let along = off.dot(&a);
+                let radial = v3(
+                    off.x - a.x * along,
+                    off.y - a.y * along,
+                    off.z - a.z * along,
+                );
+                radial.dot(&y_hat).atan2(radial.dot(&x_hat))
+            }
+            _ => unreachable!("checked above"),
+        }
+    };
+    let axis_dist = |p: Vector3, o: Vector3| -> f64 {
+        let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+        let along = off.dot(&a);
+        v3(
+            off.x - a.x * along,
+            off.y - a.y * along,
+            off.z - a.z * along,
+        )
+        .length()
+    };
+
+    let th_p = theta_on(&lines.0, o1);
+    let th_q = theta_on(&lines.1, o1);
+    let ccw_a = {
+        let d = th_q - th_p;
+        if d > 0.0 {
+            d
+        } else {
+            d + std::f64::consts::TAU
+        }
+    };
+    let ph_p = theta_on(&lines.0, o2);
+    let ph_q = theta_on(&lines.1, o2);
+    let ccw_b = {
+        let d = ph_q - ph_p;
+        if d > 0.0 {
+            d
+        } else {
+            d + std::f64::consts::TAU
+        }
+    };
+
+    // Which of the two arcs between the crossings is the inside one:
+    // the CCW midpoint, tested against the other disk. (The inside
+    // sweeps of the two circles always have opposite signs — the
+    // crossing transversalities at P oppose; the cap and strip wires
+    // below rely on it.)
+    let mid_angle = |o: Vector3, r: f64, th: f64, ccw: f64| -> Vector3 {
+        let m = th + ccw / 2.0;
+        let (s, c) = m.sin_cos();
+        v3(
+            o.x + r * (c * x_hat.x + s * y_hat.x),
+            o.y + r * (c * x_hat.y + s * y_hat.y),
+            o.z + r * (c * x_hat.z + s * y_hat.z),
+        )
+    };
+    let a_inside_b = axis_dist(mid_angle(o1, r1, th_p, ccw_a), o2) < r2;
+    let b_inside_a = axis_dist(mid_angle(o2, r2, ph_p, ccw_b), o1) < r1;
+    let sweep_a_in = if a_inside_b {
+        ccw_a
+    } else {
+        ccw_a - std::f64::consts::TAU
+    };
+    let sweep_a_out = if a_inside_b {
+        ccw_a - std::f64::consts::TAU
+    } else {
+        ccw_a
+    };
+    let sweep_b_in = if b_inside_a {
+        ccw_b
+    } else {
+        ccw_b - std::f64::consts::TAU
+    };
+    let sweep_b_out = if b_inside_a {
+        ccw_b - std::f64::consts::TAU
+    } else {
+        ccw_b
+    };
+
+    // The canonical crossing points at the two boundary heights.
+    let p_lo = line_at(&lines.0, v_lo);
+    let q_lo = line_at(&lines.1, v_lo);
+    let p_hi = line_at(&lines.0, v_hi);
+    let q_hi = line_at(&lines.1, v_hi);
+
+    // The assembly tables. Vertices 0..3: P/Q at lo/hi; the arc chains
+    // append their junctions.
+    let mut vertices = vec![
+        TopoVertex { point: p_lo },
+        TopoVertex { point: q_lo },
+        TopoVertex { point: p_hi },
+        TopoVertex { point: q_hi },
+    ];
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let center_on = |o: Vector3, v: f64| v3(o.x + a.x * v, o.y + a.y * v, o.z + a.z * v);
+    // b's circles at the A-frame heights v ∈ {v_lo, v_hi} sit at b's
+    // own parameters v − s2 (the axis offsets).
+    let center_b_on = |v: f64| center_on(o2, v - s2);
+    // The chains each operation needs — nothing else is built (the
+    // unused arcs would break the Euler count as dead edges):
+    // * Common: both inside arcs;
+    // * Cut: a's outside arc + b's inside arc (the wall);
+    // * Fuse: both outside arcs.
+    let sweep_a_first = match op {
+        BooleanOp::Common => sweep_a_in,
+        _ => sweep_a_out,
+    };
+    let sweep_b_second = match op {
+        BooleanOp::Fuse => sweep_b_out,
+        _ => sweep_b_in,
+    };
+    let chain_a_lo = push_arc_chain(
+        &mut vertices,
+        &mut edges,
+        center_on(o1, v_lo),
+        x_hat,
+        y_hat,
+        r1,
+        p_lo,
+        q_lo,
+        th_p,
+        sweep_a_first,
+        0,
+        1,
+    );
+    let chain_a_hi = push_arc_chain(
+        &mut vertices,
+        &mut edges,
+        center_on(o1, v_hi),
+        x_hat,
+        y_hat,
+        r1,
+        p_hi,
+        q_hi,
+        th_p,
+        sweep_a_first,
+        2,
+        3,
+    );
+    let chain_b_lo = push_arc_chain(
+        &mut vertices,
+        &mut edges,
+        center_b_on(v_lo),
+        x_hat,
+        y_hat,
+        r2,
+        p_lo,
+        q_lo,
+        ph_p,
+        sweep_b_second,
+        0,
+        1,
+    );
+    let chain_b_hi = push_arc_chain(
+        &mut vertices,
+        &mut edges,
+        center_b_on(v_hi),
+        x_hat,
+        y_hat,
+        r2,
+        p_hi,
+        q_hi,
+        ph_p,
+        sweep_b_second,
+        2,
+        3,
+    );
+    edges.push(seam_between(p_lo, p_hi, 0, 2));
+    let e_vp = edges.len() - 1;
+    edges.push(seam_between(q_lo, q_hi, 1, 3));
+    let e_vq = edges.len() - 1;
+    // Aliases for the face assembly below (the cut's a-faces and the
+    // fuse's a-faces use a's outside arcs; the common's use the
+    // inside arcs — the same chains built above).
+    let (chain_ao_lo, chain_ao_hi, chain_bo_lo, chain_bo_hi) = (
+        chain_a_lo.clone(),
+        chain_a_hi.clone(),
+        chain_b_lo.clone(),
+        chain_b_hi.clone(),
+    );
+
+    // A strip face's natural wire: the region [u_s, u_e] × [v_lo, v_hi]
+    // traversed CCW in (u, v) — kept on the left viewed from the
+    // natural outward normal r̂ = ∂u × ∂v. The chain runs P→Q; whether
+    // that increases or decreases u depends on the sweep's sign.
+    let strip_wire = |chain_lo: &ArcChain, chain_hi: &ArcChain, sweep: f64| -> Vec<WireEdge> {
+        if sweep > 0.0 {
+            let mut w = chain_uses(chain_lo, true);
+            w.push(WireEdge {
+                edge: e_vq,
+                forward: true,
+            });
+            w.extend(chain_uses(chain_hi, false));
+            w.push(WireEdge {
+                edge: e_vp,
+                forward: false,
+            });
+            w
+        } else {
+            let mut w = chain_uses(chain_lo, false);
+            w.push(WireEdge {
+                edge: e_vp,
+                forward: true,
+            });
+            w.extend(chain_uses(chain_hi, true));
+            w.push(WireEdge {
+                edge: e_vq,
+                forward: false,
+            });
+            w
+        }
+    };
+    // A cap face's wire: [first arc chain CCW, second arc chain CW]
+    // with the region (kept) on the left viewed from the cap's outward
+    // normal. The CCW traversal of a chain is its stored direction iff
+    // its sweep is positive.
+    let cap_wire = |first: &ArcChain,
+                    second: &ArcChain,
+                    s1: f64,
+                    s2: f64,
+                    second_ccw: bool|
+     -> Vec<WireEdge> {
+        // Both chains in their CCW direction keep an inside-disk
+        // region on the left; the cut's cap (the disk minus the lens)
+        // lies OUTSIDE b on b's arc, so that chain runs CW there.
+        let mut w = chain_uses(first, s1 > 0.0);
+        w.extend(chain_uses(
+            second,
+            if second_ccw { s2 > 0.0 } else { s2 <= 0.0 },
+        ));
+        w
+    };
+    let reversed_wire = |w: &[WireEdge]| -> Vec<WireEdge> {
+        w.iter()
+            .rev()
+            .map(|we| WireEdge {
+                edge: we.edge,
+                forward: !we.forward,
+            })
+            .collect()
+    };
+
+    let uv_of_strip = |theta: f64, sweep: f64| -> [f64; 4] {
+        [theta + sweep.min(0.0), theta + sweep.max(0.0), v_lo, v_hi]
+    };
+
+    let mut faces: Vec<TopoFace> = Vec::new();
+    match op {
+        BooleanOp::Common => {
+            faces.push(TopoFace {
+                surface: surface_a,
+                uv_bounds: uv_of_strip(th_p, sweep_a_in),
+                wires: vec![TopoWire {
+                    edges: strip_wire(&chain_a_lo, &chain_a_hi, sweep_a_in),
+                }],
+                reversed: false,
+            });
+            faces.push(TopoFace {
+                surface: surface_b,
+                uv_bounds: uv_of_strip(ph_p, sweep_b_in),
+                wires: vec![TopoWire {
+                    edges: strip_wire(&chain_b_lo, &chain_b_hi, sweep_b_in),
+                }],
+                reversed: false,
+            });
+            // Top cap (+a): the lens — a's inside arc CCW, b's inside
+            // arc CW (the region lies inside both disks).
+            let top = cap_wire(&chain_a_hi, &chain_b_hi, sweep_a_in, sweep_b_in, true);
+            let bottom = reversed_wire(&cap_wire(
+                &chain_a_lo,
+                &chain_b_lo,
+                sweep_a_in,
+                sweep_b_in,
+                true,
+            ));
+            faces.push(plane_face_at(
+                center_on(o1, v_hi),
+                a,
+                x_hat,
+                &top,
+                (&chain_a_hi, &chain_b_hi),
+            ));
+            faces.push(plane_face_at(
+                center_on(o1, v_lo),
+                v3(-a.x, -a.y, -a.z),
+                x_hat,
+                &bottom,
+                (&chain_a_lo, &chain_b_lo),
+            ));
+        }
+        BooleanOp::Cut => {
+            faces.push(TopoFace {
+                surface: surface_a,
+                uv_bounds: uv_of_strip(th_p, sweep_a_out),
+                wires: vec![TopoWire {
+                    edges: strip_wire(&chain_ao_lo, &chain_ao_hi, sweep_a_out),
+                }],
+                reversed: false,
+            });
+            // b's inside-arc wall: the same patch as the common's
+            // b-strip, but the solid lies OUTSIDE b — the reversed
+            // orientation: the traversal runs against the outward
+            // −r̂_b (the loop reversed, each flag flipped), and
+            // `reversed` tells the reader which normal that is.
+            let wall = reversed_wire(&strip_wire(&chain_b_lo, &chain_b_hi, sweep_b_in));
+            faces.push(TopoFace {
+                surface: surface_b,
+                uv_bounds: uv_of_strip(ph_p, sweep_b_in),
+                wires: vec![TopoWire { edges: wall }],
+                reversed: true,
+            });
+            // Top cap (+a): disk a minus the lens — a's outside arc
+            // CCW, b's inside arc CW.
+            let top = cap_wire(&chain_ao_hi, &chain_b_hi, sweep_a_out, sweep_b_in, false);
+            let bottom = reversed_wire(&cap_wire(
+                &chain_ao_lo,
+                &chain_b_lo,
+                sweep_a_out,
+                sweep_b_in,
+                false,
+            ));
+            faces.push(plane_face_at(
+                center_on(o1, v_hi),
+                a,
+                x_hat,
+                &top,
+                (&chain_ao_hi, &chain_b_hi),
+            ));
+            faces.push(plane_face_at(
+                center_on(o1, v_lo),
+                v3(-a.x, -a.y, -a.z),
+                x_hat,
+                &bottom,
+                (&chain_ao_lo, &chain_b_lo),
+            ));
+        }
+        BooleanOp::Fuse => {
+            faces.push(TopoFace {
+                surface: surface_a,
+                uv_bounds: uv_of_strip(th_p, sweep_a_out),
+                wires: vec![TopoWire {
+                    edges: strip_wire(&chain_ao_lo, &chain_ao_hi, sweep_a_out),
+                }],
+                reversed: false,
+            });
+            faces.push(TopoFace {
+                surface: surface_b,
+                uv_bounds: uv_of_strip(ph_p, sweep_b_out),
+                wires: vec![TopoWire {
+                    edges: strip_wire(&chain_bo_lo, &chain_bo_hi, sweep_b_out),
+                }],
+                reversed: false,
+            });
+            // Top cap (+a): the union — a's outside arc CCW, b's
+            // outside arc CW.
+            let top = cap_wire(&chain_ao_hi, &chain_bo_hi, sweep_a_out, sweep_b_out, true);
+            let bottom = reversed_wire(&cap_wire(
+                &chain_ao_lo,
+                &chain_bo_lo,
+                sweep_a_out,
+                sweep_b_out,
+                true,
+            ));
+            faces.push(plane_face_at(
+                center_on(o1, v_hi),
+                a,
+                x_hat,
+                &top,
+                (&chain_ao_hi, &chain_bo_hi),
+            ));
+            faces.push(plane_face_at(
+                center_on(o1, v_lo),
+                v3(-a.x, -a.y, -a.z),
+                x_hat,
+                &bottom,
+                (&chain_ao_lo, &chain_bo_lo),
+            ));
+        }
+    }
+
+    let brep = ExactBRep {
+        vertices,
+        edges,
+        faces,
+    };
+    brep.validate()
+        .map_err(|e| format!("the composed cylinder boolean failed validation: {e}"))?;
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
+}
+
+/// The nested cut — b's cross-section strictly inside a's, b's
+/// z-range covering a's: the tube. a's mantle (natural), b's mantle
+/// (reversed — the solid lies outside b), and the annular caps
+/// (multi-wire plane faces: a's rim outside, b's rim as the hole).
+fn nested_tube(o1: Vector3, a: Vector3, r1: f64, h1: f64, o2: Vector3, r2: f64) -> ExactBRep {
+    let x_hat = any_perpendicular(a);
+    let top = v3(o1.x + a.x * h1, o1.y + a.y * h1, o1.z + a.z * h1);
+    // b's rim circles sit on b's axis at a's cap planes: the points
+    // (o2 + a·t) with a·(o2 + a·t − o1) ∈ {0, h1}, i.e. t ∈ {−s2, h1 − s2}.
+    let s2 = v3(o2.x - o1.x, o2.y - o1.y, o2.z - o1.z).dot(&a);
+    let b_at = |t: f64| v3(o2.x + a.x * t, o2.y + a.y * t, o2.z + a.z * t);
+    let rim = |o: Vector3, r: f64| Curve::Circle {
+        center: o,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r,
+    };
+    let ca_lo = rim(o1, r1);
+    let ca_hi = rim(top, r1);
+    let cb_lo = rim(b_at(-s2), r2);
+    let cb_hi = rim(b_at(h1 - s2), r2);
+    let va = (ca_lo.point(0.0), ca_hi.point(0.0));
+    let vb = (cb_lo.point(0.0), cb_hi.point(0.0));
+    let edges = vec![
+        TopoEdge {
+            curve: ca_lo,
+            range: (0.0, std::f64::consts::TAU),
+            start: 0,
+            end: 0,
+        },
+        TopoEdge {
+            curve: ca_hi,
+            range: (0.0, std::f64::consts::TAU),
+            start: 1,
+            end: 1,
+        },
+        seam_between(va.0, va.1, 0, 1),
+        TopoEdge {
+            curve: cb_lo,
+            range: (0.0, std::f64::consts::TAU),
+            start: 2,
+            end: 2,
+        },
+        TopoEdge {
+            curve: cb_hi,
+            range: (0.0, std::f64::consts::TAU),
+            start: 3,
+            end: 3,
+        },
+        seam_between(vb.0, vb.1, 2, 3),
+    ];
+    let cylinder = |o: Vector3, r: f64| Surface::Cylinder {
+        origin: o,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r,
+    };
+    // a's mantle (the K1 pattern: seam up, top rim, seam down, bottom
+    // rim — kept on the left against the natural outward r̂).
+    let mantle = |rim_lo: usize, rim_hi: usize, seam: usize| -> Vec<WireEdge> {
+        vec![
+            WireEdge {
+                edge: seam,
+                forward: true,
+            },
+            WireEdge {
+                edge: rim_hi,
+                forward: false,
+            },
+            WireEdge {
+                edge: seam,
+                forward: false,
+            },
+            WireEdge {
+                edge: rim_lo,
+                forward: true,
+            },
+        ]
+    };
+    let faces = vec![
+        TopoFace {
+            surface: cylinder(o1, r1),
+            uv_bounds: [0.0, std::f64::consts::TAU, 0.0, h1],
+            wires: vec![TopoWire {
+                edges: mantle(0, 1, 2),
+            }],
+            reversed: false,
+        },
+        // b's mantle reversed: the same patch with the solid on the
+        // outside — the loop reversed (list reversed, flags flipped)
+        // against the outward −r̂_b. The wall spans b's own parameters
+        // [−s2, h1 − s2] (a's range in b's frame).
+        TopoFace {
+            surface: cylinder(o2, r2),
+            uv_bounds: [0.0, std::f64::consts::TAU, -s2, h1 - s2],
+            wires: vec![TopoWire {
+                edges: mantle(3, 4, 5)
+                    .iter()
+                    .rev()
+                    .map(|we| WireEdge {
+                        edge: we.edge,
+                        forward: !we.forward,
+                    })
+                    .collect(),
+            }],
+            reversed: true,
+        },
+        // The annular caps: a's rim outside, b's rim as the hole.
+        TopoFace {
+            surface: Surface::Plane {
+                origin: top,
+                normal: a,
+                x_dir: x_hat,
+            },
+            uv_bounds: [-r1, r1, -r1, r1],
+            wires: vec![
+                TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 1,
+                        forward: true,
+                    }],
+                },
+                TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 4,
+                        forward: false,
+                    }],
+                },
+            ],
+            reversed: false,
+        },
+        TopoFace {
+            surface: Surface::Plane {
+                origin: o1,
+                normal: v3(-a.x, -a.y, -a.z),
+                x_dir: x_hat,
+            },
+            uv_bounds: [-r1, r1, -r1, r1],
+            wires: vec![
+                TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 0,
+                        forward: false,
+                    }],
+                },
+                TopoWire {
+                    edges: vec![WireEdge {
+                        edge: 3,
+                        forward: true,
+                    }],
+                },
+            ],
+            reversed: false,
+        },
+    ];
+    ExactBRep {
+        vertices: vec![
+            TopoVertex { point: va.0 },
+            TopoVertex { point: va.1 },
+            TopoVertex { point: vb.0 },
+            TopoVertex { point: vb.1 },
+        ],
+        edges,
+        faces,
+    }
+}
+
+/// One arc chain: the rational-quadratic segments of a circular arc
+/// from the canonical start point to the canonical end point, with
+/// the junction vertices between them.
+#[derive(Clone)]
+struct ArcChain {
+    /// The edge indices, in stored order (start → end).
+    edges: Vec<usize>,
+    /// Every segment's control points (for the cap UV boxes: the
+    /// rational arc lies in its control hull, positive weights).
+    control_points: Vec<Vector3>,
+}
+
+/// Build one arc chain: `n = ceil(|sweep| / (π/2))` equal rational
+/// quadratic segments along the circle (center `c`, radius `r`, frame
+/// `(x_hat, y_hat)`) from the canonical `p_start` to the canonical
+/// `p_end` with the signed `sweep` (positive = CCW around the frame
+/// axis). The first control point of the first segment and the last of
+/// the last are the canonical points themselves — the bit-exact
+/// vertex contract — and every segment's de Boor evaluation returns
+/// its endpoints exactly; the curve lies on the circle to machine
+/// scale (the classical NURBS arc: tangent-intersection middle control
+/// point, weight cos(sweep/2)).
+#[allow(clippy::too_many_arguments)] // the circle frame, the canonical ends, the sweep, the vertex indices
+fn push_arc_chain(
+    vertices: &mut Vec<TopoVertex>,
+    edges: &mut Vec<TopoEdge>,
+    center: Vector3,
+    x_hat: Vector3,
+    y_hat: Vector3,
+    radius: f64,
+    p_start: Vector3,
+    p_end: Vector3,
+    theta_start: f64,
+    sweep: f64,
+    v_start: usize,
+    v_end: usize,
+) -> ArcChain {
+    let n = ((sweep.abs() / std::f64::consts::FRAC_PI_2).ceil() as usize).max(1);
+    let seg = sweep / n as f64;
+    let pt = |th: f64| {
+        let (s, c) = th.sin_cos();
+        v3(
+            center.x + radius * (c * x_hat.x + s * y_hat.x),
+            center.y + radius * (c * x_hat.y + s * y_hat.y),
+            center.z + radius * (c * x_hat.z + s * y_hat.z),
+        )
+    };
+    // The junction points: canonical ends, exact circle evaluations
+    // between.
+    let mut pts = Vec::with_capacity(n + 1);
+    for j in 0..=n {
+        let p = if j == 0 {
+            p_start
+        } else if j == n {
+            p_end
+        } else {
+            pt(theta_start + seg * j as f64)
+        };
+        pts.push(p);
+    }
+    // The junction vertices: the canonical endpoints reuse their
+    // existing indices (the crossing generators' vertices); only the
+    // interior junctions are new.
+    let v_new = vertices.len();
+    for p in &pts[1..n] {
+        vertices.push(TopoVertex { point: *p });
+    }
+    let index_of = |j: usize| -> usize {
+        if j == 0 {
+            v_start
+        } else if j == n {
+            v_end
+        } else {
+            v_new + j - 1
+        }
+    };
+    let e0 = edges.len();
+    // The frame's axis (x̂ × ŷ = ±a): the rotation side of the sweep.
+    let frame_axis = x_hat.cross(&y_hat);
+    let n_s = if sweep >= 0.0 {
+        frame_axis
+    } else {
+        v3(-frame_axis.x, -frame_axis.y, -frame_axis.z)
+    };
+    let mut control_points = Vec::with_capacity(3 * n);
+    for j in 0..n {
+        let (p_a, p_b) = (pts[j], pts[j + 1]);
+        // The tangent of CCW motion around n_s at a point is n_s × r̂,
+        // with r̂ the unit radial from the center (robust at the
+        // canonical endpoints, which sit on the circle to machine
+        // scale only).
+        let tangent = |p: Vector3| -> Vector3 {
+            let u = v3(p.x - center.x, p.y - center.y, p.z - center.z);
+            let u = u * (1.0 / u.length());
+            n_s.cross(&u)
+        };
+        let t_a = tangent(p_a);
+        let t_b = tangent(p_b);
+        // The tangent intersection p_a + s·t_a = p_b + t·t_b (both
+        // tangent lines lie in the arc's plane; Cramer in the plane's
+        // normal n_s).
+        let d = v3(p_b.x - p_a.x, p_b.y - p_a.y, p_b.z - p_a.z);
+        let denom = t_a.cross(&t_b).dot(&n_s);
+        let s = d.cross(&t_b).dot(&n_s) / denom;
+        let m = v3(p_a.x + t_a.x * s, p_a.y + t_a.y * s, p_a.z + t_a.z * s);
+        let w = (seg / 2.0).cos();
+        control_points.extend_from_slice(&[p_a, m, p_b]);
+        edges.push(TopoEdge {
+            curve: Curve::Bspline {
+                degree: 2,
+                knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                points: vec![p_a, m, p_b],
+                weights: Some(vec![1.0, w, 1.0]),
+            },
+            range: (0.0, 1.0),
+            start: index_of(j),
+            end: index_of(j + 1),
+        });
+    }
+    ArcChain {
+        edges: (e0..e0 + n).collect(),
+        control_points,
+    }
+}
+
+/// The wire-edge uses of a chain: forward (the stored direction) or
+/// reversed (the list backwards, each edge flipped).
+fn chain_uses(chain: &ArcChain, forward: bool) -> Vec<WireEdge> {
+    if forward {
+        chain
+            .edges
+            .iter()
+            .map(|&e| WireEdge {
+                edge: e,
+                forward: true,
+            })
+            .collect()
+    } else {
+        chain
+            .edges
+            .iter()
+            .rev()
+            .map(|&e| WireEdge {
+                edge: e,
+                forward: false,
+            })
+            .collect()
+    }
+}
+
+/// A planar cap face on the cutting plane through `origin` with
+/// `normal` (unit) — the wire `w` plus a UV box that contains the arc
+/// chains' control polygons (the rational arc lies in its control
+/// hull: convex combinations for positive weights, so the box is
+/// guaranteed to contain the face's trim).
+fn plane_face_at(
+    origin: Vector3,
+    normal: Vector3,
+    x_dir: Vector3,
+    w: &[WireEdge],
+    chains: (&ArcChain, &ArcChain),
+) -> TopoFace {
+    let y_dir = normal.cross(&x_dir);
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for chain in [chains.0, chains.1] {
+        // The control hull contains the arc (positive weights), so the
+        // box over the control points contains the face's trim.
+        for p in &chain.control_points {
+            let off = v3(p.x - origin.x, p.y - origin.y, p.z - origin.z);
+            let (u, v) = (off.dot(&x_dir), off.dot(&y_dir));
+            lo[0] = lo[0].min(u);
+            hi[0] = hi[0].max(u);
+            lo[1] = lo[1].min(v);
+            hi[1] = hi[1].max(v);
+        }
+    }
+    TopoFace {
+        surface: Surface::Plane {
+            origin,
+            normal,
+            x_dir,
+        },
+        uv_bounds: [lo[0] - 1e-9, hi[0] + 1e-9, lo[1] - 1e-9, hi[1] + 1e-9],
+        wires: vec![TopoWire { edges: w.to_vec() }],
+        reversed: false,
     }
 }
