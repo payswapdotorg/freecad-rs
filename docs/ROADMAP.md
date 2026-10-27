@@ -517,8 +517,10 @@ behind us.
       (measure zero), tangent/disjoint fuses, and the
       coincident-to-machine-precision reading of ulp-scale axis
       residues. The coaxial cylinder×sphere
-      family (the capsule cuts) landed as K3e. Remaining for full K3
-      closure: the split-circle mantles.
+      family (the capsule cuts) landed as K3e; the nested staggered
+      pieces (the partial bore, the chimney, the sticking-out piece)
+      as K3f. Remaining for full K3 closure: the crossing split-circle
+      mantles (the one-sided drill and the staggered fuse).
 - [x] **K3e (landing 2026-10-27)** cylinder×sphere — the coaxial
       family, the capsule cuts (`cylinder_sphere_boolean` in
       `brep_boolean.rs`): the compositions follow the cross-section
@@ -560,6 +562,30 @@ behind us.
       bit-identity, dense edge sampling against both operand
       surfaces, the machine-precision coaxial reading, FCBREP
       round-trips — including the mirrored from-below compositions.
+- [x] **K3f (landing 2026-10-27)** the nested staggered pieces — the
+      compositions the covering cases refused as "the next slice"
+      (`nested_partial_bore` / `nested_chimney` in `brep_boolean.rs`):
+      the **partial bore** (the cut, b inside a cross-wise, b's range
+      crossing exactly one of a's ends): one piece — a's full mantle
+      and far cap, the annular near cap (a's rim minus b's
+      cross-section circle at the cap plane, the K3a-perpendicular cut
+      of b at that height), b's wall (REVERSED, the solid outside b)
+      down to the bore's floor — b's end disk at the inner rim height,
+      the solid beyond it; strictly inside instead: the internal void,
+      refused by name. The **chimney** (the fuse, b inside a
+      cross-wise, b sticking out of a's range through one or both
+      ends): a's whole mantle, the annular caps where the chimney
+      passes, the full caps where it does not, and the chimney itself
+      (b's mantle beyond the plane, naturally oriented, and its end
+      cap) — with the mirrored variant (a inside b, a the chimney).
+      The **sticking-out piece** (the cut, a inside b cross-wise): a's
+      z-parts beyond b's range are ordinary cylinder pieces — one, or
+      two shells (refused). 2 acceptance-first tests: per-shape
+      topology and orientation, the volumes against the classical
+      prism compositions (the bore's prism over the z-overlap, the
+      protruding prisms), the reversed-wall and natural-orientation
+      pins, the void refusal, the empty containment, and the mirrored
+      variants both ways.
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets

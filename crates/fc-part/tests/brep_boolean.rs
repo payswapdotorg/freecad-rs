@@ -2710,3 +2710,219 @@ fn cyl_sph_outcomes_round_trip_through_fcbrep() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// K3f — the nested staggered pieces: the partial bore and the chimney
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cyl_cyl_nested_staggered_composes_the_partial_bore() {
+    // b inside a cross-wise (r2 < r1), b's range crossing a's base:
+    // the cut is the partial bore — the full mantle and far cap, the
+    // annular near cap, b's reversed wall, and the bore's floor.
+    let a = v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0);
+    let o1 = v3(0.5, -0.5, 1.0);
+    let r1 = 3.0;
+    let h1 = 4.0;
+    let s5 = 5.0f64.sqrt();
+    let perp = v3(2.0 * 0.4 / s5, -0.4 / s5, 0.0);
+    // b's range [−1.5, 1.5]: crossing the base, its top inside.
+    let o2 = v3(
+        o1.x + perp.x - a.x * 1.5,
+        o1.y + perp.y - a.y * 1.5,
+        o1.z + perp.z - a.z * 1.5,
+    );
+    let r2 = 1.0;
+    let h2 = 3.0;
+    let pi = std::f64::consts::PI;
+
+    let out = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2, a, r2, h2)
+        .expect("the partial bore");
+    let brep = expect_solid(&out, "the partial bore");
+    brep.validate().expect("the partial bore validates");
+    assert_eq!(brep.faces.len(), 5, "mantle, cap, annulus, wall, floor");
+    // 4 − 6 + 5 = 3: the ball plus the annulus's hole.
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the partial bore");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r1 * r1 * h1 - pi * r2 * r2 * 1.5,
+        "the partial bore volume (the bore's prism over the overlap)",
+    );
+    // b's wall is the REVERSED face.
+    let walls: Vec<&fc_part::topology::TopoFace> = brep
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Cylinder" && f.reversed)
+        .collect();
+    assert_eq!(walls.len(), 1, "one reversed wall of b");
+    // The bore's floor is a disk on b's end plane.
+    let floors: Vec<&fc_part::topology::TopoFace> = brep
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Plane" && f.wires.len() == 1)
+        .collect();
+    assert_eq!(floors.len(), 2, "the far cap and the floor");
+
+    // b crossing the top instead: the mirrored bore.
+    let o2t = v3(
+        o1.x + perp.x + a.x * 2.5,
+        o1.y + perp.y + a.y * 2.5,
+        o1.z + perp.z + a.z * 2.5,
+    );
+    let out = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2t, a, r2, h2)
+        .expect("the mirrored partial bore");
+    let brep = expect_solid(&out, "the mirrored partial bore");
+    brep.validate().expect("the mirrored bore validates");
+    assert_eq!(brep.faces.len(), 5, "mantle, cap, annulus, wall, floor");
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the mirrored bore");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r1 * r1 * h1 - pi * r2 * r2 * 1.5,
+        "the mirrored bore volume",
+    );
+
+    // b strictly inside a's range: the internal void — refused.
+    let o2i = v3(
+        o1.x + perp.x + a.x * 0.5,
+        o1.y + perp.y + a.y * 0.5,
+        o1.z + perp.z + a.z * 0.5,
+    );
+    let out = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2i, a, r2, 1.0)
+        .expect("the nested blind bore");
+    expect_refused(&out, "void", "the strictly-inside nested bore");
+}
+
+#[test]
+fn cyl_cyl_nested_staggered_composes_the_chimney() {
+    // b inside a cross-wise, b sticking out of a's base: the fuse is
+    // the chimney — a's mantle and caps (annular where the chimney
+    // passes), b's mantle beyond and its end cap.
+    let a = v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0);
+    let o1 = v3(0.5, -0.5, 1.0);
+    let r1 = 3.0;
+    let h1 = 2.0;
+    let s5 = 5.0f64.sqrt();
+    let perp = v3(2.0 * 0.3 / s5, -0.3 / s5, 0.0);
+    // b's range [−1.5, 1.0]: sticking out the base, ending exactly at
+    // a's top? No — ending inside: [−1.5, 1.0] with h1 = 2: the top
+    // chimney absent.
+    let o2 = v3(
+        o1.x + perp.x - a.x * 1.5,
+        o1.y + perp.y - a.y * 1.5,
+        o1.z + perp.z - a.z * 1.5,
+    );
+    let r2 = 1.0;
+    let h2 = 2.5;
+    let pi = std::f64::consts::PI;
+
+    let out = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h1, o2, a, r2, h2)
+        .expect("the chimney");
+    let brep = expect_solid(&out, "the chimney");
+    brep.validate().expect("the chimney validates");
+    assert_eq!(brep.faces.len(), 5, "mantle, annulus, cap, chimney, cap");
+    // 4 − 6 + 5 = 3: the ball plus the annulus's hole.
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the chimney");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r1 * r1 * h1 + pi * r2 * r2 * 1.5,
+        "the chimney volume (a plus the protruding prism)",
+    );
+    // No reversed face: the chimney's solid lies inside b.
+    assert!(
+        brep.faces.iter().all(|f| !f.reversed),
+        "the chimney faces are naturally oriented"
+    );
+
+    // b sticking out of BOTH ends: two chimneys.
+    let o2b = v3(
+        o1.x + perp.x - a.x * 1.5,
+        o1.y + perp.y - a.y * 1.5,
+        o1.z + perp.z - a.z * 1.5,
+    );
+    let out = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h1, o2b, a, r2, 5.0)
+        .expect("the two chimneys");
+    let brep = expect_solid(&out, "the two chimneys");
+    brep.validate().expect("the two chimneys validate");
+    assert_eq!(
+        brep.faces.len(),
+        7,
+        "mantle, two annuli, two chimneys, two caps"
+    );
+    // 4 − 7 + 7 = 4: the ball plus the two annuli's holes.
+    assert_eq!(
+        brep.euler_characteristic(),
+        4,
+        "the ball reads 4 with two holes"
+    );
+    assert_oriented_closed_shell(brep, "the two chimneys");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r1 * r1 * h1 + pi * r2 * r2 * (5.0 - h1),
+        "the two-chimney volume",
+    );
+
+    // a inside b cross-wise, a sticking out: the mirrored chimney
+    // (a is the chimney on b).
+    let oa = v3(1.0, -1.0, 2.0);
+    let ra = 1.0;
+    let ha = 4.0;
+    // b's range [−0.5, 1.0]: a's base inside it, a sticking out the
+    // top only.
+    let ob = v3(
+        oa.x + perp.x - a.x * 0.5,
+        oa.y + perp.y - a.y * 0.5,
+        oa.z + perp.z - a.z * 0.5,
+    );
+    let rb = 3.0;
+    let hb = 1.5;
+    let out = cylinder_cylinder_boolean(BooleanOp::Fuse, oa, a, ra, ha, ob, a, rb, hb)
+        .expect("the mirrored chimney");
+    let brep = expect_solid(&out, "the mirrored chimney");
+    brep.validate().expect("the mirrored chimney validates");
+    assert_eq!(brep.faces.len(), 5, "mantle, annulus, cap, chimney, cap");
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the mirrored chimney");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * rb * rb * hb + pi * ra * ra * (ha - (hb - 0.5)),
+        "the mirrored chimney volume (b plus the protruding prism)",
+    );
+
+    // The sticking-out piece: a inside b cross-wise, the cut keeps
+    // a's part beyond b's range.
+    let out = cylinder_cylinder_boolean(BooleanOp::Cut, oa, a, ra, ha, ob, a, rb, hb)
+        .expect("the sticking-out piece");
+    approx(
+        brep_volume(expect_solid(&out, "the piece")).unwrap(),
+        pi * ra * ra * (ha - (hb - 0.5)),
+        "the sticking-out piece volume",
+    );
+    // a fully inside b's range: the empty cut.
+    let ob_in = v3(
+        oa.x + perp.x - a.x * 1.0,
+        oa.y + perp.y - a.y * 1.0,
+        oa.z + perp.z - a.z * 1.0,
+    );
+    let out = cylinder_cylinder_boolean(BooleanOp::Cut, oa, a, ra, ha, ob_in, a, rb, 6.0)
+        .expect("a inside b entirely");
+    expect_empty(&out, "a − b = ∅ when a ⊂ b");
+}

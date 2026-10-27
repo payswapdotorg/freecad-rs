@@ -2075,8 +2075,9 @@ pub fn cylinder_cylinder_boolean(
                 kind: BooleanOutcomeKind::Solid(cylinder_piece(oi, a, ri, w_lo, w_hi)),
             });
         }
-        // Fuse: one cylinder entirely inside the other — the outer
-        // whole piece; otherwise the notch is the next slice.
+        // Fuse: one cylinder entirely inside the other (both frame and
+        // range) — the outer whole piece; b inside a cross-wise with b
+        // sticking out of a's range — the chimney.
         let (outer_contains, whole) = if b_inside_a {
             (s2 >= 0.0 && s2 + h2 <= h1, whole_a())
         } else {
@@ -2088,29 +2089,64 @@ pub fn cylinder_cylinder_boolean(
                     kind: BooleanOutcomeKind::Solid(whole),
                 });
             }
-            return Ok(refused(
-                "the staggered fuse of nested cylinders — the notch mantles \
-                 are the next slice",
-            ));
+            if b_inside_a {
+                let brep = nested_chimney(o1, a, r1, h1, o2, r2, s2, h2);
+                brep.validate()
+                    .map_err(|e| format!("the composed chimney failed validation: {e}"))?;
+                return Ok(BooleanOutcome {
+                    kind: BooleanOutcomeKind::Solid(brep),
+                });
+            }
+            // a inside b cross-wise with a sticking out of b's range:
+            // the mirrored chimney (the roles swapped — a is the
+            // chimney on b; a's base sits at −s2 in b's frame).
+            let brep = nested_chimney(o2, a, r2, h2, o1, r1, -s2, h1);
+            brep.validate()
+                .map_err(|e| format!("the composed mirrored chimney failed validation: {e}"))?;
+            return Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(brep),
+            });
         }
         // Cut: b nested inside a cross-wise. The tube needs b's
         // z-range to cover a's; anything else is the drill.
         if !b_inside_a {
-            // a inside b cross-wise: a − b is empty when b covers a,
-            // the sticking-out pieces otherwise.
+            // a inside b cross-wise: a − b is a's z-parts beyond b's
+            // range — one ordinary piece, or two shells.
             if b_covers_a {
                 return Ok(empty());
             }
-            return Ok(refused(
-                "the staggered cut of cylinders nested the other way — the \
-                 sticking-out pieces are the next slice",
-            ));
+            let below = s2 > 0.0; // a's part [0, s2)
+            let above = s2 + h2 < h1; // a's part (s2 + h2, h1]
+            if below && above {
+                return Ok(refused(
+                    "the staggered cut of cylinders nested the other way — two \
+                     sticking-out pieces, a two-shell compound",
+                ));
+            }
+            return Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(if below {
+                    cylinder_piece(o1, a, r1, 0.0, s2)
+                } else {
+                    cylinder_piece(o1, a, r1, s2 + h2, h1)
+                }),
+            });
         }
         if !b_covers_a {
-            return Ok(refused(
-                "the staggered drill — the blind hole and partial bore are \
-                 the next slice",
-            ));
+            // b inside a cross-wise with b's range crossing one of a's
+            // ends: the partial bore. Strictly inside: the internal
+            // void — a second shell, refused by name.
+            if s2 >= 0.0 && s2 + h2 <= h1 {
+                return Ok(refused(
+                    "the nested blind bore — the internal void needs a second \
+                     shell the K1 model does not carry",
+                ));
+            }
+            let from_base = s2 < 0.0;
+            return Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(nested_partial_bore(
+                    o1, a, r1, h1, o2, r2, s2, h2, from_base,
+                )),
+            });
         }
         if internal_tangency {
             return Ok(refused(
@@ -4432,5 +4468,416 @@ pub fn cylinder_sphere_boolean(
                 kind: BooleanOutcomeKind::Solid(brep),
             })
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K3f — the nested staggered pieces: the partial bore and the chimney
+// ---------------------------------------------------------------------------
+//
+// The nested family (one cylinder's disk strictly inside the other's,
+// the axes parallel) with staggered z-ranges — the compositions the
+// covering cases refused as "the next slice":
+//
+// * **The partial bore** (the cut, b inside a cross-wise, b's range
+//   crossing exactly one of a's ends): the material is the full disk
+//   beyond the bore and the annulus beside it — one piece: a's full
+//   mantle and far cap, the annular near cap (a's rim minus b's
+//   cross-section circle at the cap plane), b's wall (reversed — the
+//   solid outside b) down to the bore's floor — b's end disk at the
+//   inner rim height, the solid above it. Strictly inside instead: the
+//   internal void, refused by name.
+// * **The chimney** (the fuse, b inside a cross-wise, b sticking out
+//   of a's range): a's whole mantle, the annular caps where the
+//   chimney passes through (a's rim minus b's cross-section), the
+//   full caps where it does not, and the chimney itself — b's mantle
+//   (naturally oriented — the solid inside b) and its end cap.
+// * **The sticking-out piece** (the cut, a inside b cross-wise): a's
+//   z-parts beyond b's range are ordinary cylinder pieces — one, or
+//   two shells (refused).
+
+/// The partial bore — b inside a cross-wise, b's range crossing one of
+/// a's ends. `from_base`: b enters through a's base (its far rim
+/// inside a's range), else through a's top.
+#[allow(clippy::too_many_arguments)] // the two cylinder frames and the stagger
+fn nested_partial_bore(
+    o1: Vector3,
+    a: Vector3,
+    r1: f64,
+    h1: f64,
+    o2: Vector3,
+    r2: f64,
+    s2: f64,
+    h2: f64,
+    from_base: bool,
+) -> ExactBRep {
+    let x_hat = any_perpendicular(a);
+    let at1 = |v: f64| v3(o1.x + a.x * v, o1.y + a.y * v, o1.z + a.z * v);
+    // b's circle at axis height z (its center on b's own axis).
+    let b_at = |v: f64| v3(o2.x + a.x * v, o2.y + a.y * v, o2.z + a.z * v);
+    let b_circle = |v: f64| Curve::Circle {
+        center: b_at(v),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r2,
+    };
+    // b's v-parameters of a's cap planes: z ∈ {0, h1} ⟺ v ∈ {−s2, h1 − s2}.
+    // The crossing plane and the inner rim:
+    //   from_base: the wall spans b's v ∈ [−s2, h2]; the floor at v = h2.
+    //   else:      the wall spans b's v ∈ [0, h1 − s2]; the floor at v = 0.
+    let (cross_v, floor_v) = if from_base {
+        // b enters through the base: the cross-section at a's base
+        // plane (b's v = −s2), the floor at b's top rim (v = h2).
+        (-s2, h2)
+    } else {
+        // b enters through the top: the cross-section at a's top
+        // plane (b's v = h1 − s2), the floor at b's base rim (v = 0).
+        (h1 - s2, 0.0)
+    };
+    let cross_circle = b_circle(cross_v);
+    let floor_circle = b_circle(floor_v);
+
+    let rim_lo = Curve::Circle {
+        center: at1(0.0),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r1,
+    };
+    let rim_hi = Curve::Circle {
+        center: at1(h1),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r1,
+    };
+
+    let mut vertices: Vec<TopoVertex> = Vec::new();
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let mut faces: Vec<TopoFace> = Vec::new();
+
+    let e_rim_lo = push_circle(&mut vertices, &mut edges, rim_lo.clone());
+    let e_rim_hi = push_circle(&mut vertices, &mut edges, rim_hi.clone());
+    let e_cross = push_circle(&mut vertices, &mut edges, cross_circle.clone());
+    let e_floor = push_circle(&mut vertices, &mut edges, floor_circle.clone());
+
+    // a's mantle: the full strip, the K1 pattern.
+    let (vi_lo, vi_hi) = (edges[e_rim_lo].start, edges[e_rim_hi].start);
+    let seam_a = {
+        let i = edges.len();
+        edges.push(seam_between(
+            rim_lo.point(0.0),
+            rim_hi.point(0.0),
+            vi_lo,
+            vi_hi,
+        ));
+        i
+    };
+    faces.push(cylinder_strip_face(
+        Surface::Cylinder {
+            origin: o1,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r1,
+        },
+        e_rim_lo,
+        e_rim_hi,
+        seam_a,
+        0.0,
+        h1,
+        false,
+    ));
+
+    // The far cap: the full disk.
+    let (far_z, far_out, far_e) = if from_base {
+        (h1, a, e_rim_hi)
+    } else {
+        (0.0, v3(-a.x, -a.y, -a.z), e_rim_lo)
+    };
+    faces.push(plane_disk_face(
+        at1(far_z),
+        far_out,
+        x_hat,
+        far_e,
+        r1,
+        from_base,
+    ));
+
+    // The near cap: the annulus (a's rim outside, b's cross-section as
+    // the hole) at the crossed plane.
+    let (near_z, near_e) = if from_base {
+        (0.0, e_rim_lo)
+    } else {
+        (h1, e_rim_hi)
+    };
+    faces.push(plane_annulus_face(
+        at1(near_z),
+        if from_base { v3(-a.x, -a.y, -a.z) } else { a },
+        x_hat,
+        near_e,
+        e_cross,
+        r1,
+        !from_base,
+    ));
+
+    // b's wall: the strip between the cross-section circle and b's
+    // inner rim, in b's own v-frame, REVERSED (the solid outside b).
+    let (wall_lo, wall_hi) = if from_base {
+        (cross_v, floor_v)
+    } else {
+        (floor_v, cross_v)
+    };
+    let (e_lo, e_hi) = if from_base {
+        (e_cross, e_floor)
+    } else {
+        (e_floor, e_cross)
+    };
+    let (vi_wlo, vi_whi) = (edges[e_lo].start, edges[e_hi].start);
+    let (p_wlo, p_whi) = if from_base {
+        (cross_circle.point(0.0), floor_circle.point(0.0))
+    } else {
+        (floor_circle.point(0.0), cross_circle.point(0.0))
+    };
+    let seam_b = {
+        let i = edges.len();
+        edges.push(seam_between(p_wlo, p_whi, vi_wlo, vi_whi));
+        i
+    };
+    faces.push(cylinder_strip_face(
+        Surface::Cylinder {
+            origin: o2,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r2,
+        },
+        e_lo,
+        e_hi,
+        seam_b,
+        wall_lo.min(wall_hi),
+        wall_lo.max(wall_hi),
+        true,
+    ));
+
+    // The bore's floor: b's end disk at the inner rim — the solid
+    // beyond it, the outward normal toward the bore (away from the
+    // material).
+    let floor_out = if from_base {
+        // b's top rim inside a: the material above, outward −a.
+        v3(-a.x, -a.y, -a.z)
+    } else {
+        // b's base rim inside a: the material below, outward +a.
+        a
+    };
+    faces.push(plane_disk_face(
+        b_at(floor_v),
+        floor_out,
+        x_hat,
+        e_floor,
+        r2,
+        !from_base,
+    ));
+
+    ExactBRep {
+        vertices,
+        edges,
+        faces,
+    }
+}
+
+/// The chimney — b inside a cross-wise, b sticking out of a's z-range
+/// through one or both of its ends: a's whole mantle, the annular caps
+/// where the chimney passes, the full caps where it does not, and the
+/// chimney itself (b's mantle beyond the plane, naturally oriented,
+/// and its end cap).
+#[allow(clippy::too_many_arguments)] // the two cylinder frames and the stagger
+fn nested_chimney(
+    o1: Vector3,
+    a: Vector3,
+    r1: f64,
+    h1: f64,
+    o2: Vector3,
+    r2: f64,
+    s2: f64,
+    h2: f64,
+) -> ExactBRep {
+    let x_hat = any_perpendicular(a);
+    let at1 = |v: f64| v3(o1.x + a.x * v, o1.y + a.y * v, o1.z + a.z * v);
+    let b_at = |v: f64| v3(o2.x + a.x * v, o2.y + a.y * v, o2.z + a.z * v);
+    let b_circle = |v: f64| Curve::Circle {
+        center: b_at(v),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r2,
+    };
+    // The chimneys: b's parts beyond a's cap planes. The bottom one
+    // spans b's v ∈ [0, −s2] (when s2 < 0); the top one b's v ∈
+    // [h1 − s2, h2] (when s2 + h2 > h1).
+    let bottom = s2 < 0.0;
+    let top = s2 + h2 > h1;
+
+    let rim_lo = Curve::Circle {
+        center: at1(0.0),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r1,
+    };
+    let rim_hi = Curve::Circle {
+        center: at1(h1),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r1,
+    };
+    // b's cross-sections at a's cap planes (the annuli's holes).
+    let cross_lo = b_circle(-s2);
+    let cross_hi = b_circle(h1 - s2);
+    // b's own end rims.
+    let b_base = b_circle(0.0);
+    let b_top = b_circle(h2);
+
+    let mut vertices: Vec<TopoVertex> = Vec::new();
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let mut faces: Vec<TopoFace> = Vec::new();
+
+    let e_rim_lo = push_circle(&mut vertices, &mut edges, rim_lo.clone());
+    let e_rim_hi = push_circle(&mut vertices, &mut edges, rim_hi.clone());
+    let e_xlo = bottom.then(|| push_circle(&mut vertices, &mut edges, cross_lo.clone()));
+    let e_xhi = top.then(|| push_circle(&mut vertices, &mut edges, cross_hi.clone()));
+    let e_bbase = bottom.then(|| push_circle(&mut vertices, &mut edges, b_base.clone()));
+    let e_btop = top.then(|| push_circle(&mut vertices, &mut edges, b_top.clone()));
+
+    // a's mantle: the full strip.
+    let (vi_lo, vi_hi) = (edges[e_rim_lo].start, edges[e_rim_hi].start);
+    let seam_a = {
+        let i = edges.len();
+        edges.push(seam_between(
+            rim_lo.point(0.0),
+            rim_hi.point(0.0),
+            vi_lo,
+            vi_hi,
+        ));
+        i
+    };
+    faces.push(cylinder_strip_face(
+        Surface::Cylinder {
+            origin: o1,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r1,
+        },
+        e_rim_lo,
+        e_rim_hi,
+        seam_a,
+        0.0,
+        h1,
+        false,
+    ));
+
+    // The base end: the annulus with the chimney through it, or the
+    // full cap.
+    if bottom {
+        faces.push(plane_annulus_face(
+            at1(0.0),
+            v3(-a.x, -a.y, -a.z),
+            x_hat,
+            e_rim_lo,
+            e_xlo.expect("the bottom chimney's cross-section"),
+            r1,
+            false,
+        ));
+    } else {
+        faces.push(plane_disk_face(
+            at1(0.0),
+            v3(-a.x, -a.y, -a.z),
+            x_hat,
+            e_rim_lo,
+            r1,
+            false,
+        ));
+    }
+    // The top end: mirrored.
+    if top {
+        faces.push(plane_annulus_face(
+            at1(h1),
+            a,
+            x_hat,
+            e_rim_hi,
+            e_xhi.expect("the top chimney's cross-section"),
+            r1,
+            true,
+        ));
+    } else {
+        faces.push(plane_disk_face(at1(h1), a, x_hat, e_rim_hi, r1, true));
+    }
+
+    // The chimneys: b's mantle beyond the plane, naturally oriented,
+    // and the end cap.
+    if let (Some(e_base), Some(e_x)) = (e_bbase, e_xlo) {
+        let (vi_wlo, vi_whi) = (edges[e_base].start, edges[e_x].start);
+        let seam = {
+            let i = edges.len();
+            edges.push(seam_between(
+                b_base.point(0.0),
+                cross_lo.point(0.0),
+                vi_wlo,
+                vi_whi,
+            ));
+            i
+        };
+        faces.push(cylinder_strip_face(
+            Surface::Cylinder {
+                origin: o2,
+                axis: a,
+                ref_dir: x_hat,
+                radius: r2,
+            },
+            e_base,
+            e_x,
+            seam,
+            0.0,
+            -s2,
+            false,
+        ));
+        // The chimney's cap at b's base (outward −a).
+        faces.push(plane_disk_face(
+            b_at(0.0),
+            v3(-a.x, -a.y, -a.z),
+            x_hat,
+            e_base,
+            r2,
+            false,
+        ));
+    }
+    if let (Some(e_x), Some(e_top)) = (e_xhi, e_btop) {
+        let (vi_wlo, vi_whi) = (edges[e_x].start, edges[e_top].start);
+        let seam = {
+            let i = edges.len();
+            edges.push(seam_between(
+                cross_hi.point(0.0),
+                b_top.point(0.0),
+                vi_wlo,
+                vi_whi,
+            ));
+            i
+        };
+        faces.push(cylinder_strip_face(
+            Surface::Cylinder {
+                origin: o2,
+                axis: a,
+                ref_dir: x_hat,
+                radius: r2,
+            },
+            e_x,
+            e_top,
+            seam,
+            h1 - s2,
+            h2,
+            false,
+        ));
+        // The chimney's cap at b's top (outward +a).
+        faces.push(plane_disk_face(b_at(h2), a, x_hat, e_top, r2, true));
+    }
+
+    ExactBRep {
+        vertices,
+        edges,
+        faces,
     }
 }
