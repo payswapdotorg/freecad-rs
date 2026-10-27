@@ -516,9 +516,50 @@ behind us.
       slice), the pinched tube of the internal cross-tangency
       (measure zero), tangent/disjoint fuses, and the
       coincident-to-machine-precision reading of ulp-scale axis
-      residues. Remaining for full K3 closure: the coaxial boolean
-      families (cylinder×sphere, the capsule cuts) and the
-      split-circle mantles.
+      residues. The coaxial cylinder×sphere
+      family (the capsule cuts) landed as K3e. Remaining for full K3
+      closure: the split-circle mantles.
+- [x] **K3e (landing 2026-10-27)** cylinder×sphere — the coaxial
+      family, the capsule cuts (`cylinder_sphere_boolean` in
+      `brep_boolean.rs`): the compositions follow the cross-section
+      profile `min(r_c, s(z))` over the z-overlap. **Common** is the
+      stacked profile — the capsule (the cylinder band between the
+      two K3a section circles joined to the spherical caps; a tangent
+      C¹ junction, the smooth spherocylinder), the plane-clipped
+      variants (the sphere band between the z=0 mouth and the section
+      carried as one four-leg wire — seam, circle, seam back, circle —
+      with the seam the classical NURBS meridian arc, exact at both
+      ends by the de Boor control points), the slab-clipped sphere
+      (the cap, the slice), the whole cylinder (the zone covering the
+      slab). **Cut** (cylinder − sphere): the rim-bowl (the mouth
+      inside the rim: the annular cap + the reversed bowl to the
+      pole), the pinch-bowl (the sphere wider, the section circle
+      inside the slab — the piece pinches off, no cap face), the
+      groove (the reach covering the slab: the annular caps + the
+      reversed spherical inner wall — a solid torus), the empty and
+      the whole pass-throughs. **Fuse**: the dome bumps (the annulus +
+      the dome per crossing, the mantle intact), the whole-cylinder
+      and whole-sphere pass-throughs. The measure reads the new trims
+      in closed form: the sphere band `2πr(s_hi − s_lo)` with the
+      vector-area flux term (both boundary circles' kept sides
+      recovered from the wire flags, the seam chain verified used
+      once each way within the face). Every configuration decision is
+      an exact expansion sign (the reach/zone/rim-mount/equator
+      classifications); the sub-machine perpendicular offset of the
+      sphere's center reads as the intended coaxial (the K3d
+      precedent), larger offsets propagate K3a's quartic refusal by
+      name. Honest refusals by name: the contained cut (the internal
+      void), the two-piece cut, the collar (a genus-1 pinch piece),
+      the split-circle mantles, the rim-mount (a mouth coinciding
+      with a rim), the equator tangency, the tangent/disjoint fuses.
+      9 acceptance-first tests (`tests/brep_boolean.rs`): topology
+      and orientation per shape, the volumes against the classical
+      segment/cap/prism compositions (recomputed test-side), the
+      partition identities `V(cut) + V(common) = V(cyl)` and
+      `V(fuse) + V(common) = V(cyl) + V(sph)`, the K3a circle
+      bit-identity, dense edge sampling against both operand
+      surfaces, the machine-precision coaxial reading, FCBREP
+      round-trips — including the mirrored from-below compositions.
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets

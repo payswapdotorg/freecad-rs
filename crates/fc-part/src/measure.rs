@@ -492,10 +492,12 @@ fn sphere_face(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<(f64, f64), Strin
     let (cc, axis, rho, forward) = match single {
         Some(x) if x.2 > 0.0 && !brep.is_degenerate(face.wires[0].edges[0].edge) => x,
         _ => {
-            return Err(format!(
-                "face {i}: a sphere face with an unrecognized trim — the cap/complement \
-                 reading needs a single section circle"
-            ))
+            // The band: exactly two single-use closed section circles
+            // (the two latitude trims), with the kept sides facing
+            // each other; everything else non-degenerate is the seam
+            // chain, used once each way within the face (it carries no
+            // region semantics).
+            return sphere_band(ctx, c, r);
         }
     };
     // The kept side (the module-doc convention): kept on the +axis
@@ -518,6 +520,138 @@ fn sphere_face(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<(f64, f64), Strin
     }
     let area = 2.0 * pi * r * (r - s);
     let flux = sigma * (r * area + c.dot(&k_hat) * pi * (r * r - s * s));
+    Ok((area, flux))
+}
+
+/// The sphere band between two latitude circles (the K3e composed
+/// trims): exactly two single-use closed section circles whose kept
+/// sides face each other — the lower kept above its own plane, the
+/// upper kept below — plus a seam chain (any remaining non-degenerate
+/// edges used once each way within the face; the meridian arcs carry
+/// no region semantics). The area is the spherical zone
+/// `2πr(s_hi − s_lo)`; the flux adds the vector-area term
+/// `c·k̂·π(s_hi² − s_lo²)` (the cap formula with both lids).
+fn sphere_band(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<(f64, f64), String> {
+    let FaceRef {
+        brep,
+        face,
+        i,
+        sigma,
+        tol,
+    } = ctx;
+    let pi = std::f64::consts::PI;
+    // Partition the face's non-degenerate edge uses: the boundary
+    // circles (used once) and the seam (used exactly twice, once each
+    // way).
+    let mut uses: Vec<usize> = Vec::new();
+    for wire in &face.wires {
+        for we in &wire.edges {
+            if !brep.is_degenerate(we.edge) {
+                uses.push(we.edge);
+            }
+        }
+    }
+    let mut boundary: Vec<(usize, bool)> = Vec::new();
+    for e in &uses {
+        if boundary.iter().any(|(b, _)| b == e) {
+            continue;
+        }
+        let count = uses.iter().filter(|u| *u == e).count();
+        let forwards: Vec<bool> = face
+            .wires
+            .iter()
+            .flat_map(|w| &w.edges)
+            .filter(|we| we.edge == *e)
+            .map(|we| we.forward)
+            .collect();
+        if count == 1 {
+            boundary.push((*e, forwards[0]));
+        } else if count == 2 {
+            if forwards[0] == forwards[1] {
+                return Err(format!(
+                    "face {i}: a sphere seam edge used twice in the same direction"
+                ));
+            }
+        } else {
+            return Err(format!(
+                "face {i}: a sphere band edge used {count} times in the face"
+            ));
+        }
+    }
+    if boundary.len() != 2 {
+        return Err(format!(
+            "face {i}: a sphere face with an unrecognized trim — the band reading \
+             needs exactly two single-use section circles"
+        ));
+    }
+    // Both boundary circles must be sections of THIS sphere, and
+    // their kept sides (the cap rule) must face each other.
+    let mut bands: Vec<(Vector3, f64, Vector3)> = Vec::new(); // (center, ρ, k̂)
+    for (e, forward) in &boundary {
+        let edge = &brep.edges[*e];
+        let (cc, axis, rho) = match &edge.curve {
+            Curve::Circle {
+                center,
+                axis,
+                radius,
+                ..
+            } if edge.start == edge.end && *radius > 0.0 => (*center, *axis, *radius),
+            _ => {
+                return Err(format!(
+                    "face {i}: a sphere band trim that is not a closed circle"
+                ))
+            }
+        };
+        let k_sign = if *forward == !face.reversed {
+            1.0
+        } else {
+            -1.0
+        };
+        let k_hat = v3(axis.x * k_sign, axis.y * k_sign, axis.z * k_sign);
+        let off = v3(cc.x - c.x, cc.y - c.y, cc.z - c.z);
+        let s = off.dot(&k_hat);
+        let residual = v3(
+            off.x - k_hat.x * s,
+            off.y - k_hat.y * s,
+            off.z - k_hat.z * s,
+        );
+        if residual.length() > tol || (rho * rho + s * s - r * r).abs() > tol * r.max(1.0) {
+            return Err(format!(
+                "face {i}: the sphere band trim circle is not a section of the face's sphere"
+            ));
+        }
+        bands.push((cc, rho, k_hat));
+    }
+    // The kept directions face each other: the lower circle's k̂
+    // points up (into the band), the upper's down.
+    if bands[0].2.dot(&bands[1].2) > -(1.0 - REL_TOL) {
+        return Err(format!(
+            "face {i}: the sphere band's trim circles do not face each other"
+        ));
+    }
+    // Order the pair: the band runs from the kept-above circle (the
+    // lower) toward the kept-below one (the upper), along the lower's
+    // own kept direction.
+    let (lo, hi) = {
+        let a = (bands[0].0, bands[0].2);
+        let b = (bands[1].0, bands[1].2);
+        let s_b = v3(b.0.x - c.x, b.0.y - c.y, b.0.z - c.z).dot(&a.1);
+        if s_b > 0.0 {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    };
+    let d = lo.1; // points from the lower circle toward the upper
+    let s_lo = v3(lo.0.x - c.x, lo.0.y - c.y, lo.0.z - c.z).dot(&d);
+    let s_hi = v3(hi.0.x - c.x, hi.0.y - c.y, hi.0.z - c.z).dot(&d);
+    if s_hi <= s_lo {
+        return Err(format!(
+            "face {i}: the sphere band has no width ({s_lo} to {s_hi})"
+        ));
+    }
+    let area = 2.0 * pi * r * (s_hi - s_lo);
+    let flux = sigma * (r * area + c.dot(&d) * pi * (s_hi * s_hi - s_lo * s_lo));
     Ok((area, flux))
 }
 

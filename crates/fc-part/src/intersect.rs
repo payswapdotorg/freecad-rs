@@ -187,7 +187,7 @@ fn cmp_squares(a: f64, b: f64) -> std::cmp::Ordering {
 
 /// `a·b − c·d`, exactly summed then rounded (for radii under square
 /// roots).
-fn diff_products_rounded(a: f64, b: f64, c: f64, d: f64) -> f64 {
+pub(crate) fn diff_products_rounded(a: f64, b: f64, c: f64, d: f64) -> f64 {
     let (ph, pe) = two_prod(a, b);
     let (qh, qe) = two_prod(c, d);
     exact_sum_rounded(&[ph, pe, -qh, -qe])

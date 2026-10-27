@@ -124,8 +124,8 @@ fn v3(x: f64, y: f64, z: f64) -> Vector3 {
 
 /// Exact helpers re-used from the K3a classification tier.
 use crate::intersect::{
-    any_perpendicular, dot_terms, exact_sum_rounded, exact_sum_sign, length_squared_terms,
-    lex_after, two_prod, two_sum, PARALLEL_BAND,
+    any_perpendicular, diff_products_rounded, dot_terms, exact_sum_rounded, exact_sum_sign,
+    length_squared_terms, lex_after, two_prod, two_sum, PARALLEL_BAND,
 };
 
 /// The sign of `d² − (r1 + r2)²` exactly (both squares exact).
@@ -3074,5 +3074,1363 @@ fn plane_face_at(
         uv_bounds: [lo[0] - 1e-9, hi[0] + 1e-9, lo[1] - 1e-9, hi[1] + 1e-9],
         wires: vec![TopoWire { edges: w.to_vec() }],
         reversed: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K3e — cylinder×sphere: the coaxial family, the capsule cuts
+// ---------------------------------------------------------------------------
+//
+// The sphere's center on the cylinder's axis line (a sub-machine
+// perpendicular offset — the arithmetic residue of a placement — reads
+// as the intended coaxial, the K3d precedent; anything larger
+// propagates K3a's own quartic refusal by name). Everything follows
+// the cross-section profile `min(r_c, s(z))` over the z-overlap, with
+// `s(z) = √(r_s² − (z − z_s)²)` the sphere's disk radius at height
+// `z_s + z` and `h_i = √(r_s² − r_c²)` the section offset (0 when the
+// sphere is narrower — its section zone `[z_s − h_i, z_s + h_i]`
+// degenerates to a point, and the sphere never swallows the cylinder's
+// disk):
+//
+// * **Common** — the stacked profile: the capsule (the cylinder band
+//   between the two K3a section circles, joined to the spherical caps;
+//   a tangent C¹ junction, the smooth spherocylinder), the
+//   plane-clipped variants (a sphere band between the z=0 mouth and
+//   the section, carried as ONE wire of four legs — seam, circle,
+//   seam back, circle — with the seam the classical NURBS meridian
+//   arc, exact at both ends, on the sphere by construction; plus the
+//   planar end disks), the slab-clipped sphere (the sphere narrower:
+//   the cap, the slice), or the whole cylinder (the zone covering the
+//   slab — the sphere's disk swallows the cylinder's everywhere on
+//   it).
+// * **Cut** (cylinder − sphere) — the material profile over the slab:
+//   full where `|z − z_s| ≥ r_s`, annulus where `h_i ≤ |z − z_s| <
+//   r_s`, empty inside the section zone. The one-piece shapes: the
+//   **rim-bowl** (the sphere dipping into one cap plane with the
+//   mouth circle strictly inside the rim: the full mantle, the far
+//   cap, the near annular cap, and the reversed bowl — the sphere's
+//   part from the pole to the mouth, a single-wire cap), the
+//   **pinch-bowl** (the sphere wider, the section circle inside the
+//   slab: the piece `[0, z_s − h_i)` pinches off at the section —
+//   three faces, no cap face at the pinch), the **groove** (the
+//   sphere's reach covering the slab: the mantle, two annular caps,
+//   and the reversed spherical inner wall — a solid torus reading
+//   `V − E_nd + F = 2` with the caps' holes), the empty (the zone
+//   covering the slab), and the whole cylinder (no reach).
+// * **Fuse** — the dome bumps (the sphere crossing a cap plane with
+//   the mouth strictly inside the rim and the mantle intact — the
+//   zone clear of the slab: the full mantle, the caps, and per
+//   crossing an annulus plus the dome — the sphere's part beyond the
+//   plane to the pole, a single-wire cap, naturally oriented), the
+//   whole cylinder (the sphere contained), the whole sphere (the zone
+//   covering the slab).
+//
+// Honest refusals, by name, never approximated: the non-coaxial
+// quartic (K3a's own, propagated), the contained cut (the internal
+// void — a second shell), the two-piece cut (the zone strictly inside
+// the slab splits the material), the collar (the one-piece material
+// pinching inside the slab with the sphere's reach past the far plane
+// — a genus-1 piece), the split-circle mantles (the fuse with the zone
+// partially on the slab), the rim-mount (a plane-cut mouth coinciding
+// with a rim circle, `|plane − z_s| = h_i`), the equator tangency
+// (equal radii with the equator inside the slab — the sphere touches
+// the mantle along a circle, a measure-zero non-manifold contact),
+// and the tangent/disjoint fuses.
+
+/// The K3a plane×sphere mouth circle at the plane through `p` (normal
+/// `a`), re-parameterized to the shared frame — center and radius
+/// bit-identical to K3a's construction; `None` when the plane misses
+/// (or is tangent to) the sphere.
+fn sphere_plane_mouth(
+    sph: &Surface,
+    p: Vector3,
+    a: Vector3,
+    x_hat: Vector3,
+) -> Result<Option<Curve>, String> {
+    let plane = Surface::Plane {
+        origin: p,
+        normal: a,
+        x_dir: x_hat,
+    };
+    match intersect_surfaces(sph, &plane) {
+        SurfaceIntersection::Curves(cs) if cs.len() == 1 => match &cs[0] {
+            Curve::Circle { center, radius, .. } => Ok(Some(Curve::Circle {
+                center: *center,
+                axis: a,
+                ref_dir: x_hat,
+                radius: *radius,
+            })),
+            other => Err(format!(
+                "K3a returned a non-circle plane×sphere section: {other:?}"
+            )),
+        },
+        SurfaceIntersection::Empty => Ok(None),
+        other => Err(format!(
+            "the K3a plane×sphere section is missing: {other:?}"
+        )),
+    }
+}
+
+/// Append a closed circle edge with its own seam vertex; the edge index.
+fn push_circle(vertices: &mut Vec<TopoVertex>, edges: &mut Vec<TopoEdge>, c: Curve) -> usize {
+    let vi = vertices.len();
+    vertices.push(TopoVertex {
+        point: c.point(0.0),
+    });
+    edges.push(TopoEdge {
+        curve: c,
+        range: (0.0, std::f64::consts::TAU),
+        start: vi,
+        end: vi,
+    });
+    edges.len() - 1
+}
+
+/// The cylinder strip face between two same-radius circles (the
+/// K1 mantle pattern: seam up, upper circle back, seam down, lower
+/// circle forward — kept on the left against the outward natural
+/// normal). `reversed` mirrors the loop and flips the flag (the solid
+/// outside the cylinder — the nested-tube wall precedent).
+fn cylinder_strip_face(
+    surface: Surface,
+    e_lo: usize,
+    e_hi: usize,
+    seam: usize,
+    v_lo: f64,
+    v_hi: f64,
+    reversed: bool,
+) -> TopoFace {
+    // The natural loop: seam up, upper back, seam down, lower
+    // forward. The reversed face carries the same patch with the solid
+    // on the outside: the loop reversed (list reversed, flags flipped).
+    let natural = vec![
+        WireEdge {
+            edge: seam,
+            forward: true,
+        },
+        WireEdge {
+            edge: e_hi,
+            forward: false,
+        },
+        WireEdge {
+            edge: seam,
+            forward: false,
+        },
+        WireEdge {
+            edge: e_lo,
+            forward: true,
+        },
+    ];
+    let edges = if reversed {
+        natural
+            .iter()
+            .rev()
+            .map(|we| WireEdge {
+                edge: we.edge,
+                forward: !we.forward,
+            })
+            .collect()
+    } else {
+        natural
+    };
+    TopoFace {
+        surface,
+        uv_bounds: [0.0, std::f64::consts::TAU, v_lo, v_hi],
+        wires: vec![TopoWire { edges }],
+        reversed,
+    }
+}
+
+/// The sphere band face between two latitude circles, carried as one
+/// four-leg wire — the meridian seam chain (the NURBS arcs, exact at
+/// both ends), the upper circle back, the seam chain back, the lower
+/// circle forward (kept on the left against the outward natural
+/// normal; the cylinder-strip pattern transplanted to the sphere).
+/// `reversed` mirrors the loop and flips the flag.
+fn sphere_band_face(
+    surface: Surface,
+    chain: &ArcChain,
+    e_lo: usize,
+    e_hi: usize,
+    lat_lo: f64,
+    lat_hi: f64,
+    reversed: bool,
+) -> TopoFace {
+    // The natural loop: the seam chain up, the upper circle back, the
+    // chain down, the lower circle forward. The reversed face carries
+    // the same patch with the solid on the outside: the loop reversed
+    // (list reversed, flags flipped).
+    let mut natural = chain_uses(chain, true);
+    natural.push(WireEdge {
+        edge: e_hi,
+        forward: false,
+    });
+    natural.extend(chain_uses(chain, false));
+    natural.push(WireEdge {
+        edge: e_lo,
+        forward: true,
+    });
+    let edges = if reversed {
+        natural
+            .iter()
+            .rev()
+            .map(|we| WireEdge {
+                edge: we.edge,
+                forward: !we.forward,
+            })
+            .collect()
+    } else {
+        natural
+    };
+    TopoFace {
+        surface,
+        uv_bounds: [0.0, std::f64::consts::TAU, lat_lo, lat_hi],
+        wires: vec![TopoWire { edges }],
+        reversed,
+    }
+}
+
+/// A single-wire spherical cap face — the region from the boundary
+/// circle to its pole (the sphere_plane pattern; the pole is an
+/// unrepresented degenerate boundary). `forward` follows the
+/// kept-on-the-left convention against the face's OUTWARD normal.
+fn sphere_cap_face(
+    surface: Surface,
+    e_circle: usize,
+    lat: f64,
+    pole_lat: f64,
+    forward: bool,
+    reversed: bool,
+) -> TopoFace {
+    TopoFace {
+        surface,
+        uv_bounds: [
+            0.0,
+            std::f64::consts::TAU,
+            lat.min(pole_lat),
+            lat.max(pole_lat),
+        ],
+        wires: vec![TopoWire {
+            edges: vec![WireEdge {
+                edge: e_circle,
+                forward,
+            }],
+        }],
+        reversed,
+    }
+}
+
+/// A planar disk face (one circle, one wire) on the circle's radius.
+/// `outward` is the stored normal; the traversal keeps the region on
+/// the left viewed from it.
+fn plane_disk_face(
+    origin: Vector3,
+    outward: Vector3,
+    x_dir: Vector3,
+    e_circle: usize,
+    radius: f64,
+    forward: bool,
+) -> TopoFace {
+    TopoFace {
+        surface: Surface::Plane {
+            origin,
+            normal: outward,
+            x_dir,
+        },
+        uv_bounds: [-radius, radius, -radius, radius],
+        wires: vec![TopoWire {
+            edges: vec![WireEdge {
+                edge: e_circle,
+                forward,
+            }],
+        }],
+        reversed: false,
+    }
+}
+
+/// A planar annular cap: the outer wire and the hole wire, traversed
+/// opposite (the nested-tube cap pattern). At the base plane
+/// (`outward = −a`) the outer runs backward; at the top it runs
+/// forward — the `outer_forward` flag.
+fn plane_annulus_face(
+    origin: Vector3,
+    outward: Vector3,
+    x_dir: Vector3,
+    e_outer: usize,
+    e_inner: usize,
+    r_outer: f64,
+    outer_forward: bool,
+) -> TopoFace {
+    TopoFace {
+        surface: Surface::Plane {
+            origin,
+            normal: outward,
+            x_dir,
+        },
+        uv_bounds: [-r_outer, r_outer, -r_outer, r_outer],
+        wires: vec![
+            TopoWire {
+                edges: vec![WireEdge {
+                    edge: e_outer,
+                    forward: outer_forward,
+                }],
+            },
+            TopoWire {
+                edges: vec![WireEdge {
+                    edge: e_inner,
+                    forward: !outer_forward,
+                }],
+            },
+        ],
+        reversed: false,
+    }
+}
+
+/// The latitude of a latitude circle of the sphere centered `c_s`
+/// (axis `a`): `atan2(offset·a, radius)`, from the circle's own data.
+fn latitude_of(c: &Curve, c_s: Vector3, a: Vector3) -> f64 {
+    match c {
+        Curve::Circle { center, radius, .. } => {
+            let off = v3(center.x - c_s.x, center.y - c_s.y, center.z - c_s.z);
+            off.dot(&a).atan2(*radius)
+        }
+        _ => unreachable!("latitude_of on a non-circle"),
+    }
+}
+
+/// The height of a circle's center above the base (the v parameter in
+/// the cylinder's frame).
+fn v_param(c: &Curve, o_c: Vector3, a: Vector3) -> f64 {
+    match c {
+        Curve::Circle { center, .. } => {
+            v3(center.x - o_c.x, center.y - o_c.y, center.z - o_c.z).dot(&a)
+        }
+        _ => unreachable!("v_param on a non-circle"),
+    }
+}
+
+/// The meridian seam chain between two latitude circles of the sphere
+/// (the NURBS arcs on the great circle at azimuth 0 — the circles'
+/// shared `ref_dir`): from the lower circle's vertex to the upper's.
+#[allow(clippy::too_many_arguments)] // the sphere frame, the two circles, the vertex indices
+fn meridian_chain(
+    vertices: &mut Vec<TopoVertex>,
+    edges: &mut Vec<TopoEdge>,
+    c_s: Vector3,
+    a: Vector3,
+    x_hat: Vector3,
+    r_s: f64,
+    lo: &Curve,
+    hi: &Curve,
+    v_lo: usize,
+    v_hi: usize,
+) -> ArcChain {
+    let lat_lo = latitude_of(lo, c_s, a);
+    let lat_hi = latitude_of(hi, c_s, a);
+    push_arc_chain(
+        vertices,
+        edges,
+        c_s,
+        x_hat,
+        a,
+        r_s,
+        lo.point(0.0),
+        hi.point(0.0),
+        lat_lo,
+        lat_hi - lat_lo,
+        v_lo,
+        v_hi,
+    )
+}
+
+/// The Common composition: the stacked min-profile over the z-overlap
+/// — the capsule family (see the module doc).
+#[allow(clippy::too_many_arguments)] // the operand frames and the profile parameters
+fn capsule_stack(
+    o_c: Vector3,
+    a: Vector3,
+    x_hat: Vector3,
+    r_c: f64,
+    h_c: f64,
+    c_s: Vector3,
+    r_s: f64,
+    z_s: f64,
+    h_i: f64,
+) -> Result<ExactBRep, String> {
+    let at = |z: f64| v3(o_c.x + a.x * z, o_c.y + a.y * z, o_c.z + a.z * z);
+    let sph = || Surface::Sphere {
+        center: c_s,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_s,
+    };
+    let rim = |z: f64| Curve::Circle {
+        center: at(z),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_c,
+    };
+    let sect = |h: f64| Curve::Circle {
+        center: v3(c_s.x + a.x * h, c_s.y + a.y * h, c_s.z + a.z * h),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_c,
+    };
+
+    // The profile's z-range.
+    let z_lo = (z_s - r_s).max(0.0);
+    let z_hi = (z_s + r_s).min(h_c);
+    // The zone (where the sphere's disk swallows the cylinder's)
+    // straddles a plane iff the section heights bracket it. A point
+    // zone (h_i = 0, the sphere narrower) never does.
+    let zone_at_base =
+        h_i > 0.0 && exact_sum_sign(&[z_s, -h_i]) <= 0 && exact_sum_sign(&[z_s, h_i]) >= 0;
+    let zone_at_top = h_i > 0.0
+        && exact_sum_sign(&[z_s, -h_i, -h_c]) <= 0
+        && exact_sum_sign(&[z_s, h_i, -h_c]) >= 0;
+
+    // The ends: a planar disk (the profile cut by the plane) or the
+    // sphere's pole (the profile's own apex, an unrepresented
+    // degenerate boundary).
+    let disk_at_base = z_lo == 0.0 && exact_sum_sign(&[z_s, -r_s]) < 0;
+    let disk_at_top = z_hi == h_c && exact_sum_sign(&[z_s, r_s, -h_c]) > 0;
+
+    // The end circles: the rim where the zone reaches the plane (the
+    // profile is the cylinder's there), the K3a mouth where the
+    // sphere's part is.
+    let end_lo = if disk_at_base {
+        Some(if zone_at_base {
+            rim(0.0)
+        } else {
+            sphere_plane_mouth(&sph(), at(0.0), a, x_hat)?.expect("the sphere crosses the base")
+        })
+    } else {
+        None
+    };
+    let end_hi = if disk_at_top {
+        Some(if zone_at_top {
+            rim(h_c)
+        } else {
+            sphere_plane_mouth(&sph(), at(h_c), a, x_hat)?.expect("the sphere crosses the top")
+        })
+    } else {
+        None
+    };
+
+    // The levels: the boundary circles in z-order (the section joins
+    // exist only for a real zone — a point zone never interrupts the
+    // spherical profile).
+    let sect_lo = if h_i > 0.0 && z_s - h_i > z_lo && z_s - h_i < z_hi {
+        Some(sect(-h_i))
+    } else {
+        None
+    };
+    let sect_hi = if h_i > 0.0 && z_s + h_i > z_lo && z_s + h_i < z_hi {
+        Some(sect(h_i))
+    } else {
+        None
+    };
+
+    // ---- assemble ----------------------------------------------------
+    let mut vertices: Vec<TopoVertex> = Vec::new();
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let mut faces: Vec<TopoFace> = Vec::new();
+
+    let e_end_lo = end_lo
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+    let e_sect_lo = sect_lo
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+    let e_sect_hi = sect_hi
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+    let e_end_hi = end_hi
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+
+    // The segments between consecutive levels, bottom to top; the kind
+    // by the midpoint against the zone.
+    let mut bounds: Vec<(f64, Option<(usize, Curve)>)> = Vec::new();
+    bounds.push((
+        z_lo,
+        e_end_lo.map(|e| (e, end_lo.clone().expect("the circle"))),
+    ));
+    if let (Some(e), Some(c)) = (e_sect_lo, sect_lo.clone()) {
+        bounds.push((z_s - h_i, Some((e, c))));
+    }
+    if let (Some(e), Some(c)) = (e_sect_hi, sect_hi.clone()) {
+        bounds.push((z_s + h_i, Some((e, c))));
+    }
+    bounds.push((
+        z_hi,
+        e_end_hi.map(|e| (e, end_hi.clone().expect("the circle"))),
+    ));
+
+    for w in bounds.windows(2) {
+        let (z0, lo) = &w[0];
+        let (z1, hi) = &w[1];
+        let mid = 0.5 * (z0 + z1);
+        let is_cylinder = h_i > 0.0 && (mid - z_s).abs() < h_i;
+        if is_cylinder {
+            // The cylinder strip between two same-radius circles.
+            let (e_lo, lo_c) = lo.as_ref().expect("the cylinder strip's circles");
+            let (e_hi, hi_c) = hi.as_ref().expect("the cylinder strip's circles");
+            let (vi_lo, vi_hi) = (edges[*e_lo].start, edges[*e_hi].start);
+            let seam = {
+                let i = edges.len();
+                edges.push(seam_between(lo_c.point(0.0), hi_c.point(0.0), vi_lo, vi_hi));
+                i
+            };
+            faces.push(cylinder_strip_face(
+                Surface::Cylinder {
+                    origin: o_c,
+                    axis: a,
+                    ref_dir: x_hat,
+                    radius: r_c,
+                },
+                *e_lo,
+                *e_hi,
+                seam,
+                v_param(lo_c, o_c, a),
+                v_param(hi_c, o_c, a),
+                false,
+            ));
+        } else {
+            // The spherical segment: pole-to-circle (the single-wire
+            // cap), circle-to-pole, circle-to-circle (the seam band),
+            // or pole-to-pole (unreachable: the contained sphere).
+            match (lo, hi) {
+                (Some((e_lo, lo_c)), Some((e_hi, hi_c))) => {
+                    let lat_lo = latitude_of(lo_c, c_s, a);
+                    let lat_hi = latitude_of(hi_c, c_s, a);
+                    let (vi_lo, vi_hi) = (edges[*e_lo].start, edges[*e_hi].start);
+                    let chain = meridian_chain(
+                        &mut vertices,
+                        &mut edges,
+                        c_s,
+                        a,
+                        x_hat,
+                        r_s,
+                        lo_c,
+                        hi_c,
+                        vi_lo,
+                        vi_hi,
+                    );
+                    faces.push(sphere_band_face(
+                        sph(),
+                        &chain,
+                        *e_lo,
+                        *e_hi,
+                        lat_lo,
+                        lat_hi,
+                        false,
+                    ));
+                }
+                (None, Some((e_hi, hi_c))) => {
+                    // From the south pole up to the circle (kept below).
+                    faces.push(sphere_cap_face(
+                        sph(),
+                        *e_hi,
+                        latitude_of(hi_c, c_s, a),
+                        -std::f64::consts::FRAC_PI_2,
+                        false,
+                        false,
+                    ));
+                }
+                (Some((e_lo, lo_c)), None) => {
+                    // From the circle up to the north pole (kept above).
+                    faces.push(sphere_cap_face(
+                        sph(),
+                        *e_lo,
+                        latitude_of(lo_c, c_s, a),
+                        std::f64::consts::FRAC_PI_2,
+                        true,
+                        false,
+                    ));
+                }
+                (None, None) => {
+                    return Err("the pole-to-pole spherical segment — the contained sphere \
+                         was not caught by the classification"
+                        .into());
+                }
+            }
+        }
+    }
+
+    // The end disks (the region lies inside the slab).
+    if let (Some(e_c), Some(c)) = (e_end_lo, end_lo.as_ref()) {
+        faces.push(plane_disk_face(
+            at(0.0),
+            v3(-a.x, -a.y, -a.z),
+            x_hat,
+            e_c,
+            circle_radius(c),
+            false,
+        ));
+    }
+    if let (Some(e_c), Some(c)) = (e_end_hi, end_hi.as_ref()) {
+        faces.push(plane_disk_face(
+            at(h_c),
+            a,
+            x_hat,
+            e_c,
+            circle_radius(c),
+            true,
+        ));
+    }
+
+    let brep = ExactBRep {
+        vertices,
+        edges,
+        faces,
+    };
+    brep.validate()
+        .map_err(|e| format!("the composed capsule stack failed validation: {e}"))?;
+    Ok(brep)
+}
+
+/// The radius of a circle curve.
+fn circle_radius(c: &Curve) -> f64 {
+    match c {
+        Curve::Circle { radius, .. } => *radius,
+        _ => unreachable!("circle_radius on a non-circle"),
+    }
+}
+
+/// The one-piece bowl cut: the material at the far end of the slab,
+/// the sphere dipping in from the near end with its pole inside the
+/// slab (the rim-bowl when the piece spans the whole slab — the mouth
+/// circle strictly inside the near rim, the annular near cap; the
+/// pinch-bowl when the section circle sits inside the slab — the
+/// piece `[far, m]` pinches off at the section, no near cap face).
+/// `from_above` selects the side (the material at the base, the sphere
+/// beyond the top — or mirrored).
+#[allow(clippy::too_many_arguments)] // the operand frames, the profile, the side
+fn sphere_bowl_cut(
+    o_c: Vector3,
+    a: Vector3,
+    x_hat: Vector3,
+    r_c: f64,
+    h_c: f64,
+    c_s: Vector3,
+    r_s: f64,
+    z_s: f64,
+    h_i: f64,
+    from_above: bool,
+) -> Result<ExactBRep, String> {
+    let at = |z: f64| v3(o_c.x + a.x * z, o_c.y + a.y * z, o_c.z + a.z * z);
+    let sph = || Surface::Sphere {
+        center: c_s,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_s,
+    };
+    let rim = |z: f64| Curve::Circle {
+        center: at(z),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_c,
+    };
+    let sect = |h: f64| Curve::Circle {
+        center: v3(c_s.x + a.x * h, c_s.y + a.y * h, c_s.z + a.z * h),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_c,
+    };
+
+    let (far_z, near_z) = if from_above { (0.0, h_c) } else { (h_c, 0.0) };
+    // The piece's boundary at the near end: the section circle's
+    // height clipped by the near plane. A point zone (h_i = 0, the
+    // sphere narrower) has no section: the piece spans the whole slab.
+    let (sect_h, m) = if h_i > 0.0 {
+        if from_above {
+            (-h_i, (z_s - h_i).min(h_c))
+        } else {
+            (h_i, (z_s + h_i).max(0.0))
+        }
+    } else if from_above {
+        (-h_i, h_c)
+    } else {
+        (h_i, 0.0)
+    };
+    let spans_slab = if from_above { m == h_c } else { m == 0.0 };
+
+    let far_rim = rim(far_z);
+    let near_rim = if spans_slab { Some(rim(near_z)) } else { None };
+    let section = sect(sect_h);
+
+    // The mouth circle at the near plane (the rim-bowl's annulus hole
+    // and the bowl's upper boundary), the K3a plane×sphere section.
+    let mouth = if spans_slab {
+        Some(
+            sphere_plane_mouth(&sph(), at(near_z), a, x_hat)?
+                .expect("the sphere crosses the near plane (the classification guarantees it)"),
+        )
+    } else {
+        None
+    };
+
+    let mut vertices: Vec<TopoVertex> = Vec::new();
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let mut faces: Vec<TopoFace> = Vec::new();
+
+    let e_far = push_circle(&mut vertices, &mut edges, far_rim.clone());
+    let e_near = near_rim
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+    let e_mouth = mouth
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+    let e_sect = if spans_slab {
+        None
+    } else {
+        Some(push_circle(&mut vertices, &mut edges, section.clone()))
+    };
+
+    // The mantle: from the far rim to the piece's near boundary.
+    let (lo_c, e_lo, hi_c, e_hi) = if from_above {
+        let (hi_c, e_hi) = if spans_slab {
+            (
+                near_rim.clone().expect("the near rim"),
+                e_near.expect("the near rim edge"),
+            )
+        } else {
+            (section.clone(), e_sect.expect("the section edge"))
+        };
+        (far_rim.clone(), e_far, hi_c, e_hi)
+    } else {
+        let (lo_c, e_lo) = if spans_slab {
+            (
+                near_rim.clone().expect("the near rim"),
+                e_near.expect("the near rim edge"),
+            )
+        } else {
+            (section.clone(), e_sect.expect("the section edge"))
+        };
+        (lo_c, e_lo, far_rim.clone(), e_far)
+    };
+    let (vi_lo, vi_hi) = (edges[e_lo].start, edges[e_hi].start);
+    let seam = {
+        let i = edges.len();
+        edges.push(seam_between(lo_c.point(0.0), hi_c.point(0.0), vi_lo, vi_hi));
+        i
+    };
+    faces.push(cylinder_strip_face(
+        Surface::Cylinder {
+            origin: o_c,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_c,
+        },
+        e_lo,
+        e_hi,
+        seam,
+        v_param(&lo_c, o_c, a),
+        v_param(&hi_c, o_c, a),
+        false,
+    ));
+
+    // The far cap: the full disk (the outward normal at the far plane).
+    let far_out = if from_above { v3(-a.x, -a.y, -a.z) } else { a };
+    let far_forward = !from_above;
+    faces.push(plane_disk_face(
+        at(far_z),
+        far_out,
+        x_hat,
+        e_far,
+        r_c,
+        far_forward,
+    ));
+
+    // The near end: the annulus + the bowl (the rim-bowl), or the
+    // pinching bowl alone (the pinch-bowl).
+    let (e_bowl, bowl_lat) = if spans_slab {
+        let m_c = mouth.as_ref().expect("the near mouth");
+        // The annular near cap.
+        faces.push(plane_annulus_face(
+            at(near_z),
+            if from_above { a } else { v3(-a.x, -a.y, -a.z) },
+            x_hat,
+            e_near.expect("the near rim edge"),
+            e_mouth.expect("the mouth edge"),
+            r_c,
+            from_above,
+        ));
+        (e_mouth.expect("the mouth edge"), latitude_of(m_c, c_s, a))
+    } else {
+        (
+            e_sect.expect("the section edge"),
+            latitude_of(&section, c_s, a),
+        )
+    };
+    // The bowl: the sphere's part from the near pole to the boundary
+    // circle — a single-wire cap, REVERSED (the solid lies outside the
+    // sphere), the region on the pole's side of the circle.
+    let pole_lat = if from_above {
+        -std::f64::consts::FRAC_PI_2
+    } else {
+        std::f64::consts::FRAC_PI_2
+    };
+    faces.push(sphere_cap_face(
+        sph(),
+        e_bowl,
+        bowl_lat,
+        pole_lat,
+        from_above,
+        true,
+    ));
+
+    let brep = ExactBRep {
+        vertices,
+        edges,
+        faces,
+    };
+    brep.validate()
+        .map_err(|e| format!("the composed bowl cut failed validation: {e}"))?;
+    Ok(brep)
+}
+
+/// The groove cut: the sphere's reach covering the slab (the material
+/// all-annulus) — the full mantle, the two annular caps, and the
+/// reversed spherical inner wall between the two plane mouths (a solid
+/// torus: `V − E_nd + F` reads 2 with the caps' holes).
+#[allow(clippy::too_many_arguments)] // the operand frames and the profile
+fn sphere_groove_cut(
+    o_c: Vector3,
+    a: Vector3,
+    x_hat: Vector3,
+    r_c: f64,
+    h_c: f64,
+    c_s: Vector3,
+    r_s: f64,
+) -> Result<ExactBRep, String> {
+    let at = |z: f64| v3(o_c.x + a.x * z, o_c.y + a.y * z, o_c.z + a.z * z);
+    let sph = || Surface::Sphere {
+        center: c_s,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_s,
+    };
+    let rim = |z: f64| Curve::Circle {
+        center: at(z),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_c,
+    };
+    let rim0 = rim(0.0);
+    let rimh = rim(h_c);
+    let mouth0 = sphere_plane_mouth(&sph(), at(0.0), a, x_hat)?
+        .expect("the sphere crosses the base (the groove classification)");
+    let mouthh = sphere_plane_mouth(&sph(), at(h_c), a, x_hat)?
+        .expect("the sphere crosses the top (the groove classification)");
+
+    let mut vertices: Vec<TopoVertex> = Vec::new();
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let mut faces: Vec<TopoFace> = Vec::new();
+
+    let e_rim0 = push_circle(&mut vertices, &mut edges, rim0.clone());
+    let e_rimh = push_circle(&mut vertices, &mut edges, rimh.clone());
+    let e_m0 = push_circle(&mut vertices, &mut edges, mouth0.clone());
+    let e_mh = push_circle(&mut vertices, &mut edges, mouthh.clone());
+
+    // The mantle: the full strip.
+    let (vi_rim0, vi_rimh) = (edges[e_rim0].start, edges[e_rimh].start);
+    let seam = {
+        let i = edges.len();
+        edges.push(seam_between(
+            rim0.point(0.0),
+            rimh.point(0.0),
+            vi_rim0,
+            vi_rimh,
+        ));
+        i
+    };
+    faces.push(cylinder_strip_face(
+        Surface::Cylinder {
+            origin: o_c,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_c,
+        },
+        e_rim0,
+        e_rimh,
+        seam,
+        0.0,
+        h_c,
+        false,
+    ));
+
+    // The annular caps: at the base (outward −a: outer backward) and
+    // at the top (outward +a: outer forward).
+    faces.push(plane_annulus_face(
+        at(0.0),
+        v3(-a.x, -a.y, -a.z),
+        x_hat,
+        e_rim0,
+        e_m0,
+        r_c,
+        false,
+    ));
+    faces.push(plane_annulus_face(
+        at(h_c),
+        a,
+        x_hat,
+        e_rimh,
+        e_mh,
+        r_c,
+        true,
+    ));
+
+    // The inner wall: the sphere band between the two mouths, the
+    // meridian seam pattern, REVERSED (the solid outside the sphere).
+    let lat0 = latitude_of(&mouth0, c_s, a);
+    let lath = latitude_of(&mouthh, c_s, a);
+    let (vi_m0, vi_mh) = (edges[e_m0].start, edges[e_mh].start);
+    let chain = meridian_chain(
+        &mut vertices,
+        &mut edges,
+        c_s,
+        a,
+        x_hat,
+        r_s,
+        &mouth0,
+        &mouthh,
+        vi_m0,
+        vi_mh,
+    );
+    faces.push(sphere_band_face(
+        sph(),
+        &chain,
+        e_m0,
+        e_mh,
+        lat0,
+        lath,
+        true,
+    ));
+
+    let brep = ExactBRep {
+        vertices,
+        edges,
+        faces,
+    };
+    brep.validate()
+        .map_err(|e| format!("the composed groove failed validation: {e}"))?;
+    Ok(brep)
+}
+
+/// The Fuse composition: the dome bumps — the sphere crossing the cap
+/// planes with its mouth circles strictly inside the rims and the
+/// mantle intact (the zone clear of the slab): the full mantle, the
+/// caps (full disks where the sphere does not reach, annuli where it
+/// crosses, each annulus carrying the dome beyond it — the sphere's
+/// part from the mouth to the pole, a single-wire cap, naturally
+/// oriented).
+#[allow(clippy::too_many_arguments)] // the operand frames and the profile
+fn sphere_bump_fuse(
+    o_c: Vector3,
+    a: Vector3,
+    x_hat: Vector3,
+    r_c: f64,
+    h_c: f64,
+    c_s: Vector3,
+    r_s: f64,
+    crosses_base: bool,
+    crosses_top: bool,
+) -> Result<ExactBRep, String> {
+    let at = |z: f64| v3(o_c.x + a.x * z, o_c.y + a.y * z, o_c.z + a.z * z);
+    let sph = || Surface::Sphere {
+        center: c_s,
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_s,
+    };
+    let rim = |z: f64| Curve::Circle {
+        center: at(z),
+        axis: a,
+        ref_dir: x_hat,
+        radius: r_c,
+    };
+    let rim0 = rim(0.0);
+    let rimh = rim(h_c);
+    let mouth0 = if crosses_base {
+        Some(sphere_plane_mouth(&sph(), at(0.0), a, x_hat)?.expect("the sphere crosses the base"))
+    } else {
+        None
+    };
+    let mouthh = if crosses_top {
+        Some(sphere_plane_mouth(&sph(), at(h_c), a, x_hat)?.expect("the sphere crosses the top"))
+    } else {
+        None
+    };
+
+    let mut vertices: Vec<TopoVertex> = Vec::new();
+    let mut edges: Vec<TopoEdge> = Vec::new();
+    let mut faces: Vec<TopoFace> = Vec::new();
+
+    let e_rim0 = push_circle(&mut vertices, &mut edges, rim0.clone());
+    let e_rimh = push_circle(&mut vertices, &mut edges, rimh.clone());
+    let e_m0 = mouth0
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+    let e_mh = mouthh
+        .as_ref()
+        .map(|c| push_circle(&mut vertices, &mut edges, c.clone()));
+
+    // The mantle: the full strip, naturally oriented.
+    let (vi_rim0, vi_rimh) = (edges[e_rim0].start, edges[e_rimh].start);
+    let seam = {
+        let i = edges.len();
+        edges.push(seam_between(
+            rim0.point(0.0),
+            rimh.point(0.0),
+            vi_rim0,
+            vi_rimh,
+        ));
+        i
+    };
+    faces.push(cylinder_strip_face(
+        Surface::Cylinder {
+            origin: o_c,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_c,
+        },
+        e_rim0,
+        e_rimh,
+        seam,
+        0.0,
+        h_c,
+        false,
+    ));
+
+    // The base end: the full cap or the annulus + the dome.
+    match (e_m0, mouth0.as_ref()) {
+        (Some(e_m), Some(m)) => {
+            faces.push(plane_annulus_face(
+                at(0.0),
+                v3(-a.x, -a.y, -a.z),
+                x_hat,
+                e_rim0,
+                e_m,
+                r_c,
+                false,
+            ));
+            // The dome below: the region from the mouth to the south
+            // pole (kept below: backward, natural).
+            faces.push(sphere_cap_face(
+                sph(),
+                e_m,
+                latitude_of(m, c_s, a),
+                -std::f64::consts::FRAC_PI_2,
+                false,
+                false,
+            ));
+        }
+        _ => {
+            faces.push(plane_disk_face(
+                at(0.0),
+                v3(-a.x, -a.y, -a.z),
+                x_hat,
+                e_rim0,
+                r_c,
+                false,
+            ));
+        }
+    }
+
+    // The top end: the full cap or the annulus + the dome.
+    match (e_mh, mouthh.as_ref()) {
+        (Some(e_m), Some(m)) => {
+            faces.push(plane_annulus_face(
+                at(h_c),
+                a,
+                x_hat,
+                e_rimh,
+                e_m,
+                r_c,
+                true,
+            ));
+            // The dome above: the region from the mouth to the north
+            // pole (kept above: forward, natural).
+            faces.push(sphere_cap_face(
+                sph(),
+                e_m,
+                latitude_of(m, c_s, a),
+                std::f64::consts::FRAC_PI_2,
+                true,
+                false,
+            ));
+        }
+        _ => {
+            faces.push(plane_disk_face(at(h_c), a, x_hat, e_rimh, r_c, true));
+        }
+    }
+
+    let brep = ExactBRep {
+        vertices,
+        edges,
+        faces,
+    };
+    brep.validate()
+        .map_err(|e| format!("the composed bump fuse failed validation: {e}"))?;
+    Ok(brep)
+}
+
+/// The exact B-rep boolean of a finite cylinder and a sphere, coaxial
+/// (see the module doc for the compositions and the refusals).
+///
+/// The Cut is cylinder − sphere; the sphere is the tool. The frame
+/// contract follows `Part::Cylinder`: `o_c` the base center, `a` the
+/// unit axis base→top, `h_c > 0`; the sphere `c_s`, `r_s > 0`.
+pub fn cylinder_sphere_boolean(
+    op: BooleanOp,
+    o_c: Vector3,
+    a: Vector3,
+    r_c: f64,
+    h_c: f64,
+    c_s: Vector3,
+    r_s: f64,
+) -> Result<BooleanOutcome, String> {
+    require_unit(a, "cylinder axis")?;
+    for (r, what) in [(r_c, "cylinder"), (r_s, "sphere")] {
+        if r <= 0.0 {
+            return Err(format!("the {what} radius must be positive, got {r}"));
+        }
+    }
+    if h_c <= 0.0 {
+        return Err(format!("the cylinder height must be positive, got {h_c}"));
+    }
+
+    // ---- the coaxial reading ----------------------------------------
+    let x_hat = any_perpendicular(a);
+    let dv = v3(c_s.x - o_c.x, c_s.y - o_c.y, c_s.z - o_c.z);
+    let along = dv.dot(&a);
+    let perp = v3(dv.x - a.x * along, dv.y - a.y * along, dv.z - a.z * along);
+    let perp_len = exact_sum_rounded(&length_squared_terms(perp))
+        .max(0.0)
+        .sqrt();
+    if perp_len > 1e-9 * r_c.max(r_s).max(1.0) {
+        // The honest refusal, propagated from K3a by name.
+        let cyl = Surface::Cylinder {
+            origin: o_c,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_c,
+        };
+        let sph = Surface::Sphere {
+            center: c_s,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_s,
+        };
+        return match intersect_surfaces(&cyl, &sph) {
+            SurfaceIntersection::NotAnalytic { why } => Ok(refused(&why)),
+            other => Err(format!(
+                "the non-coaxial cylinder×sphere section was not refused: {other:?}"
+            )),
+        };
+    }
+    // The projected center and its height parameter (the model's
+    // reading of the intended coaxial placement).
+    let c_s = v3(
+        o_c.x + a.x * along,
+        o_c.y + a.y * along,
+        o_c.z + a.z * along,
+    );
+    let z_s = along;
+
+    // ---- the profile parameters --------------------------------------
+    // h_i: the section offset, K3a's own arithmetic (0 when the sphere
+    // is narrower — the section zone degenerates to a point and the
+    // sphere's disk never swallows the cylinder's).
+    let h_i = diff_products_rounded(r_s, r_s, r_c, r_c).max(0.0).sqrt();
+
+    // The exact classifications (expansion signs of the stored floats):
+    //   bot_in ≥ 0: the sphere's bottom at/above the base.
+    //   top_in ≤ 0: the sphere's top at/below the top plane.
+    //   lo_vs_0: sign(z_s − h_i) — the lower section vs the base.
+    //   lo_vs_h: sign(z_s − h_i − h_c) — the lower section vs the top.
+    //   hi_vs_0: sign(z_s + h_i) — the upper section vs the base.
+    //   hi_vs_h: sign(z_s + h_i − h_c) — the upper section vs the top.
+    let bot_in = exact_sum_sign(&[z_s, -r_s]);
+    let top_in = exact_sum_sign(&[z_s, r_s, -h_c]);
+    let lo_vs_0 = exact_sum_sign(&[z_s, -h_i]);
+    let lo_vs_h = exact_sum_sign(&[z_s, -h_i, -h_c]);
+    let hi_vs_0 = exact_sum_sign(&[z_s, h_i]);
+    let hi_vs_h = exact_sum_sign(&[z_s, h_i, -h_c]);
+
+    // A plane-cut mouth coinciding with a rim circle: |plane − z_s| =
+    // h_i with the sphere at least as wide as the cylinder.
+    let rim_mount = |p: f64| -> bool {
+        r_s >= r_c
+            && (exact_sum_sign(&[p, -z_s, -h_i]) == 0 || exact_sum_sign(&[p, -z_s, h_i]) == 0)
+    };
+
+    let whole_cyl = || BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(cylinder_piece(o_c, a, r_c, 0.0, h_c)),
+    };
+
+    // ---- no reach: the z-ranges miss (the tangent touch included) ---
+    //   above ≥ 0: the sphere's bottom at/above the top plane.
+    //   below ≤ 0: the sphere's top at/below the base.
+    let above = exact_sum_sign(&[z_s, -r_s, -h_c]);
+    let below = exact_sum_sign(&[z_s, r_s]);
+    if above >= 0 || below <= 0 {
+        return Ok(match op {
+            BooleanOp::Common => empty(),
+            BooleanOp::Cut => whole_cyl(),
+            BooleanOp::Fuse => {
+                if above == 0 || below == 0 {
+                    refused("tangent fuse — the shared point is not an edge-manifold junction")
+                } else {
+                    refused("disjoint fuse — a two-shell compound, not a single closed shell")
+                }
+            }
+        });
+    }
+
+    // ---- the equator tangency: equal radii, the equator strictly
+    // inside the slab — the sphere touches the mantle along a circle
+    // (a measure-zero non-manifold contact); the Common is unaffected
+    // (its boundary never shows the contact).
+    if r_s == r_c
+        && matches!(op, BooleanOp::Cut | BooleanOp::Fuse)
+        && exact_sum_sign(&[z_s]) > 0
+        && exact_sum_sign(&[z_s, -h_c]) < 0
+    {
+        return Ok(refused(
+            "the equator tangency — the sphere touches the mantle along its \
+             equator (a measure-zero non-manifold contact)",
+        ));
+    }
+
+    // ---- the sphere contained in the slab and the cylinder ----------
+    if bot_in >= 0 && top_in <= 0 && r_s <= r_c {
+        return Ok(match op {
+            BooleanOp::Common => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(sphere_brep_at(c_s, r_s)),
+            },
+            BooleanOp::Cut => refused(
+                "the contained cut — the internal void needs a second shell \
+                 the K1 model does not carry",
+            ),
+            BooleanOp::Fuse => whole_cyl(),
+        });
+    }
+
+    // ---- the zone covering the slab: the sphere's disk swallows the
+    // cylinder's everywhere on it --------------------------------------
+    if lo_vs_0 <= 0 && hi_vs_h >= 0 {
+        return Ok(match op {
+            BooleanOp::Common => whole_cyl(),
+            BooleanOp::Cut => empty(),
+            BooleanOp::Fuse => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(sphere_brep_at(c_s, r_s)),
+            },
+        });
+    }
+
+    // ---- the per-op compositions -------------------------------------
+    match op {
+        BooleanOp::Common => {
+            let brep = capsule_stack(o_c, a, x_hat, r_c, h_c, c_s, r_s, z_s, h_i)?;
+            Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(brep),
+            })
+        }
+        BooleanOp::Cut => {
+            // The material profile over the slab: full where
+            // |z − z_s| ≥ r_s, annulus where h_i ≤ |z − z_s| < r_s,
+            // empty inside the section zone. A point zone (h_i = 0,
+            // the sphere narrower) never empties anything: the
+            // material is one connected piece over the whole slab.
+            //
+            // The groove first: the sphere's reach covering the slab
+            // strictly (the material all-annulus over it) with the
+            // zone clear of the slab's interior.
+            let zone_interferes = h_i > 0.0 && hi_vs_0 > 0 && lo_vs_h < 0;
+            if bot_in < 0 && top_in > 0 && !zone_interferes {
+                let brep = sphere_groove_cut(o_c, a, x_hat, r_c, h_c, c_s, r_s)?;
+                return Ok(BooleanOutcome {
+                    kind: BooleanOutcomeKind::Solid(brep),
+                });
+            }
+            let (below_mat, above_mat) = if h_i > 0.0 {
+                (lo_vs_0 > 0, hi_vs_h < 0)
+            } else {
+                (false, false)
+            };
+            if below_mat && above_mat {
+                return Ok(refused(
+                    "the two-piece cut — the sphere's section zone splits the \
+                     cylinder into two shells",
+                ));
+            }
+            if h_i > 0.0 && !below_mat && !above_mat {
+                return Err("the zone-covering cut was not caught by the classification".into());
+            }
+            // The one piece: the material at the far end, the sphere
+            // dipping from the near end. from_above: the material at
+            // the base ([0, m), m = min(h_c, z_s − h_i)). A point zone
+            // spans the slab: the near end is the crossed plane.
+            let from_above = if h_i > 0.0 { below_mat } else { top_in > 0 };
+            let (pole_in, near_z) = if from_above {
+                (bot_in >= 0, h_c)
+            } else {
+                (top_in <= 0, 0.0)
+            };
+            if rim_mount(near_z) {
+                return Ok(refused(
+                    "the rim-mount — the mouth circle coincides with the rim \
+                     (a measure-zero annulus), refused",
+                ));
+            }
+            if !pole_in {
+                // The sphere's reach past the far plane with the piece
+                // pinching inside the slab — the collar, a genus-1
+                // piece (the spanning variant is the groove above).
+                return Ok(refused(
+                    "the collar — the one-piece material pinches inside the \
+                     slab with the sphere's reach past the far plane (a genus-1 \
+                     piece), refused",
+                ));
+            }
+            let brep = sphere_bowl_cut(o_c, a, x_hat, r_c, h_c, c_s, r_s, z_s, h_i, from_above)?;
+            Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(brep),
+            })
+        }
+        BooleanOp::Fuse => {
+            // The bumps need the mantle intact: the zone clear of the
+            // slab — or a point zone (a narrower sphere), which never
+            // interrupts anything.
+            let zone_clear = h_i == 0.0 || hi_vs_0 <= 0 || lo_vs_h >= 0;
+            if !zone_clear {
+                return Ok(refused(
+                    "the split-circle mantles — the sphere's section zone \
+                     interrupts the cylinder's mantle, the next slice",
+                ));
+            }
+            let crosses_base = bot_in < 0;
+            let crosses_top = top_in > 0;
+            if rim_mount(0.0) && crosses_base {
+                return Ok(refused(
+                    "the rim-mount — the mouth circle coincides with the rim \
+                     (a measure-zero annulus), refused",
+                ));
+            }
+            if rim_mount(h_c) && crosses_top {
+                return Ok(refused(
+                    "the rim-mount — the mouth circle coincides with the rim \
+                     (a measure-zero annulus), refused",
+                ));
+            }
+            let brep =
+                sphere_bump_fuse(o_c, a, x_hat, r_c, h_c, c_s, r_s, crosses_base, crosses_top)?;
+            Ok(BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(brep),
+            })
+        }
     }
 }

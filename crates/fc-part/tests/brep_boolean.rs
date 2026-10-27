@@ -39,10 +39,10 @@
 use fc_base::Vector3;
 use fc_part::brep::{read_brep_bytes, write_brep};
 use fc_part::brep_boolean::{
-    cone_plane_boolean, cylinder_cylinder_boolean, cylinder_plane_boolean, sphere_plane_boolean,
-    sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
+    cone_plane_boolean, cylinder_cylinder_boolean, cylinder_plane_boolean, cylinder_sphere_boolean,
+    sphere_plane_boolean, sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
 };
-use fc_part::intersect::intersect_surfaces;
+use fc_part::intersect::{intersect_surfaces, SurfaceIntersection};
 use fc_part::measure::{brep_area, brep_volume};
 use fc_part::topology::{Curve, Surface};
 
@@ -2089,4 +2089,624 @@ fn cyl_cyl_coincident_staggered_composes_the_pieces() {
         pi * r * r * h1,
         "the z-disjoint coincident cut",
     );
+}
+
+// ---------------------------------------------------------------------------
+// K3e — cylinder×sphere, the coaxial family: the capsule cuts
+// ---------------------------------------------------------------------------
+
+fn cs_axis() -> Vector3 {
+    v3(1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0)
+}
+
+fn cs_origin() -> Vector3 {
+    v3(1.0, -1.0, 2.0)
+}
+
+/// The sphere center on the axis at height `z_s` above the base.
+fn cs_center(z_s: f64) -> Vector3 {
+    let a = cs_axis();
+    let o = cs_origin();
+    v3(o.x + a.x * z_s, o.y + a.y * z_s, o.z + a.z * z_s)
+}
+
+/// The part of the ball (radius `r`, center at height `z_s`) between
+/// the axis heights `z_a` and `z_b` — the classical segment, computed
+/// independently of the engine (the stacked-profile reference).
+fn ball_segment(r: f64, z_a: f64, z_b: f64, z_s: f64) -> f64 {
+    std::f64::consts::PI * (r * r * (z_b - z_a) - ((z_b - z_s).powi(3) - (z_a - z_s).powi(3)) / 3.0)
+}
+
+#[test]
+fn cyl_sph_common_composes_the_capsule() {
+    // The sphere's z-range strictly inside the cylinder's, the sphere
+    // wider: the common is the capsule — the cylinder band between the
+    // two K3a section circles plus the two spherical caps.
+    let (o, a) = (cs_origin(), cs_axis());
+    let (r_c, h_c, z_s, r_s) = (1.0, 6.0, 3.0, 2.0);
+    let h_i = 3.0f64.sqrt();
+    let out = cylinder_sphere_boolean(BooleanOp::Common, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the capsule");
+    let brep = expect_solid(&out, "the capsule");
+    brep.validate().expect("the capsule validates");
+
+    // Topology: 1 cylinder strip + 2 sphere caps, 2 section circles +
+    // the generator seam, one vertex per circle.
+    assert_eq!(brep.faces.len(), 3, "three faces");
+    let kinds: Vec<&str> = brep.faces.iter().map(surface_kind).collect();
+    assert_eq!(kinds.iter().filter(|k| **k == "Cylinder").count(), 1);
+    assert_eq!(kinds.iter().filter(|k| **k == "Sphere").count(), 2);
+    assert_eq!(brep.edges.len(), 3, "two circles and the seam");
+    assert_eq!(brep.vertices.len(), 2, "one vertex per circle");
+    assert_eq!(brep.euler_characteristic(), 2, "ball topology");
+    assert_oriented_closed_shell(brep, "the capsule");
+
+    // The section circles are the K3a construction, bit-identical
+    // (the frame is irrelevant to the circle's center and radius).
+    let x_hat = {
+        let probe = if a.x.abs() < 0.9 {
+            v3(1.0, 0.0, 0.0)
+        } else {
+            v3(0.0, 1.0, 0.0)
+        };
+        let d = probe.dot(&a);
+        (probe - v3(a.x * d, a.y * d, a.z * d))
+            .normalized()
+            .unwrap()
+    };
+    let k3a = intersect_surfaces(
+        &fc_part::topology::Surface::Cylinder {
+            origin: o,
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_c,
+        },
+        &fc_part::topology::Surface::Sphere {
+            center: cs_center(z_s),
+            axis: a,
+            ref_dir: x_hat,
+            radius: r_s,
+        },
+    );
+    let want: Vec<(Vector3, f64)> = match k3a {
+        SurfaceIntersection::Curves(cs) => cs
+            .iter()
+            .map(|c| match c {
+                Curve::Circle { center, radius, .. } => (*center, *radius),
+                other => panic!("K3a returned a non-circle: {other:?}"),
+            })
+            .collect(),
+        other => panic!("the K3a section is missing: {other:?}"),
+    };
+    let got: Vec<(Vector3, f64)> = brep
+        .edges
+        .iter()
+        .filter_map(|e| match &e.curve {
+            Curve::Circle { center, radius, .. } if e.start == e.end => Some((*center, *radius)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got.len(), 2, "two closed circle edges");
+    assert!(
+        got.contains(&want[0]) && got.contains(&want[1]),
+        "the composed circles are the K3a ones: {got:?} vs {want:?}"
+    );
+
+    // Volume: the cylinder prism plus the two caps (classical).
+    approx(
+        brep_volume(brep).unwrap(),
+        std::f64::consts::PI * r_c * r_c * (2.0 * h_i) + 2.0 * cap_volume(r_s, r_s - h_i),
+        "the capsule volume",
+    );
+    // Area: the strip plus the two cap zones.
+    approx(
+        brep_area(brep).unwrap(),
+        std::f64::consts::TAU * r_c * (2.0 * h_i) + 2.0 * std::f64::consts::TAU * r_s * (r_s - h_i),
+        "the capsule area",
+    );
+}
+
+#[test]
+fn cyl_sph_common_clipped_variants_compose_the_stack() {
+    let (o, a) = (cs_origin(), cs_axis());
+    let pi = std::f64::consts::PI;
+
+    // (a) The capsule crossing the base plane with its spherical
+    // part: the disk at z=0, the sphere band (the meridian seam), the
+    // cylinder band, the top cap.
+    let (r_c, h_c, z_s, r_s) = (1.0, 4.0, 1.9, 2.0);
+    let h_i = 3.0f64.sqrt();
+    let out = cylinder_sphere_boolean(BooleanOp::Common, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the clipped capsule");
+    let brep = expect_solid(&out, "the clipped capsule");
+    brep.validate().expect("the clipped capsule validates");
+    assert_eq!(brep.faces.len(), 4, "disk, sphere band, cylinder band, cap");
+    let kinds: Vec<&str> = brep.faces.iter().map(surface_kind).collect();
+    assert_eq!(kinds.iter().filter(|k| **k == "Plane").count(), 1);
+    assert_eq!(kinds.iter().filter(|k| **k == "Sphere").count(), 2);
+    assert_eq!(kinds.iter().filter(|k| **k == "Cylinder").count(), 1);
+    assert_eq!(brep.euler_characteristic(), 2, "ball topology");
+    assert_oriented_closed_shell(brep, "the clipped capsule");
+    approx(
+        brep_volume(brep).unwrap(),
+        ball_segment(r_s, 0.0, z_s - h_i, z_s)
+            + pi * r_c * r_c * (2.0 * h_i)
+            + cap_volume(r_s, r_s - h_i),
+        "the clipped capsule volume",
+    );
+
+    // (b) The sphere narrower than the cylinder, both planes secant:
+    // the slice — the sphere band and two planar disks.
+    let (r_c, h_c, z_s, r_s) = (2.0, 1.2, 0.5, 1.0);
+    let out = cylinder_sphere_boolean(BooleanOp::Common, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the slice");
+    let brep = expect_solid(&out, "the slice");
+    brep.validate().expect("the slice validates");
+    assert_eq!(brep.faces.len(), 3, "band and two disks");
+    assert_eq!(brep.euler_characteristic(), 2, "ball topology");
+    assert_oriented_closed_shell(brep, "the slice");
+    approx(
+        brep_volume(brep).unwrap(),
+        ball_segment(r_s, 0.0, h_c, z_s),
+        "the slice volume",
+    );
+
+    // (c) The sphere narrower, one plane secant: the cap solid.
+    let (r_c, h_c, z_s, r_s) = (2.0, 3.0, 0.5, 1.0);
+    let out = cylinder_sphere_boolean(BooleanOp::Common, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the cap");
+    let brep = expect_solid(&out, "the cap");
+    brep.validate().expect("the cap validates");
+    assert_eq!(brep.faces.len(), 2, "patch and disk");
+    approx(
+        brep_volume(brep).unwrap(),
+        cap_volume(r_s, z_s + r_s),
+        "the cap volume",
+    );
+}
+
+#[test]
+fn cyl_sph_cut_composes_the_bowls_and_the_groove() {
+    let (o, a) = (cs_origin(), cs_axis());
+    let pi = std::f64::consts::PI;
+
+    // (a) The rim-bowl: the sphere dipping into the top cap from
+    // above, narrower than the cylinder — the mouth circle inside the
+    // rim, the bowl down to the south pole.
+    let (r_c, h_c, z_s, r_s) = (2.0, 4.0, 4.2, 1.5);
+    let out = cylinder_sphere_boolean(BooleanOp::Cut, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the rim-bowl cut");
+    let brep = expect_solid(&out, "the rim-bowl cut");
+    brep.validate().expect("the rim-bowl validates");
+    assert_eq!(brep.faces.len(), 4, "mantle, cap, annulus, bowl");
+    // V − E_nd + F = 3 − 4 + 4 = 3: the ball plus the annulus's hole.
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the rim-bowl cut");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * h_c - ball_segment(r_s, z_s - r_s, h_c, z_s),
+        "the rim-bowl volume",
+    );
+    // The bowl is the REVERSED face (the solid lies outside the
+    // sphere on it); the annulus has two wires.
+    let mut bowls = 0;
+    for f in brep.faces.iter().filter(|f| surface_kind(f) == "Sphere") {
+        assert!(f.reversed, "the bowl face is reversed");
+        assert_eq!(f.wires.len(), 1, "the bowl is bounded by the mouth circle");
+        bowls += 1;
+    }
+    assert_eq!(bowls, 1, "one bowl face");
+    let annuli: Vec<&fc_part::topology::TopoFace> = brep
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Plane" && f.wires.len() == 2)
+        .collect();
+    assert_eq!(annuli.len(), 1, "the top cap is an annulus");
+
+    // (b) The pinch-bowl: the sphere wider than the cylinder, dipping
+    // from above with the section circle inside the slab — the piece
+    // pinches off at the section, no top face at all.
+    let (r_c, h_c, z_s, r_s) = (1.0, 4.0, 3.5, 3.0);
+    let h_i = 8.0f64.sqrt();
+    let out = cylinder_sphere_boolean(BooleanOp::Cut, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the pinch-bowl cut");
+    let brep = expect_solid(&out, "the pinch-bowl cut");
+    brep.validate().expect("the pinch-bowl validates");
+    assert_eq!(brep.faces.len(), 3, "mantle, cap, bowl");
+    assert_eq!(brep.euler_characteristic(), 2, "ball topology");
+    assert_oriented_closed_shell(brep, "the pinch-bowl cut");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * (z_s - r_s) + pi * r_c * r_c * (r_s - h_i)
+            - ball_segment(r_s, z_s - r_s, z_s - h_i, z_s),
+        "the pinch-bowl volume",
+    );
+
+    // (c) The groove: the sphere's reach covering the slab, narrower
+    // than the cylinder — the tube with the spherical inner wall.
+    let (r_c, h_c, z_s, r_s) = (2.0, 1.2, 0.5, 1.5);
+    let out = cylinder_sphere_boolean(BooleanOp::Cut, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the groove cut");
+    let brep = expect_solid(&out, "the groove cut");
+    brep.validate().expect("the groove validates");
+    assert_eq!(brep.faces.len(), 4, "mantle, two annuli, inner wall");
+    assert_eq!(
+        brep.euler_characteristic(),
+        2,
+        "the torus reads 2 (holes included)"
+    );
+    assert_oriented_closed_shell(brep, "the groove cut");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * h_c - ball_segment(r_s, 0.0, h_c, z_s),
+        "the groove volume",
+    );
+    // The inner wall is REVERSED and carries the meridian seam.
+    let walls: Vec<&fc_part::topology::TopoFace> = brep
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Sphere")
+        .collect();
+    assert_eq!(walls.len(), 1, "one inner wall");
+    assert!(walls[0].reversed, "the inner wall is reversed");
+    let annuli = brep
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Plane" && f.wires.len() == 2)
+        .count();
+    assert_eq!(annuli, 2, "both caps are annuli");
+
+    // (d) The mirrored compositions: the sphere dipping in from
+    // below — the rim-bowl and the pinch-bowl, exercising the
+    // from-below assembly paths.
+    let (r_c, h_c, z_s, r_s) = (2.0, 4.0, -0.2, 1.5);
+    let out = cylinder_sphere_boolean(BooleanOp::Cut, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the from-below rim-bowl cut");
+    let brep = expect_solid(&out, "the from-below rim-bowl cut");
+    brep.validate().expect("the from-below rim-bowl validates");
+    assert_eq!(brep.faces.len(), 4, "mantle, cap, annulus, bowl");
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the from-below rim-bowl cut");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * h_c - ball_segment(r_s, 0.0, z_s + r_s, z_s),
+        "the from-below rim-bowl volume",
+    );
+
+    let (r_c, h_c, z_s, r_s) = (1.0, 4.0, 0.5, 3.0);
+    let h_i = 8.0f64.sqrt();
+    let out = cylinder_sphere_boolean(BooleanOp::Cut, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the from-below pinch-bowl cut");
+    let brep = expect_solid(&out, "the from-below pinch-bowl cut");
+    brep.validate()
+        .expect("the from-below pinch-bowl validates");
+    assert_eq!(brep.faces.len(), 3, "mantle, cap, bowl");
+    assert_eq!(brep.euler_characteristic(), 2, "ball topology");
+    assert_oriented_closed_shell(brep, "the from-below pinch-bowl cut");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * (h_c - z_s - h_i) - ball_segment(r_s, z_s + h_i, z_s + r_s, z_s),
+        "the from-below pinch-bowl volume",
+    );
+}
+
+#[test]
+fn cyl_sph_cut_and_fuse_partition_the_operands() {
+    // One configuration where all three outcomes are solids: the
+    // narrower sphere crossing the top plane.
+    let (o, a) = (cs_origin(), cs_axis());
+    let (r_c, h_c, z_s, r_s) = (2.0, 4.0, 4.2, 1.5);
+    let pi = std::f64::consts::PI;
+    let common = cylinder_sphere_boolean(BooleanOp::Common, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("common");
+    let cut =
+        cylinder_sphere_boolean(BooleanOp::Cut, o, a, r_c, h_c, cs_center(z_s), r_s).expect("cut");
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("fuse");
+    // V(cut) + V(common) = V(cylinder).
+    approx(
+        brep_volume(expect_solid(&cut, "cut")).unwrap()
+            + brep_volume(expect_solid(&common, "common")).unwrap(),
+        pi * r_c * r_c * h_c,
+        "the cut partition identity",
+    );
+    // V(fuse) + V(common) = V(cylinder) + V(sphere).
+    approx(
+        brep_volume(expect_solid(&fuse, "fuse")).unwrap()
+            + brep_volume(expect_solid(&common, "common")).unwrap(),
+        pi * r_c * r_c * h_c + (4.0 / 3.0) * pi * r_s * r_s * r_s,
+        "the fuse partition identity",
+    );
+}
+
+#[test]
+fn cyl_sph_fuse_composes_the_bumps() {
+    let (o, a) = (cs_origin(), cs_axis());
+    let pi = std::f64::consts::PI;
+
+    // One bump: the sphere crossing the top plane from inside the
+    // slab, narrower — the dome sits on the annulus.
+    let (r_c, h_c, z_s, r_s) = (2.0, 4.0, 4.2, 1.5);
+    let out = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the bump fuse");
+    let brep = expect_solid(&out, "the bump fuse");
+    brep.validate().expect("the bump fuse validates");
+    assert_eq!(brep.faces.len(), 4, "mantle, cap, annulus, dome");
+    // 3 − 4 + 4 = 3: the ball plus the annulus's hole.
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "the ball reads 3 with the hole"
+    );
+    assert_oriented_closed_shell(brep, "the bump fuse");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * h_c + cap_volume(r_s, z_s + r_s - h_c),
+        "the bump fuse volume",
+    );
+    // No reversed face: the dome's solid lies inside the sphere.
+    assert!(
+        brep.faces.iter().all(|f| !f.reversed),
+        "the fuse faces are naturally oriented"
+    );
+
+    // Two bumps: the sphere spanning the slab, narrower — the domes
+    // on both annuli.
+    let (r_c, h_c, z_s, r_s) = (3.0, 1.4, 0.5, 1.0);
+    let out = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, r_c, h_c, cs_center(z_s), r_s)
+        .expect("the two-bump fuse");
+    let brep = expect_solid(&out, "the two-bump fuse");
+    brep.validate().expect("the two-bump fuse validates");
+    assert_eq!(brep.faces.len(), 5, "mantle, two annuli, two domes");
+    // 4 − 5 + 5 = 4: the ball plus the two annuli's holes.
+    assert_eq!(
+        brep.euler_characteristic(),
+        4,
+        "the ball reads 4 with two holes"
+    );
+    assert_oriented_closed_shell(brep, "the two-bump fuse");
+    approx(
+        brep_volume(brep).unwrap(),
+        pi * r_c * r_c * h_c + cap_volume(r_s, r_s - z_s) + cap_volume(r_s, z_s + r_s - h_c),
+        "the two-bump fuse volume",
+    );
+}
+
+#[test]
+fn cyl_sph_classifies_nonsecant_configurations_honestly() {
+    let (o, a) = (cs_origin(), cs_axis());
+    let pi = std::f64::consts::PI;
+
+    // Non-coaxial: K3a's quartic refusal, propagated by name.
+    let off = v3(0.03, -0.02, 0.01);
+    let tilted_center = v3(
+        cs_center(2.0).x + off.x,
+        cs_center(2.0).y + off.y,
+        cs_center(2.0).z + off.z,
+    );
+    let out = cylinder_sphere_boolean(BooleanOp::Common, o, a, 1.0, 5.0, tilted_center, 2.0)
+        .expect("classified");
+    expect_refused(&out, "coaxial", "the non-coaxial quartic");
+
+    // No reach: the sphere beyond the slab — common empty, cut whole,
+    // fuse refused as a two-shell compound.
+    let common = cylinder_sphere_boolean(BooleanOp::Common, o, a, 1.0, 5.0, cs_center(8.0), 2.0)
+        .expect("no reach");
+    expect_empty(&common, "the no-reach common");
+    let cut = cylinder_sphere_boolean(BooleanOp::Cut, o, a, 1.0, 5.0, cs_center(8.0), 2.0)
+        .expect("no reach cut");
+    approx(
+        brep_volume(expect_solid(&cut, "the whole cylinder")).unwrap(),
+        pi * 1.0 * 5.0,
+        "the no-reach cut is the whole cylinder",
+    );
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, 1.0, 5.0, cs_center(8.0), 2.0)
+        .expect("no reach fuse");
+    expect_refused(&fuse, "two-shell", "the no-reach fuse");
+
+    // The reach tangent to the top plane from outside: the common is
+    // a point (empty), the fuse a point junction (refused). A
+    // z-aligned axis makes the tangency exactly representable (the
+    // projected height is then exact).
+    let ez = v3(0.0, 0.0, 1.0);
+    let oez = v3(1.0, -1.0, 2.0);
+    let cez = v3(1.0, -1.0, 9.0);
+    let common =
+        cylinder_sphere_boolean(BooleanOp::Common, oez, ez, 1.0, 5.0, cez, 2.0).expect("tangent");
+    expect_empty(&common, "the tangent common");
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, oez, ez, 1.0, 5.0, cez, 2.0)
+        .expect("tangent fuse");
+    expect_refused(&fuse, "junction", "the tangent fuse");
+
+    // The sphere contained (narrower, reach inside): common is the
+    // whole sphere, fuse the whole cylinder, cut the internal void —
+    // refused by name.
+    let common = cylinder_sphere_boolean(BooleanOp::Common, o, a, 2.0, 5.0, cs_center(2.5), 1.0)
+        .expect("contained");
+    approx(
+        brep_volume(expect_solid(&common, "the whole sphere")).unwrap(),
+        (4.0 / 3.0) * pi,
+        "the contained common is the whole sphere",
+    );
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, 2.0, 5.0, cs_center(2.5), 1.0)
+        .expect("contained fuse");
+    approx(
+        brep_volume(expect_solid(&fuse, "the whole cylinder")).unwrap(),
+        pi * 4.0 * 5.0,
+        "the contained fuse is the whole cylinder",
+    );
+    let cut = cylinder_sphere_boolean(BooleanOp::Cut, o, a, 2.0, 5.0, cs_center(2.5), 1.0)
+        .expect("the void");
+    expect_refused(&cut, "void", "the contained cut");
+
+    // The section zone covering the slab (the sphere wider, centered
+    // over the slab): the common is the whole cylinder, the cut empty,
+    // the fuse the whole sphere.
+    let common = cylinder_sphere_boolean(BooleanOp::Common, o, a, 1.0, 2.0, cs_center(1.0), 3.0)
+        .expect("covering");
+    approx(
+        brep_volume(expect_solid(&common, "the whole cylinder")).unwrap(),
+        pi * 2.0,
+        "the covering common is the whole cylinder",
+    );
+    let cut = cylinder_sphere_boolean(BooleanOp::Cut, o, a, 1.0, 2.0, cs_center(1.0), 3.0)
+        .expect("covering cut");
+    expect_empty(&cut, "the covering cut");
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, 1.0, 2.0, cs_center(1.0), 3.0)
+        .expect("covering fuse");
+    approx(
+        brep_volume(expect_solid(&fuse, "the whole sphere")).unwrap(),
+        (4.0 / 3.0) * pi * 27.0,
+        "the covering fuse is the whole sphere",
+    );
+
+    // The sphere wider, the section zone strictly inside the slab:
+    // the cut is two pieces — refused as a two-shell compound.
+    let cut = cylinder_sphere_boolean(BooleanOp::Cut, o, a, 1.0, 8.0, cs_center(4.0), 3.0)
+        .expect("two pieces");
+    expect_refused(&cut, "two", "the split cut");
+    // The fuse of the same: the mantle is interrupted — the
+    // split-circle refusal.
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, 1.0, 8.0, cs_center(4.0), 3.0)
+        .expect("split mantle");
+    expect_refused(&fuse, "mantle", "the split-mantle fuse");
+
+    // The collar: the sphere wider, the zone crossing the top plane,
+    // the sphere's reach past the base — the one-piece material is a
+    // genus-1 pinch piece, refused by name.
+    let cut = cylinder_sphere_boolean(BooleanOp::Cut, o, a, 1.0, 1.5, cs_center(1.8), 2.0)
+        .expect("the collar");
+    expect_refused(&cut, "collar", "the genus-1 pinch piece");
+
+    // The rim-mount: the mouth circle coinciding with the rim
+    // (|plane − z_s| = h_i exactly) — refused by name. The radii 3
+    // and 5 make h_i = 4 exact; the z-axis makes the heights exact.
+    let cut = cylinder_sphere_boolean(
+        BooleanOp::Cut,
+        v3(1.0, -1.0, 2.0),
+        v3(0.0, 0.0, 1.0),
+        3.0,
+        2.0,
+        v3(1.0, -1.0, 8.0),
+        5.0,
+    )
+    .expect("the rim-mount");
+    expect_refused(&cut, "rim", "the coincident mouth and rim");
+
+    // The equator tangency: equal radii, the equator inside the slab
+    // — the cut and fuse touch the mantle along a circle, refused.
+    let cut = cylinder_sphere_boolean(BooleanOp::Cut, o, a, 1.0, 5.0, cs_center(2.5), 1.0)
+        .expect("the equator");
+    expect_refused(&cut, "equator", "the tangent equator cut");
+    let fuse = cylinder_sphere_boolean(BooleanOp::Fuse, o, a, 1.0, 5.0, cs_center(2.5), 1.0)
+        .expect("the equator fuse");
+    expect_refused(&fuse, "equator", "the tangent equator fuse");
+    // Its common is unaffected: the sphere clipped by the slab.
+    let common = cylinder_sphere_boolean(BooleanOp::Common, o, a, 1.0, 5.0, cs_center(2.5), 1.0)
+        .expect("the equator common");
+    approx(
+        brep_volume(expect_solid(&common, "the whole sphere")).unwrap(),
+        (4.0 / 3.0) * pi,
+        "the equator common is the whole sphere",
+    );
+}
+
+#[test]
+fn cyl_sph_machine_precision_offset_reads_coaxial() {
+    // A sub-machine perpendicular offset — the arithmetic residue of
+    // a placement — reads as the intended coaxial (the K3d precedent).
+    let (o, a) = (cs_origin(), cs_axis());
+    let c = cs_center(3.0);
+    let nudged = v3(c.x + 1e-12, c.y - 1e-12, c.z + 1e-12);
+    let out = cylinder_sphere_boolean(BooleanOp::Common, o, a, 1.0, 6.0, nudged, 2.0)
+        .expect("the coaxial reading");
+    let brep = expect_solid(&out, "the capsule");
+    brep.validate().expect("the nudged capsule validates");
+    let h_i = 3.0f64.sqrt();
+    approx(
+        brep_volume(brep).unwrap(),
+        std::f64::consts::PI * (2.0 * h_i) + 2.0 * cap_volume(2.0, 2.0 - h_i),
+        "the nudged capsule volume",
+    );
+}
+
+#[test]
+fn cyl_sph_edges_lie_on_the_operands() {
+    // Dense-sample every edge of the three compositions against the
+    // operand surfaces (machine scale, the K3 discipline).
+    let (o, a) = (cs_origin(), cs_axis());
+    for (op, r_c, h_c, z_s, r_s, what) in [
+        (BooleanOp::Common, 1.0, 4.0, 1.9, 2.0, "the clipped capsule"),
+        (BooleanOp::Cut, 2.0, 4.0, 4.2, 1.5, "the rim-bowl cut"),
+        (BooleanOp::Cut, 2.0, 1.2, 0.5, 1.5, "the groove cut"),
+        (BooleanOp::Fuse, 3.0, 1.4, 0.5, 1.0, "the two-bump fuse"),
+    ] {
+        let out = cylinder_sphere_boolean(op, o, a, r_c, h_c, cs_center(z_s), r_s).expect(what);
+        let brep = expect_solid(&out, what);
+        for (ei, edge) in brep.edges.iter().enumerate() {
+            for i in 0..16 {
+                let t = edge.range.0 + (edge.range.1 - edge.range.0) * i as f64 / 16.0;
+                let p = edge.curve.point(t);
+                // The distance to the cylinder's surface.
+                let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+                let along = off.dot(&a);
+                let radial = v3(
+                    off.x - a.x * along,
+                    off.y - a.y * along,
+                    off.z - a.z * along,
+                )
+                .length();
+                // The distance to the sphere's surface.
+                let to_c = v3(
+                    p.x - cs_center(z_s).x,
+                    p.y - cs_center(z_s).y,
+                    p.z - cs_center(z_s).z,
+                )
+                .length();
+                let on_cyl = (radial - r_c).abs() <= 1e-9 * r_c.max(1.0);
+                let on_sph = (to_c - r_s).abs() <= 1e-9 * r_s.max(1.0);
+                let on_cap = along.abs() <= 1e-9 || (along - h_c).abs() <= 1e-9;
+                assert!(
+                    on_cyl || on_sph || on_cap,
+                    "{what}: edge {ei} sample {i} is on none of the operand surfaces \
+                     (radial {radial}, cyl {r_c}, to_c {to_c}, sph {r_s}, along {along})"
+                );
+                // Every sample lies within the cylinder's z-range too.
+                assert!(
+                    -1e-9 <= along && along <= h_c + 1e-9,
+                    "{what}: edge {ei} sample {i} outside the slab ({along} vs [0, {h_c}])"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cyl_sph_outcomes_round_trip_through_fcbrep() {
+    let (o, a) = (cs_origin(), cs_axis());
+    for (op, r_c, h_c, z_s, r_s, what) in [
+        (BooleanOp::Common, 1.0, 6.0, 3.0, 2.0, "the capsule"),
+        (BooleanOp::Common, 1.0, 4.0, 1.9, 2.0, "the clipped capsule"),
+        (BooleanOp::Cut, 2.0, 1.2, 0.5, 1.5, "the groove"),
+        (BooleanOp::Cut, 1.0, 4.0, 3.5, 3.0, "the pinch-bowl"),
+        (BooleanOp::Fuse, 3.0, 1.4, 0.5, 1.0, "the two-bump fuse"),
+    ] {
+        let out = cylinder_sphere_boolean(op, o, a, r_c, h_c, cs_center(z_s), r_s).expect(what);
+        let brep = expect_solid(&out, what);
+        let mut bytes = Vec::new();
+        write_brep(&mut bytes, brep).expect("FCBREP write");
+        let back = read_brep_bytes(&bytes).expect("round-trip parse");
+        assert!(
+            back == *brep,
+            "{what}: the FCBREP round-trip is lossless (byte-identical model)"
+        );
+    }
 }
