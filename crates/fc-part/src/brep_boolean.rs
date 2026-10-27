@@ -2120,13 +2120,14 @@ pub fn cylinder_cylinder_boolean(
     };
 
     // The op guards on the z-configuration (Common composes over any
-    // overlap; the others need the covering/equal shapes).
+    // overlap; the others need the covering/equal/drilling shapes).
+    let blind_drill = op == BooleanOp::Cut && !b_covers_a && s2 > 0.0 && s2 + h2 < h1;
     match op {
         BooleanOp::Common => {}
-        BooleanOp::Cut if !b_covers_a => {
+        BooleanOp::Cut if !b_covers_a && !blind_drill => {
             return Ok(refused(
-                "the staggered cut — the notch mantle (a full-circle strip \
-                 beyond the tool's range) is the next slice",
+                "the one-sided drill — the split-circle mantles (a rim \
+                 interrupted by the notch) are the next slice",
             ))
         }
         BooleanOp::Fuse if !equal_ranges => {
@@ -2269,7 +2270,11 @@ pub fn cylinder_cylinder_boolean(
     // * Fuse: both outside arcs.
     let sweep_a_first = match op {
         BooleanOp::Common => sweep_a_in,
-        _ => sweep_a_out,
+        BooleanOp::Fuse => sweep_a_out,
+        // The through-cut composes a's outside-arc strip; the blind
+        // drill's notch hole uses a's inside arcs.
+        BooleanOp::Cut if !blind_drill => sweep_a_out,
+        _ => sweep_a_in,
     };
     let sweep_b_second = match op {
         BooleanOp::Fuse => sweep_b_out,
@@ -2410,7 +2415,140 @@ pub fn cylinder_cylinder_boolean(
         [theta + sweep.min(0.0), theta + sweep.max(0.0), v_lo, v_hi]
     };
 
+    // The blind drill's own pieces: a's rim circles at its caps and
+    // the full-height seam (the K1 mantle pattern of the outer wire).
     let mut faces: Vec<TopoFace> = Vec::new();
+    if blind_drill {
+        let rim = |v: f64| Curve::Circle {
+            center: center_on(o1, v),
+            axis: a,
+            ref_dir: x_hat,
+            radius: r1,
+        };
+        let rim_lo = rim(0.0);
+        let rim_hi = rim(h1);
+        let va_lo = rim_lo.point(0.0);
+        let va_hi = rim_hi.point(0.0);
+        let iv_lo = vertices.len();
+        vertices.push(TopoVertex { point: va_lo });
+        let iv_hi = vertices.len();
+        vertices.push(TopoVertex { point: va_hi });
+        edges.push(TopoEdge {
+            curve: rim_lo,
+            range: (0.0, std::f64::consts::TAU),
+            start: iv_lo,
+            end: iv_lo,
+        });
+        let e_rim_lo = edges.len() - 1;
+        edges.push(TopoEdge {
+            curve: rim_hi,
+            range: (0.0, std::f64::consts::TAU),
+            start: iv_hi,
+            end: iv_hi,
+        });
+        let e_rim_hi = edges.len() - 1;
+        edges.push(seam_between(va_lo, va_hi, iv_lo, iv_hi));
+        let e_seam = edges.len() - 1;
+
+        // The notched mantle: the outer wire the K1 pattern, the hole
+        // wire the lens window (reversed — the region lies outside it).
+        let hole = reversed_wire(&strip_wire(&chain_a_lo, &chain_a_hi, sweep_a_in));
+        faces.push(TopoFace {
+            surface: surface_a,
+            uv_bounds: [0.0, std::f64::consts::TAU, 0.0, h1],
+            wires: vec![
+                TopoWire {
+                    edges: vec![
+                        WireEdge {
+                            edge: e_seam,
+                            forward: true,
+                        },
+                        WireEdge {
+                            edge: e_rim_hi,
+                            forward: false,
+                        },
+                        WireEdge {
+                            edge: e_seam,
+                            forward: false,
+                        },
+                        WireEdge {
+                            edge: e_rim_lo,
+                            forward: true,
+                        },
+                    ],
+                },
+                TopoWire { edges: hole },
+            ],
+            reversed: false,
+        });
+        // b's wall (reversed — the solid outside b).
+        let wall = reversed_wire(&strip_wire(&chain_b_lo, &chain_b_hi, sweep_b_in));
+        faces.push(TopoFace {
+            surface: surface_b,
+            uv_bounds: uv_of_strip(ph_p, sweep_b_in),
+            wires: vec![TopoWire { edges: wall }],
+            reversed: true,
+        });
+        // b's lens caps at its ends: the solid lies below the bottom
+        // one (outward +a) and above the top one (outward −a).
+        let lens_lo = cap_wire(&chain_a_lo, &chain_b_lo, sweep_a_in, sweep_b_in, true);
+        let lens_hi = cap_wire(&chain_a_hi, &chain_b_hi, sweep_a_in, sweep_b_in, true);
+        faces.push(plane_face_at(
+            center_on(o1, v_lo),
+            a,
+            x_hat,
+            &lens_lo,
+            (&chain_a_lo, &chain_b_lo),
+        ));
+        faces.push(plane_face_at(
+            center_on(o1, v_hi),
+            v3(-a.x, -a.y, -a.z),
+            x_hat,
+            &reversed_wire(&lens_hi),
+            (&chain_a_hi, &chain_b_hi),
+        ));
+        // a's full caps.
+        faces.push(TopoFace {
+            surface: Surface::Plane {
+                origin: o1,
+                normal: v3(-a.x, -a.y, -a.z),
+                x_dir: x_hat,
+            },
+            uv_bounds: [-r1, r1, -r1, r1],
+            wires: vec![TopoWire {
+                edges: vec![WireEdge {
+                    edge: e_rim_lo,
+                    forward: false,
+                }],
+            }],
+            reversed: false,
+        });
+        faces.push(TopoFace {
+            surface: Surface::Plane {
+                origin: center_on(o1, h1),
+                normal: a,
+                x_dir: x_hat,
+            },
+            uv_bounds: [-r1, r1, -r1, r1],
+            wires: vec![TopoWire {
+                edges: vec![WireEdge {
+                    edge: e_rim_hi,
+                    forward: true,
+                }],
+            }],
+            reversed: false,
+        });
+        let brep = ExactBRep {
+            vertices,
+            edges,
+            faces,
+        };
+        brep.validate()
+            .map_err(|e| format!("the composed drill failed validation: {e}"))?;
+        return Ok(BooleanOutcome {
+            kind: BooleanOutcomeKind::Solid(brep),
+        });
+    }
     match op {
         BooleanOp::Common => {
             faces.push(TopoFace {

@@ -1881,13 +1881,19 @@ fn cyl_cyl_classifies_nonsecant_configurations_honestly() {
         "z-disjoint cut is the whole a",
     );
 
-    // Staggered cut and fuse (crossing sections, partial overlap):
-    // the notch mantles are the next slice — refused by name.
+    // Staggered with both ends of b strictly inside a's range: the
+    // cut is now the blind drill (its own test verifies it fully);
+    // here just the volume identity. The staggered fuse is still the
+    // next slice — refused by name.
     let shift = v3(a.x * 1.5, a.y * 1.5, a.z * 1.5);
     let o2s = v3(o2.x + shift.x, o2.y + shift.y, o2.z + shift.z);
     let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h, o2s, a, r2, 3.0)
-        .expect("staggered");
-    expect_refused(&cut, "staggered", "the staggered cut");
+        .expect("the blind drill");
+    approx(
+        brep_volume(expect_solid(&cut, "the drill")).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h - lens_area(cc_d(), r1, r2) * 3.0,
+        "the blind drill volume (a minus the lens prism over b's range)",
+    );
     let fuse = cylinder_cylinder_boolean(BooleanOp::Fuse, o1, a, r1, h, o2s, a, r2, 3.0)
         .expect("staggered");
     expect_refused(&fuse, "staggered", "the staggered fuse");
@@ -1898,4 +1904,98 @@ fn cyl_cyl_classifies_nonsecant_configurations_honestly() {
     let out = cylinder_cylinder_boolean(BooleanOp::Common, o1, a, r1, h, oc, a, r1, 5.0)
         .expect("coincident");
     expect_refused(&out, "staggered", "coincident cylinders, staggered ranges");
+}
+
+#[test]
+fn cyl_cyl_blind_drill_composes_the_notched_mantle() {
+    // b strictly inside a's z-range (both ends), crossing sections:
+    // the cut is a with a blind lens-prism hole — the notched mantle
+    // (outer wire: a's rims + seam; hole wire: the lens arcs and the
+    // crossing generators), b's wall, b's two lens caps, a's full
+    // caps.
+    let (o1, a, r1, h1, o2, _, r2, _) = cc_pair();
+    let d = cc_d();
+    let lens = lens_area(d, r1, r2);
+    let th1 = arc_sweep_inside(d, r1, r2);
+    let th2 = arc_sweep_inside(d, r2, r1);
+    let s2 = 1.5;
+    let h2 = 2.0;
+    let o2s = v3(
+        o1.x + (o2.x - o1.x) + a.x * s2,
+        o1.y + (o2.y - o1.y) + a.y * s2,
+        o1.z + (o2.z - o1.z) + a.z * s2,
+    );
+    let out = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2s, a, r2, h2)
+        .expect("the blind drill");
+    let brep = expect_solid(&out, "the blind drill");
+    brep.validate().expect("the blind drill validates");
+    // The formal V − E + F counts a face with a hole one above its
+    // surface Euler (the tube precedent: the torus reads 2 with its
+    // two annular caps) — the drill's sphere reads 3 with its one
+    // notched mantle.
+    assert_eq!(
+        brep.euler_characteristic(),
+        3,
+        "drill: sphere + one holed face"
+    );
+    assert_oriented_closed_shell(brep, "the blind drill");
+    // Six faces: a's notched mantle, b's wall, b's two lens caps,
+    // a's two full caps.
+    assert_eq!(brep.faces.len(), 6, "the drill's six faces");
+    let planes: Vec<usize> = brep.faces.iter().map(|f| f.wires.len()).collect();
+    // The notched mantle carries two wires (outer + hole); the four
+    // caps carry one each; the wall one.
+    assert_eq!(
+        planes.iter().filter(|w| **w == 2).count(),
+        1,
+        "one two-wire face (the notch)"
+    );
+
+    // Volume: a minus the lens prism over b's range.
+    approx(
+        brep_volume(brep).unwrap(),
+        std::f64::consts::PI * r1 * r1 * h1 - lens * h2,
+        "the blind drill volume",
+    );
+    // Area: a's full caps + a's mantle minus the notch + b's wall +
+    // the two lens caps.
+    approx(
+        brep_area(brep).unwrap(),
+        2.0 * std::f64::consts::PI * r1 * r1
+            + (std::f64::consts::TAU * r1 * h1 - r1 * th1 * h2)
+            + r2 * th2 * h2
+            + 2.0 * lens,
+        "the blind drill area",
+    );
+    // b's wall is the reversed face.
+    let walls: Vec<&fc_part::topology::TopoFace> = brep
+        .faces
+        .iter()
+        .filter(|f| surface_kind(f) == "Cylinder" && matches!(&f.surface, Surface::Cylinder { origin, radius, .. } if (origin.x - o2s.x).abs() < 1e-9 && (radius - r2).abs() < 1e-9))
+        .collect();
+    assert_eq!(walls.len(), 1, "one wall face of b");
+    assert!(walls[0].reversed, "the drill's wall is reversed");
+
+    // Round-trips losslessly.
+    let mut bytes = Vec::new();
+    write_brep(&mut bytes, brep).expect("FCBREP write");
+    let back = read_brep_bytes(&bytes).expect("round-trip parse");
+    assert!(back == *brep, "the drill round-trips byte-identically");
+}
+
+#[test]
+fn cyl_cyl_one_sided_and_edge_drills_refuse_by_name() {
+    // b crossing exactly one of a's ends: the split-circle mantles
+    // are a later slice — refused by name, honestly.
+    let (o1, a, r1, h1, o2, _, r2, _) = cc_pair();
+    // b's bottom flush with a's bottom, top strictly inside.
+    let o2f = v3(o2.x, o2.y, o2.z);
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2f, a, r2, 2.0)
+        .expect("one-sided");
+    expect_refused(&cut, "slice", "the one-sided drill");
+    // b sticking out the bottom, top strictly inside.
+    let o2u = v3(o2.x - a.x, o2.y - a.y, o2.z - a.z);
+    let cut = cylinder_cylinder_boolean(BooleanOp::Cut, o1, a, r1, h1, o2u, a, r2, 2.0)
+        .expect("one-sided out");
+    expect_refused(&cut, "slice", "the one-sided out drill");
 }

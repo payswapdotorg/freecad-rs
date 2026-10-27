@@ -796,15 +796,19 @@ fn cylinder_face(
     }
     let (rims, ellipse, arcs) = strip_rims(&ctx, o, axis, Some(radius), false)?;
     if !arcs.is_empty() {
-        // The K3d arc-trimmed strip: the swept angular interval
-        // between two heights (the crossing boolean's side face).
-        if !rims.is_empty() || ellipse.is_some() {
+        if ellipse.is_some() {
             return Err(format!(
-                "face {i}: a mixed rim/arc cylinder strip — the notch mantles are \
-                 a later slice"
+                "face {i}: a mixed ellipse/arc cylinder strip — not a trim this \
+                 reader knows"
             ));
         }
-        return cylinder_arc_strip(ctx, o, axis, radius, arcs);
+        // The K3d arc-trimmed strips: the standalone side face (arcs
+        // only) or the notched mantle (two circle rims + the window's
+        // arcs as a hole wire).
+        if rims.is_empty() {
+            return cylinder_arc_strip(ctx, o, axis, radius, arcs);
+        }
+        return cylinder_notched_strip(ctx, o, axis, radius, &rims, &arcs);
     }
     if let Some(e) = ellipse {
         // The composed oblique section: ONE circle rim + the elliptical
@@ -843,34 +847,27 @@ fn cylinder_face(
     Ok((area, flux))
 }
 
-/// The arc-trimmed cylinder strip (the K3d crossing booleans' side
-/// faces): the swept region `u ∈ I × v ∈ [v_lo, v_hi]`, bounded by the
-/// two arc chains at `v_lo` and `v_hi` (the same angular interval
-/// `I`, swept) and the two crossing generators between them.
-///
-/// * Area `= R·|Δθ|·(v_hi − v_lo)`.
-/// * Flux `= σR(v_hi − v_lo)(R|Δθ| + o·W)` with
-///   `W = ∫_I r̂ dθ` — `p·r̂ = o·r̂(u) + R` on the cylinder, the
-///   origin's coupling with `r̂` surviving the partial turn as `W`.
-///
-/// The arcs' circles are re-derived (`conic_arc_of`), verified
-/// coaxial and of the surface's radius; the two heights' chains must
-/// cover the same interval; the remaining edges must be generator
-/// glue (vertical, at the interval's ends).
-fn cylinder_arc_strip(
-    ctx: FaceRef<'_>,
+/// Verify a cylinder face's conic-arc trims and derive the swept
+/// window they bound: the `(θ_start, total signed sweep, w_lo, w_hi)`
+/// of the angular interval × height window the arcs chain to (the
+/// crossing boolean's notch or side face). The arcs' circles are
+/// re-derived (`conic_arc_of`), verified coaxial and of the surface's
+/// radius; the two heights' chains must cover the same interval; the
+/// remaining non-arc edges must be generator glue — the window's
+/// verticals at the interval's ends (and, with
+/// `allow_full_generators`, the seam of a notched mantle, a
+/// full-height generator at any angle).
+fn analyze_arc_trims(
+    ctx: &FaceRef<'_>,
     o: Vector3,
     axis: Vector3,
     radius: f64,
-    arcs: Vec<ArcRim>,
-) -> Result<(f64, f64), String> {
+    arcs: &[ArcRim],
+    allow_full_generators: bool,
+) -> Result<(f64, f64, f64, f64), String> {
     let FaceRef {
-        brep,
-        face,
-        i,
-        sigma,
-        tol,
-    } = ctx;
+        brep, face, i, tol, ..
+    } = *ctx;
     let x_hat = match &face.surface {
         Surface::Cylinder { ref_dir, .. } => *ref_dir,
         _ => unreachable!("checked by the caller"),
@@ -879,7 +876,7 @@ fn cylinder_arc_strip(
     // Verify each arc against the surface, and collect its height and
     // its signed sweep around the surface axis.
     let mut info: Vec<(f64, f64, usize)> = Vec::with_capacity(arcs.len());
-    for (ei, arc) in &arcs {
+    for (ei, arc) in arcs {
         let ei = *ei;
         if (arc.radius - radius).abs() > tol {
             return Err(format!(
@@ -937,8 +934,8 @@ fn cylinder_arc_strip(
             heights.len()
         ));
     }
-    let (v_lo, v_hi) = (heights[0].min(heights[1]), heights[0].max(heights[1]));
-    if v_hi - v_lo <= tol {
+    let (w_lo, w_hi) = (heights[0].min(heights[1]), heights[0].max(heights[1]));
+    if w_hi - w_lo <= tol {
         return Err(format!(
             "face {i}: a degenerate (zero-height) arc-trimmed strip"
         ));
@@ -950,13 +947,13 @@ fn cylinder_arc_strip(
             1
         }
     };
-    let mut v_lo_group: Vec<usize> = Vec::new();
-    let mut v_hi_group: Vec<usize> = Vec::new();
+    let mut group_a: Vec<usize> = Vec::new();
+    let mut group_b: Vec<usize> = Vec::new();
     for (k, &(v, _, _)) in info.iter().enumerate() {
         if group_of(v) == 0 {
-            v_lo_group.push(k);
+            group_a.push(k);
         } else {
-            v_hi_group.push(k);
+            group_b.push(k);
         }
     }
 
@@ -965,7 +962,6 @@ fn cylinder_arc_strip(
     // crossing generator at the interval's start to the one at its
     // end). Returns (θ_start, total signed sweep).
     let chain_of = |group: &[usize]| -> Result<(f64, f64), String> {
-        // The head: an arc whose start vertex is no arc's end.
         let head = (0..group.len())
             .find(|&h| {
                 let sv = brep.edges[info[group[h]].2].start;
@@ -975,7 +971,6 @@ fn cylinder_arc_strip(
                     .any(|(a, &k)| a != h && brep.edges[info[k].2].end == sv)
             })
             .ok_or_else(|| format!("face {i}: arc trims that do not chain"))?;
-        // Follow the chain.
         let mut order = Vec::with_capacity(group.len());
         let mut current = group[head];
         loop {
@@ -998,8 +993,8 @@ fn cylinder_arc_strip(
         let total: f64 = order.iter().map(|&k| info[k].1).sum();
         Ok((theta, total))
     };
-    let (th1, total1) = chain_of(&v_lo_group)?;
-    let (th2, total2) = chain_of(&v_hi_group)?;
+    let (th1, total1) = chain_of(&group_a)?;
+    let (th2, total2) = chain_of(&group_b)?;
     let wrap = |d: f64| {
         let mut d = d;
         while d > std::f64::consts::PI {
@@ -1021,8 +1016,9 @@ fn cylinder_arc_strip(
         return Err(format!("face {i}: a zero-sweep arc-trimmed strip"));
     }
 
-    // The remaining edges: generator glue — vertical, at the
-    // interval's two ends.
+    // The remaining edges: generator glue — the window's verticals at
+    // the interval's two ends, plus (for a notched mantle) full-height
+    // seam generators.
     let arc_set: Vec<usize> = arcs.iter().map(|p| p.0).collect();
     let end_angles = [theta, theta + total];
     for wire in &face.wires {
@@ -1032,22 +1028,38 @@ fn cylinder_arc_strip(
             }
             let edge = &brep.edges[we.edge];
             match &edge.curve {
+                // The notched mantle's outer boundary: closed circle
+                // rims (checked coaxial and of the surface's radius
+                // by the caller's rim reading).
+                Curve::Circle { .. } if edge.start == edge.end => {
+                    if !allow_full_generators {
+                        return Err(format!("face {i}: a closed rim on the arc strip"));
+                    }
+                }
                 Curve::Line { .. } | Curve::Bspline { degree: 1, .. } => {
+                    let mut angles = Vec::with_capacity(2);
+                    let mut vs = Vec::with_capacity(2);
                     for &vx in &[edge.start, edge.end] {
                         let p = brep.vertices[vx].point;
                         let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
-                        let v = off.dot(&axis);
-                        if (v - v_lo).abs() > tol && (v - v_hi).abs() > tol {
-                            return Err(format!(
-                                "face {i}: a non-arc edge ending off the boundary planes"
-                            ));
-                        }
-                        let th = off.dot(&y_hat).atan2(off.dot(&x_hat));
-                        if !end_angles.iter().any(|&e| wrap(th - e).abs() <= 1e-7) {
-                            return Err(format!(
-                                "face {i}: a non-arc edge off the interval's generators"
-                            ));
-                        }
+                        vs.push(off.dot(&axis));
+                        angles.push(off.dot(&y_hat).atan2(off.dot(&x_hat)));
+                    }
+                    let same_generator = wrap(angles[0] - angles[1]).abs() <= 1e-7;
+                    if !same_generator {
+                        return Err(format!("face {i}: a non-arc trim not on a generator"));
+                    }
+                    let at_interval_end = end_angles
+                        .iter()
+                        .any(|&e| wrap(angles[0] - e).abs() <= 1e-7);
+                    let window_vertical = at_interval_end
+                        && (vs[0] - w_lo).abs() <= tol
+                        && (vs[1] - w_hi).abs() <= tol;
+                    let full_generator = allow_full_generators && (vs[0] - w_lo).abs() > tol;
+                    if !window_vertical && !full_generator {
+                        return Err(format!(
+                            "face {i}: a non-arc edge off the window's generators"
+                        ));
                     }
                 }
                 _ => {
@@ -1058,21 +1070,109 @@ fn cylinder_arc_strip(
             }
         }
     }
+    Ok((theta, total, w_lo, w_hi))
+}
 
-    // The swept interval, positively oriented: [a, a + |total|].
+/// The arc window's area and flux contributions:
+/// `A = R·|Δθ|·Δv`, `F = R·Δv·(R|Δθ| + o·W)` with
+/// `W = ∫_I r̂ dθ` — `p·r̂ = o·r̂(u) + R` on the cylinder, the
+/// origin's coupling with `r̂` surviving the partial turn as `W`.
+fn arc_window_terms(
+    o: Vector3,
+    x_hat: Vector3,
+    y_hat: Vector3,
+    radius: f64,
+    theta: f64,
+    total: f64,
+    dv: f64,
+) -> (f64, f64) {
     let a = theta + total.min(0.0);
     let b = theta + total.max(0.0);
-    let dv = v_hi - v_lo;
     let width = total.abs();
     let area = radius * width * dv;
-    // W = ∫_a^b r̂ dθ = (sin b − sin a)·x̂ + (cos a − cos b)·ŷ.
     let w = v3(
         (b.sin() - a.sin()) * x_hat.x + (a.cos() - b.cos()) * y_hat.x,
         (b.sin() - a.sin()) * x_hat.y + (a.cos() - b.cos()) * y_hat.y,
         (b.sin() - a.sin()) * x_hat.z + (a.cos() - b.cos()) * y_hat.z,
     );
-    let flux = sigma * radius * dv * (radius * width + o.dot(&w));
-    Ok((area, flux))
+    let flux = radius * dv * (radius * width + o.dot(&w));
+    (area, flux)
+}
+
+/// The standalone arc-trimmed cylinder strip (the K3d crossing
+/// booleans' side faces): the swept region `u ∈ I × v ∈ [w_lo, w_hi]`.
+fn cylinder_arc_strip(
+    ctx: FaceRef<'_>,
+    o: Vector3,
+    axis: Vector3,
+    radius: f64,
+    arcs: Vec<ArcRim>,
+) -> Result<(f64, f64), String> {
+    let FaceRef { face, sigma, .. } = ctx;
+    let x_hat = match &face.surface {
+        Surface::Cylinder { ref_dir, .. } => *ref_dir,
+        _ => unreachable!("checked by the caller"),
+    };
+    let y_hat = axis.cross(&x_hat);
+    let (theta, total, w_lo, w_hi) = analyze_arc_trims(&ctx, o, axis, radius, &arcs, false)?;
+    let (area, flux) = arc_window_terms(o, x_hat, y_hat, radius, theta, total, w_hi - w_lo);
+    Ok((area, sigma * flux))
+}
+
+/// The notched mantle (the K3d blind drill): the full strip between
+/// two section-circle rims with the arc window cut out of its middle
+/// — the outer wire the K1 mantle pattern, the hole wire the window's
+/// arcs and verticals. Area and flux are the full strip minus the
+/// window's.
+fn cylinder_notched_strip(
+    ctx: FaceRef<'_>,
+    o: Vector3,
+    axis: Vector3,
+    radius: f64,
+    rims: &[CircleRim],
+    arcs: &[ArcRim],
+) -> Result<(f64, f64), String> {
+    let FaceRef {
+        face,
+        i,
+        sigma,
+        tol,
+        ..
+    } = ctx;
+    if rims.len() != 2 {
+        return Err(format!(
+            "face {i}: a notched mantle needs exactly two circle rims, found {}",
+            rims.len()
+        ));
+    }
+    let v: Vec<f64> = rims
+        .iter()
+        .map(|(cc, _)| v3(cc.x - o.x, cc.y - o.y, cc.z - o.z).dot(&axis))
+        .collect();
+    let (v0, v1) = (v[0].min(v[1]), v[0].max(v[1]));
+    if v1 - v0 <= tol {
+        return Err(format!(
+            "face {i}: a degenerate (zero-height) notched mantle"
+        ));
+    }
+    let x_hat = match &face.surface {
+        Surface::Cylinder { ref_dir, .. } => *ref_dir,
+        _ => unreachable!("checked by the caller"),
+    };
+    let y_hat = axis.cross(&x_hat);
+    let (theta, total, w_lo, w_hi) = analyze_arc_trims(&ctx, o, axis, radius, arcs, true)?;
+    // The window sits strictly inside the strip (a window touching a
+    // rim is not the hole structure — that face would carry the
+    // split-circle wire of a later slice).
+    if w_lo - v0 <= tol || v1 - w_hi <= tol {
+        return Err(format!(
+            "face {i}: the notch reaches a rim — the split-circle mantle is a later slice"
+        ));
+    }
+    let full_area = 2.0 * std::f64::consts::PI * radius * (v1 - v0);
+    let full_flux = 2.0 * std::f64::consts::PI * radius * radius * (v1 - v0);
+    let (win_area, win_flux) = arc_window_terms(o, x_hat, y_hat, radius, theta, total, w_hi - w_lo);
+    Ok((full_area - win_area, sigma * (full_flux - win_flux)))
 }
 
 /// The ellipse-trimmed cylinder strip: the region between the rim

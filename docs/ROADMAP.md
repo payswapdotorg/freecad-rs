@@ -505,14 +505,20 @@ behind us.
       `∫(x dy − y dx) = R²Δθ + c × Δp` per arc, strips as swept
       angular intervals (`F = σRΔv(R|Δθ| + o·W)`). Volumes verify
       against the classical lens-area prisms and the partition
-      identities to 1e-12. Honest refusals by name: the Steinmetz
-      quartic (non-parallel axes, K3a's own), the staggered
-      cut/fuse and drill (the notch mantles — a later slice), the
-      pinched tube of the internal cross-tangency (measure zero),
-      tangent/disjoint fuses, and the coincident-to-machine-precision
-      reading of ulp-scale axis residues. Remaining for full K3
-      closure: the coaxial boolean families (cylinder×sphere, the
-      capsule cuts) and the staggered notch mantles.
+      identities to 1e-12. The **blind drill** (K3d-2, same day):
+      the tool strictly inside the target's range — the notched
+      mantle (the outer wire the K1 rim pattern, the hole wire the
+      lens window; the measure reads the full strip minus the swept
+      window), the tool's wall, its two lens caps, and the target's
+      full caps. Honest refusals by name: the Steinmetz
+      quartic (non-parallel axes, K3a's own), the one-sided drills
+      and the staggered fuse (the split-circle mantles — a later
+      slice), the pinched tube of the internal cross-tangency
+      (measure zero), tangent/disjoint fuses, and the
+      coincident-to-machine-precision reading of ulp-scale axis
+      residues. Remaining for full K3 closure: the coaxial boolean
+      families (cylinder×sphere, the capsule cuts) and the
+      split-circle mantles.
 - [ ] **K4** NURBS support and general booleans — subsurface
       classification, trimming
 - [ ] **K5** fillets, chamfers, offsets
