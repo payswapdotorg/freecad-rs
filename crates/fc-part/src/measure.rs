@@ -852,6 +852,58 @@ fn strip_rims(
                     }
                     rims.push((*center, *rho));
                 }
+                Curve::Circle {
+                    center,
+                    axis: c_axis,
+                    radius: rho,
+                    ..
+                } if edge.start != edge.end => {
+                    // An OPEN circle edge — an arc rim read verbatim
+                    // from a real conic (the OCCT reader's trimmed
+                    // circles): same coaxial/radius contract as the
+                    // closed rims, sweep straight from the range (the
+                    // curve parameter runs CCW around its axis).
+                    if *rho <= 0.0 {
+                        return Err(format!("face {i}: an arc rim of radius {rho}"));
+                    }
+                    if let Some(r) = radius {
+                        if (*rho - r).abs() > tol {
+                            return Err(format!(
+                                "face {i}: an arc of radius {rho} on a radius-{r} surface — \
+                                 not a section circle"
+                            ));
+                        }
+                    }
+                    let off = v3(center.x - o.x, center.y - o.y, center.z - o.z);
+                    let along = off.dot(&axis);
+                    let residual = v3(
+                        off.x - axis.x * along,
+                        off.y - axis.y * along,
+                        off.z - axis.z * along,
+                    );
+                    if residual.length() > tol {
+                        return Err(format!("face {i}: an arc rim not coaxial with the surface"));
+                    }
+                    if c_axis.cross(&axis).length() > 1e-9 {
+                        return Err(format!(
+                            "face {i}: an arc rim whose plane is not perpendicular to the \
+                             surface axis"
+                        ));
+                    }
+                    let sweep = edge.range.1 - edge.range.0;
+                    if !(sweep > 0.0 && sweep <= 2.0 * std::f64::consts::PI + tol) {
+                        return Err(format!("face {i}: an arc rim of sweep {sweep}"));
+                    }
+                    arcs.push((
+                        we.edge,
+                        ConicArc {
+                            center: *center,
+                            normal: *c_axis,
+                            radius: *rho,
+                            sweep,
+                        },
+                    ));
+                }
                 Curve::Ellipse {
                     center,
                     axis: e_axis,
@@ -1660,7 +1712,7 @@ fn torus_face(
     let FaceRef {
         brep,
         face,
-        i,
+        i: _,
         sigma,
         tol,
     } = ctx;
@@ -1699,9 +1751,135 @@ fn torus_face(
         let flux = sigma * 6.0 * pi * pi * r_major * r_minor * r_minor;
         Ok((area, flux))
     } else {
-        Err(format!(
-            "face {i}: a torus face with an unrecognized trim — only the full torus has a \
-             closed form here"
-        ))
+        torus_band(ctx, c, r_major, r_minor)
     }
+}
+
+/// A trimmed torus band — the fillet-class face: two closed rim
+/// circles coaxial with the torus and lying ON it (each at its own
+/// `v`), the rest seam glue. The area and the `p·n̂` flux integrate
+/// in closed form over `[v0, v1] × [0, 2π]`:
+///
+/// * `|xu × xv| = r·(R + r·cos v)` — the area element;
+/// * `x·n̂ = R·cos v + r` — the position–normal product (the outward
+///   normal of the natural parameterization).
+///
+/// `v = 0..2π` reproduces the full torus (the check on the existing
+/// path); a band is any subinterval with strictly increasing `v`.
+fn torus_band(
+    ctx: FaceRef<'_>,
+    c: Vector3,
+    r_major: f64,
+    r_minor: f64,
+) -> Result<(f64, f64), String> {
+    let FaceRef {
+        brep,
+        face,
+        i,
+        sigma,
+        tol,
+    } = ctx;
+    let axis = match &ctx.face.surface {
+        Surface::Torus { axis, .. } => *axis,
+        _ => unreachable!("checked by the caller"),
+    };
+    let on_torus = |p: Vector3| -> bool {
+        let q = v3(p.x - c.x, p.y - c.y, p.z - c.z);
+        let z = q.dot(&axis);
+        let radial = v3(q.x - axis.x * z, q.y - axis.y * z, q.z - axis.z * z);
+        let rho = (radial.x * radial.x + radial.y * radial.y).sqrt();
+        ((rho - r_major) * (rho - r_major) + z * z - r_minor * r_minor).abs() <= tol * r_minor
+    };
+    let mut vs: Vec<f64> = Vec::new();
+    for wire in &face.wires {
+        for we in &wire.edges {
+            let edge = &brep.edges[we.edge];
+            match &edge.curve {
+                Curve::Circle { center, radius, .. } if edge.start == edge.end => {
+                    // The rim circle: coaxial (its center on the
+                    // axis), at height `z` along it, with its own
+                    // radius `rho` — on the torus exactly when
+                    // (rho − R)² + z² = r².
+                    let off = v3(center.x - c.x, center.y - c.y, center.z - c.z);
+                    let z = off.dot(&axis);
+                    let radial = v3(off.x - axis.x * z, off.y - axis.y * z, off.z - axis.z * z);
+                    if radial.length() > tol {
+                        return Err(format!(
+                            "face {i}: a torus band rim not coaxial with the surface"
+                        ));
+                    }
+                    let rho = *radius;
+                    if ((rho - r_major) * (rho - r_major) + z * z - r_minor * r_minor).abs()
+                        > tol * r_minor
+                    {
+                        return Err(format!(
+                            "face {i}: a torus band rim not on the surface ((rho − R)² + z² \
+                             ≠ r²)"
+                        ));
+                    }
+                    let v = z.atan2(rho - r_major);
+                    vs.push(v);
+                }
+                _ if on_torus(edge.curve.point(edge.range.0))
+                    && on_torus(edge.curve.point((edge.range.0 + edge.range.1) / 2.0))
+                    && on_torus(edge.curve.point(edge.range.1)) =>
+                {
+                    // Seam glue: any curve whose sampled points lie on
+                    // the surface (the pinned NURBS seam arcs of the
+                    // OCCT reader included).
+                }
+                _ => {
+                    return Err(format!(
+                        "face {i}: a torus face with an unrecognized trim ({} edges) — only \
+                         the full torus and two-rim bands have a closed form here",
+                        edge.curve.kind_name()
+                    ))
+                }
+            }
+        }
+    }
+    if vs.len() != 2 {
+        return Err(format!(
+            "face {i}: a torus band needs exactly two rim circles, found {}",
+            vs.len()
+        ));
+    }
+    let (v0, v1) = if vs[0] <= vs[1] {
+        (vs[0], vs[1])
+    } else {
+        (vs[1], vs[0])
+    };
+    if v1 - v0 <= tol {
+        return Err(format!("face {i}: a degenerate (zero-sweep) torus band"));
+    }
+    if v1 - v0 > 2.0 * std::f64::consts::PI + tol {
+        return Err(format!(
+            "face {i}: a torus band sweeping more than a full turn"
+        ));
+    }
+    let pi = std::f64::consts::PI;
+    let r = r_minor;
+    let big_r = r_major;
+    let dv = v1 - v0;
+    let dsin = v1.sin() - v0.sin();
+    let dsin2 = (2.0 * v1).sin() - (2.0 * v0).sin();
+    let dsin_sq = v1.sin() * v1.sin() - v0.sin() * v0.sin();
+    // Area: ∫∫ r(R + r·cos v) = 2π·r·(R·Δv + r·Δsin).
+    let area = 2.0 * pi * r * (big_r * dv + r * dsin);
+    // Flux: ∫∫ (x·n̂)·r(R + r·cos v) with x·n̂ = R·cos v + r + c·n̂
+    // and c·n̂ = cos v·(c·ring u) + sin v·(c·â) — the ring term dies
+    // over the full turn, the axial one stays:
+    // = 2π·r·[R²·Δsin + Rr·(Δv/2 + Δsin2/4) + Rr·Δv + r²·Δsin
+    //          + (c·â)·(R·(cos v0 − cos v1) + (r/2)·Δsin²)].
+    let c_axis = c.dot(&axis);
+    let flux = sigma
+        * 2.0
+        * pi
+        * r
+        * (big_r * big_r * dsin
+            + big_r * r * (dv / 2.0 + dsin2 / 4.0)
+            + big_r * r * dv
+            + r * r * dsin
+            + c_axis * (big_r * (v0.cos() - v1.cos()) + r * dsin_sq / 2.0));
+    Ok((area, flux))
 }

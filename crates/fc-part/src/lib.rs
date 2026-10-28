@@ -8,15 +8,17 @@
 //! `fc-app` recompute loop.
 //!
 //! What is **not** implemented (and honestly so): fillets, chamfers,
-//! OCCT BRep interoperability, and B-spline *booleans* (the exact
-//! topology model with NURBS curves/surfaces exists — [`topology`],
-//! K1 — and general intersections on it are K3/K4 work; the analytic
-//! intersection pairs are K3a, [`intersect`]). Booleans run
-//! on tessellations with exact classification (see [`exact`]) — the
-//! volumes of curved operands agree to their deflection, and planar
-//! operands exactly. Exact B-rep booleans on the analytic pairs and
-//! exact measurement of the composed solids are the K3 series
-//! ([`brep_boolean`], [`measure`]).
+//! and B-spline *booleans* (the exact topology model with NURBS
+//! curves/surfaces exists — [`topology`], K1 — and general
+//! intersections on it are K3/K4 work; the analytic intersection
+//! pairs are K3a, [`intersect`]). Booleans run on tessellations with
+//! exact classification (see [`exact`]) — the volumes of curved
+//! operands agree to their deflection, and planar operands exactly.
+//! Exact B-rep booleans on the analytic pairs and exact measurement
+//! of the composed solids are the K3 series ([`brep_boolean`],
+//! [`measure`]). Real OCCT `.brp` payloads — the shapes FreeCAD
+//! itself saves — are read into the exact model by [`occt_brp`]
+//! (K4), with the tolerance-pinned reconciliation described there.
 
 mod exact;
 
@@ -26,6 +28,7 @@ pub mod brep_boolean;
 pub mod features;
 pub mod intersect;
 pub mod measure;
+pub mod occt_brp;
 pub mod partdesign;
 pub mod profile;
 pub mod shape;
@@ -36,6 +39,7 @@ pub use features::{
     mesh_of, shape_of, BooleanFeature, BooleanKind, BoxFeature, ConeFeature, CylinderFeature,
     MeshFeature, MirroringFeature, SphereFeature, TorusFeature, TransformFeature,
 };
+pub use occt_brp::{read_occt_brp, OcctRead, OcctReadReport};
 pub use partdesign::{PadFeature, PocketFeature, RevolutionFeature};
 pub use profile::{
     classify_wires, extract_wires, extrude, revolve, Point2, ProfileError, Wire,

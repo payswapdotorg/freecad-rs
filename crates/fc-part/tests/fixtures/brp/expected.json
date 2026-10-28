@@ -1,0 +1,87 @@
+{
+ "generator": "ocp 0.1.9 (OCCT 7.8.x) via BRepTools.Write_s",
+ "cases": {
+  "box": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48
+  },
+  "cylinder": {
+   "volume": 125.6637061435917,
+   "area": 150.79644737231004,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "cone": {
+   "volume": 95.29497715889039,
+   "area": 122.90048551785824,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "sphere": {
+   "volume": 523.5987755982989,
+   "area": 314.1592653589792,
+   "faces": 1,
+   "edges": 4,
+   "vertices": 8
+  },
+  "torus": {
+   "volume": 631.6546816697189,
+   "area": 631.654681669719,
+   "faces": 1,
+   "edges": 4,
+   "vertices": 8
+  },
+  "cylinder_located": {
+   "volume": 125.6637061435917,
+   "area": 150.79644737231004,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12,
+   "world_vertices": [
+    [
+     1.5980762113533165,
+     3.2320508075688767,
+     3.0
+    ],
+    [
+     1.5980762113533165,
+     3.2320508075688767,
+     13.0
+    ]
+   ]
+  },
+  "cyl_oblique_cut": {
+   "volume": 169.6460033385664,
+   "area": 172.9833357258389,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "fillet_box": {
+   "volume": 283.59881577988904,
+   "area": 300.5486677570851,
+   "faces": 8,
+   "edges": 34,
+   "vertices": 68
+  },
+  "cyl_top_fillet": {
+   "volume": 600.0129133178817,
+   "area": 365.953832786186,
+   "faces": 5,
+   "edges": 14,
+   "vertices": 28
+  },
+  "bspline_face": {
+   "volume": -3.9111111111111114,
+   "area": 16.422010002708706,
+   "faces": 1,
+   "edges": 4,
+   "vertices": 8
+  }
+ }
+}
