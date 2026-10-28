@@ -32,6 +32,7 @@ pub mod occt_brp;
 pub mod partdesign;
 pub mod profile;
 pub mod shape;
+pub mod tessellate;
 pub mod topology;
 
 pub use brep::{read_brep_bytes, read_shape_bytes, write_brep, write_shape, BrpError, BrpFormat};
@@ -46,4 +47,5 @@ pub use profile::{
     DEFAULT_PROFILE_DEFLECTION, DEFAULT_TOLERANCE,
 };
 pub use shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
+pub use tessellate::tessellate_brep;
 pub use topology::{Curve, ExactBRep, Surface, TopoEdge, TopoFace, TopoVertex, TopoWire, WireEdge};

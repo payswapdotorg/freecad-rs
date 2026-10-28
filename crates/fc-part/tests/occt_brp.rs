@@ -353,3 +353,33 @@ fn garbage_refuses_with_a_position() {
         "the refusal must say what it is: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// K4-2: the tessellation — the loaded operands become visible solids
+// ---------------------------------------------------------------------------
+
+#[test]
+fn box_tessellates_exactly_watertight() {
+    let data = fixture("box");
+    let read = read_occt_brp(&data).unwrap_or_else(|e| panic!("read failed: {e}"));
+    let exact = brep_volume(&read.brep).unwrap();
+    let mesh = fc_part::tessellate_brep(&read.brep, 0.05)
+        .unwrap_or_else(|e| panic!("tessellation failed: {e}"));
+    assert_eq!(mesh.volume(), exact);
+}
+
+#[test]
+fn curved_faces_tessellation_refuses_by_name() {
+    // The curved-surface domain triangulation is not deflection-true
+    // yet (see `tessellate.rs`): the refusal names the geometry and
+    // the reason — the next K4 slice.
+    for name in ["cylinder", "cone", "sphere", "torus", "cyl_top_fillet"] {
+        let data = fixture(name);
+        let read = read_occt_brp(&data).unwrap();
+        let err = fc_part::tessellate_brep(&read.brep, 0.05).unwrap_err();
+        assert!(
+            err.contains("not deflection-true"),
+            "{name}: the curved-face refusal must name the reason: {err}"
+        );
+    }
+}

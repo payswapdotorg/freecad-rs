@@ -848,6 +848,14 @@ fn triangulate_region(
     outer: &[PolyVert],
     holes: &[Vec<PolyVert>],
 ) -> Result<Vec<[u32; 3]>, ProfileError> {
+    triangulate_region_verts(outer, holes, false)
+}
+
+fn triangulate_region_verts(
+    outer: &[PolyVert],
+    holes: &[Vec<PolyVert>],
+    keep_boundary: bool,
+) -> Result<Vec<[u32; 3]>, ProfileError> {
     let mut poly = outer.to_vec();
     if poly_signed_area(&poly) < 0.0 {
         poly.reverse();
@@ -867,7 +875,7 @@ fn triangulate_region(
     for hi in 0..holes.len() {
         bridge_hole(&mut poly, &holes, hi)?;
     }
-    ear_clip(&poly)
+    ear_clip_opts(&poly, keep_boundary)
 }
 
 /// Splices `holes[hi]` into the merged boundary polygon through a mutually
@@ -1004,7 +1012,12 @@ fn point_strictly_in_triangle(v: Point2, a: Point2, b: Point2, c: Point2) -> boo
 ///
 /// Collinear/degenerate ears (|cross| <= 1e-12) are skipped honestly: the
 /// vertex is removed without emitting a zero-area triangle.
+#[allow(dead_code)] // the single-flag form; every caller routes through the opts
 fn ear_clip(poly: &[PolyVert]) -> Result<Vec<[u32; 3]>, ProfileError> {
+    ear_clip_opts(poly, false)
+}
+
+fn ear_clip_opts(poly: &[PolyVert], keep_boundary: bool) -> Result<Vec<[u32; 3]>, ProfileError> {
     let n = poly.len();
     debug_assert!(n >= 3);
     let mut idx: Vec<usize> = (0..n).collect();
@@ -1026,7 +1039,14 @@ fn ear_clip(poly: &[PolyVert]) -> Result<Vec<[u32; 3]>, ProfileError> {
             let (p0, p1, p2) = (poly[i0].pos, poly[i1].pos, poly[i2].pos);
             let cross = (p1 - p0).cross2(p2 - p1);
             if cross.abs() <= AREA_EPS {
-                // Collinear/zero-area ear: remove the vertex, emit nothing.
+                // Collinear/zero-area ear: remove the vertex; when
+                // the boundary must be kept (the B-rep tessellation's
+                // cross-face vertex correspondence), emit the
+                // degenerate triangle so the vertex survives in the
+                // output with its two boundary edges.
+                if keep_boundary {
+                    tris.push([poly[i0].idx, poly[i1].idx, poly[i2].idx]);
+                }
                 clipped = Some(k);
                 break;
             }
@@ -1073,9 +1093,24 @@ fn ear_clip(poly: &[PolyVert]) -> Result<Vec<[u32; 3]>, ProfileError> {
 /// (e.g. `fc-step`'s planar-face import). Winding is CCW for the
 /// returned triangles around the region's +normal (the plane's
 /// left-hand side of a CCW outer walk).
+pub fn triangulate_planar_region_keep_boundary(
+    outer: &[Point2],
+    holes: &[Vec<Point2>],
+) -> Result<Vec<[u32; 3]>, ProfileError> {
+    triangulate_region_opts(outer, holes, true)
+}
+
 pub fn triangulate_planar_region(
     outer: &[Point2],
     holes: &[Vec<Point2>],
+) -> Result<Vec<[u32; 3]>, ProfileError> {
+    triangulate_region_opts(outer, holes, false)
+}
+
+fn triangulate_region_opts(
+    outer: &[Point2],
+    holes: &[Vec<Point2>],
+    keep_boundary: bool,
 ) -> Result<Vec<[u32; 3]>, ProfileError> {
     // PolyVert.idx is the index into the caller's concatenated point
     // space (outer first, then each hole in order) — the same convention
@@ -1104,7 +1139,7 @@ pub fn triangulate_planar_region(
             poly
         })
         .collect();
-    triangulate_region(&outer_poly, &hole_polys)
+    triangulate_region_verts(&outer_poly, &hole_polys, keep_boundary)
 }
 
 // ---------------------------------------------------------------------------

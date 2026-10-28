@@ -637,10 +637,31 @@ behind us.
       periodic faces, void shells, the mixed arc/elliptical-arc
       corner strip of the straight-edge fillet, and the lone
       B-spline patch (not a closed shell).
-- [ ] **K4-2** NURBS measure and booleans — trimmed B-spline face
-      measure (Gauss–Legendre on polynomial integrands), the
-      mixed-strip fillet corner, and general booleans with subsurface
-      classification and trimming on the loaded operands
+- [x] **K4-2a (landing 2026-10-28)** the exact-model tessellator,
+      `crates/fc-part/src/tessellate.rs` — the infrastructure of the
+      viewer path: every edge discretized once (adaptive sagitta
+      bisection), so faces sharing an edge inherit the same 3D
+      points; per-face parameter-domain triangulation with closed-form
+      UV projection (plus a Gauss–Newton refinement for B-spline
+      surfaces), seam-continuous parameter unwrapping (the periodic
+      seam walks `u = 0` up and `u = 2π` down), degenerate pole edges
+      as the K1 sphere wire's pole lines, and exact-coordinate vertex
+      deduplication. The honest scope: **planar-faced solids
+      tessellate exactly** (the OCCT box reproduces its exact volume
+      bit-for-bit through the mesh); curved faces refuse by name —
+      the 2D ear-clip fans from a corner across the parameter-
+      collinear rim runs (slanted panels through the solid's
+      interior), so a curvature-respecting domain triangulation
+      (constrained interior points — a grid) is the named next slice.
+      The boundary-stitching machinery that re-inserts dropped
+      UV-collinear vertices (splitting the spanning triangle edges)
+      is in place and correct for planar faces; `ear_clip` grew the
+      keep-boundary variant for it.
+- [ ] **K4-2b** the curvature-respecting domain triangulation
+      (constrained interior points), then NURBS measure (Gauss–
+      Legendre on polynomial integrands), the mixed-strip fillet
+      corner, and general booleans with subsurface classification
+      and trimming on the loaded operands
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)
