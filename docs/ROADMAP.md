@@ -657,8 +657,42 @@ behind us.
       UV-collinear vertices (splitting the spanning triangle edges)
       is in place and correct for planar faces; `ear_clip` grew the
       keep-boundary variant for it.
-- [ ] **K4-2b** the curvature-respecting domain triangulation
-      (constrained interior points), then NURBS measure (Gauss–
+- [x] **K4-2b** the curvature-respecting domain triangulation —
+      DONE (2026-10-28). `tessellate_brep` now triangulates the
+      analytic curved five (cylinder, cone, sphere, torus, and
+      torus/cylinder bands such as the top fillet) in their parameter
+      domains: the boundary walk splits into two u-monotone chains,
+      curvature-respecting grid rows (the same sagitta discipline the
+      rim sampler applies) stack between them, a two-pointer band
+      merge tiles the stack directly (the rim chains enter as genuine
+      boundary edges, bit-exact against the neighboring face), and a
+      deflection referee splits any interior edge whose chord or
+      panel whose center misses the surface by more than the
+      deflection. Periodic seams close through shared-point columns
+      (one evaluated Vector3 per level, both sides); pole runs
+      collapse onto the one 3D pole vertex with the fan emerging from
+      the merges. Fixes that landed with it: the sphere's pole-vertex
+      u is atan2 of noise (the walk now inherits its u at the axis),
+      the pole line's v comes from the closed-form inversion (not the
+      walk's last sample), and the torus branch of `surface_uv_of`
+      returned the *complement* of v (asin of the cosine — now the
+      atan2 of z against rho − R). Acceptance: cylinder, cone,
+      sphere, torus, located cylinder and the top fillet tessellate
+      watertight (every directed edge once each way), deflection-true
+      at the chord midpoints, with inscribed volume/area deficits
+      inside the measured polygonal tolerances (cylinder r=2 d=0.05:
+      2.712e-2, tolerance 3.0e-2) that quarter when the deflection
+      quarters. Known limitation, named: the oblique elliptical cut
+      (`cyl_oblique_cut`) — where the rim's window over the mantle
+      pinches to a single cell, the seam column's closing edges lack
+      a carrier (9 unpaired edges at d=0.05; volume and area already
+      within tolerance) — the corner-carrier fix is the next slice,
+      and its test carries an `#[ignore]` naming exactly that.
+      B-spline faces still refuse by name (no curvature estimate yet
+      drives a grid over the patch), as do hole-trimmed faces and
+      non-monotone (non-band) trims.
+- [ ] **K4-2c** the wavy-band seam corner (the oblique cut's
+      single-cell window carrier), then NURBS measure (Gauss–
       Legendre on polynomial integrands), the mixed-strip fillet
       corner, and general booleans with subsurface classification
       and trimming on the loaded operands

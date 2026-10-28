@@ -722,7 +722,7 @@ fn attach_edge(
 /// Even-odd ray cast (PNPOLY): strictly inside when the crossings are odd.
 /// A point exactly on the boundary is unstable by design — the nesting
 /// classifier documents that as "on-boundary counts as outside".
-fn point_in_polygon(p: Point2, poly: &[Point2]) -> bool {
+pub(crate) fn point_in_polygon(p: Point2, poly: &[Point2]) -> bool {
     let mut inside = false;
     let mut j = poly.len() - 1;
     for (i, b) in poly.iter().enumerate() {
