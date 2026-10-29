@@ -392,7 +392,7 @@ fn load_report_is_sensible_for_imperfect_archives() {
         report
             .warnings
             .iter()
-            .any(|w| w.contains("OCCT BRep shape not modeled")),
+            .any(|w| w.contains("OCCT BRep payload rejected by the reader")),
         "warnings: {:?}",
         report.warnings
     );

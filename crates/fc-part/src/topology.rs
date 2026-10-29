@@ -790,7 +790,8 @@ pub struct ExactBRep {
 
 impl ExactBRep {
     /// The exact topology of an analytic primitive. Mesh shapes have
-    /// no exact topology — that is the honest refusal.
+    /// no exact topology — that is the honest refusal. A `Brep` shape
+    /// already IS the exact model: the identity, no rebuild.
     pub fn from_shape(shape: &TopoShape) -> Result<ExactBRep, String> {
         match shape {
             TopoShape::Box {
@@ -806,6 +807,7 @@ impl ExactBRep {
                 height,
             } => Ok(cone_topology(*radius1, *radius2, *height)),
             TopoShape::Torus { radius1, radius2 } => Ok(torus_topology(*radius1, *radius2)),
+            TopoShape::Brep(brep) => Ok(brep.clone()),
             TopoShape::Mesh(_) => Err(
                 "mesh shapes carry no exact topology — the exact model covers the analytic primitives".to_string(),
             ),

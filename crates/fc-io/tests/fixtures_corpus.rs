@@ -246,11 +246,14 @@ fn partdesign_body_loads_per_expectations() {
         .expect("Pad is a PadFeature");
 
     // Gate 3: the OCCT .brp payloads (the Pad's own shapes, the Body
-    // and Sketch shapes) are skipped with THE documented warning, while
-    // the readable parameters load.
+    // and Sketch shapes) are rejected by the exact-model reader (K4-1
+    // covers the analytic-and-wire dialect these fixtures push past:
+    // negative references, wire roots) — skipped with THE documented
+    // warning, the reader's own reason carried in it, while the
+    // readable parameters load.
     assert!(
         report.warnings.iter().any(|w| w.contains("Pad")
-            && w.contains("OCCT BRep shape not modeled")
+            && w.contains("OCCT BRep payload rejected by the reader")
             && w.contains("geometry skipped (parameters kept)")
             && w.contains("payload preserved verbatim for round-trip")),
         "documented .brp warning (skipped AND preserved): {:?}",
@@ -477,8 +480,11 @@ fn group_links_load_per_expectations() {
 
     // The whole regenerated corpus file: six objects, nothing skipped,
     // nothing foreign — and every warning a preservation note (the
-    // boxes' .brp shape payloads + FreeCAD 1.0's modern property set
-    // ride in the preservation bag).
+    // boxes' .brp payloads no longer warn at all: they READ — live
+    // `TopoShape::Brep` geometry, the objects Valid instead of
+    // Touched, exactly what a real FreeCAD leaves after its own
+    // restore; FreeCAD 1.0's modern property set rides in the
+    // preservation bag).
     assert_eq!(report.objects, 6);
     assert_eq!(report.skipped, 0);
     assert_eq!(report.foreign, 0);
@@ -486,6 +492,52 @@ fn group_links_load_per_expectations() {
         .warnings
         .iter()
         .all(|w| fc_app::is_preservation_warning(w)));
+
+    // The payloads became geometry: each shape-bearing object carries
+    // the exact model restored from its OCCT bytes (and the objects
+    // are Valid — not Touched — because the geometry is live).
+    for name in ["BoxA", "LeafBox", "LeafSphere"] {
+        let obj = doc.get_by_name(name).unwrap();
+        assert_eq!(
+            shape_of(obj).expect("the payload reads").kind_name(),
+            "Brep",
+            "{name}: the OCCT payload is live exact geometry"
+        );
+        assert_eq!(obj.status().to_string(), "Valid", "{name} restored");
+    }
+    // And the exact measure agrees with the parameters the same file
+    // carries — the corpus' own FreeCAD-authored numbers: BoxA is
+    // L3·W2·H2 = 12, LeafBox L4·W3·H2 = 24, LeafSphere r=1.5. The
+    // payload's OCCT measure and the feature's parameters are two
+    // independent truths of the same box — the exact reader reconciles
+    // them to 1e-9.
+    assert!(
+        (shape_of(doc.get_by_name("BoxA").unwrap())
+            .unwrap()
+            .try_volume()
+            .expect("the box measures")
+            - 3.0 * 2.0 * 2.0)
+            .abs()
+            <= 1e-9
+    );
+    assert!(
+        (shape_of(doc.get_by_name("LeafBox").unwrap())
+            .unwrap()
+            .try_volume()
+            .expect("the box measures")
+            - 4.0 * 3.0 * 2.0)
+            .abs()
+            <= 1e-9
+    );
+    assert!(
+        (shape_of(doc.get_by_name("LeafSphere").unwrap())
+            .unwrap()
+            .try_volume()
+            .expect("the sphere measures")
+            - 4.0 / 3.0 * std::f64::consts::PI * 1.5 * 1.5 * 1.5)
+            .abs()
+            <= 1e-9
+    );
 
     // FreeCAD 1.0's real group type — the hand-authored predecessor's
     // fake `App::DocumentGroup` is gone.
@@ -903,7 +955,9 @@ fn freecad_authored_tangent_symmetric_block_loads_every_constraint() {
     // InternalShape in the older raw stream — both honestly warned).
     let warnings = report.warnings.join("\n");
     let payload_warns = warnings.matches("unknown shape payload format").count()
-        + warnings.matches("OCCT BRep shape not modeled").count();
+        + warnings
+            .matches("OCCT BRep payload rejected by the reader")
+            .count();
     assert!(
         payload_warns >= 2,
         "both BRep payloads are honestly warned: {warnings}"

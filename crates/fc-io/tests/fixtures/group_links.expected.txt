@@ -1,10 +1,10 @@
-Part::Box BoxA Touched
+Part::Box BoxA Valid
   Label = BoxA
   Length = 3
-Part::Box LeafBox Touched
+Part::Box LeafBox Valid
   Label = LeafBox
   Length = 4
-Part::Sphere LeafSphere Touched
+Part::Sphere LeafSphere Valid
   Label = LeafSphere
   Radius = 1.5
 App::DocumentObjectGroup Outer Valid
