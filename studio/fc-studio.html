@@ -545,11 +545,26 @@ function exportSelected(op, ext) {
   const object = state.selected;
   Engine.must({ op, object })
     .then((exported) => {
-      const field = ext.toLowerCase() + "_base64";
-      downloadBase64(object + "." + ext.toLowerCase(), exported[field]);
-      toast("success", "Exported " + object + "." + ext.toLowerCase() + " (" + exported.size + " bytes)");
+      const name = object + "." + ext.toLowerCase();
+      // The engine's export contract differs per format: STL is
+      // binary and arrives base64-packed; OBJ is lossless text.
+      if (typeof exported.obj_text === "string") {
+        downloadText(name, exported.obj_text);
+      } else {
+        downloadBase64(name, exported[ext.toLowerCase() + "_base64"]);
+      }
+      toast("success", "Exported " + name + " (" + exported.size + " bytes)");
     })
     .catch((error) => toast("error", error.message || String(error)));
+}
+
+function downloadText(name, text) {
+  const url = URL.createObjectURL(new Blob([text]));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function downloadBase64(name, base64) {

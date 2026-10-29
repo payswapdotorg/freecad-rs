@@ -175,6 +175,76 @@ way deliberately:
   is CI's claim to verify (and it has, on every `v*` tag), not a
   source-level test's.
 
+## The studio's browser pass (2026-10-29, worker-c branch)
+
+`studio/fc-studio.html` — the browser workbench driving the real engine
+(`fc-wasm`, compiled `wasm32-unknown-unknown`, packaged self-contained
+by `scripts/package-studio.sh` into `dist/fc-studio.html`) — was driven
+end-to-end in a real browser (agent-browser automation over the
+packaged single-file build; evidence screenshots in
+`docs/evidence/wc-*.png`). This is manual/local evidence in the ◐
+sense: CI builds the wasm crate, but no CI job drives a browser.
+
+The golden path, each step with its observed number:
+
+- **Boot** — clean page, no console errors, footer
+  `engine: freecad-rs 0.2.2 · wasm` (`wc-01`).
+- **The five primitives** — all `Valid`, each measure exact in the
+  stats panel: Box 3×2×1 = 6.00 mm³; Sphere r6 = 904.779 (4/3·π·216);
+  Cylinder r4 h12 = 603.186 / area 402.124 (192π / 128π); Cone r6 h12
+  = 452.389 / 365.991 (48π / π·6·√180+36π); Torus R10 r2 = 789.568 /
+  789.568 (2π²·40 / 4π²·20); Σ 2755.92 (`wc-03`).
+- **Property edit** — Box.Height 1→2: volume 6.00→12.000, footer Σ
+  follows (+6.00) (`wc-02`).
+- **Expression binding** — `Box.Length ← Box.Height * 2` (the
+  README's own flagship example): resolves to 2, volume 4.000
+  (`wc-05`). This drove the session's engine find — see below.
+- **Boolean Cut** — Box − Box001(1×1×1 at the origin corner):
+  V = 3.000, A = 14.000 (the notch-through-corner surface, both
+  exact), 30 triangles (`wc-06`).
+- **Undo / redo** — Ctrl+Z: 3 objects/Σ8.00 → 2 objects/Σ5.00;
+  Ctrl+Y restores 3 objects/Σ8.00.
+- **`.FCStd` save → `New` → reopen** — the 615-byte document restores
+  3 objects, Σ 8.00, **and the expression binding survives the
+  round-trip** (Length still bound `Box.Height * 2`, volume 4.000)
+  (`wc-07`).
+- **Exports** — STL 684 bytes (binary STL's exact byte count for a
+  12-triangle box: 84 + 12·50) and OBJ 210 bytes, both landing in the
+  browser's downloads.
+
+**Defects found by the pass, fixed, and re-verified live:**
+
+1. `stats` on an empty document errored (`object '' not found`) — the
+   studio refreshes into an empty document right after `New` and after
+   undoing back to nothing. The whole-document query now reports zero
+   objects and zero volume (`fc-wasm` `op_stats`; pinned by
+   `stats_on_an_empty_document_is_zero_not_an_error`).
+2. OBJ export downloaded nothing — the engine's OBJ contract is
+   lossless text, not base64; the studio now downloads `obj_text` as a
+   Blob (STL stays base64: binary).
+3. **The same-object expression binding was broken in the engine** —
+   `Box.Length ← Box.Height * 2` failed twice over in
+   `fc-app/src/recompute.rs`: the topological walk read the
+   expression-sourced self-edge as a one-object "cycle"
+   (`cyclic dependency: Box -> Box`), and after that, the binding
+   evaluator could not resolve the self-name form at all (the object
+   is out of the document map while it executes, so `Box.Height`
+   missed `doc.get_by_name`). Both fixed — same-object expression
+   references are property-to-property edges inside one object (the
+   evaluator's own documented self-reference resolution), and the
+   self-name spelling resolves exactly like the bare one — pinned by
+   `same_object_expression_binding_recomputes_without_a_cycle`
+   (`fc-app` `tests/app.rs`). A self-LINK stays the pathological
+   edge it always was; the two-object cycle detection is unchanged.
+
+**Not verified by this pass** (honest boundaries): the viewport's
+orbit/pan/zoom and click-to-select ray picking (screenshots show
+rendered geometry, but the automation drove the tree and panels, not
+the 3D interactions); drag-and-drop document open; the sketch → pad →
+pocket PartDesign chain in the browser; Delete/Escape/Ctrl+S keyboard
+paths; expressions carrying units (the engine rejects them by design —
+that rejection itself was not exercised here).
+
 ## Keeping this file honest
 
 - The per-crate counts above rot by design (every landing PR adds

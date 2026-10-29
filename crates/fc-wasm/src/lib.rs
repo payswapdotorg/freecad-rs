@@ -788,10 +788,15 @@ fn op_stats(command: &Value) -> Result<Value, String> {
             }
         }
         if stats.is_empty() {
-            return Err(format!(
-                "object '{}' not found or has no shape",
-                object.unwrap_or("?")
-            ));
+            // An empty document is a legal state: the whole-document
+            // query reports zero objects and zero volume — it is not
+            // an error (the studio refreshes into one right after
+            // `new`, and after removing or undoing back to nothing).
+            // Only a *named* object that cannot be found is an error.
+            if let Some(want) = object {
+                return Err(format!("object '{want}' not found or has no shape"));
+            }
+            return Ok(json!({"objects": [], "total_volume": 0.0}));
         }
         Ok(json!({"objects": stats, "total_volume": total}))
     })
@@ -1062,6 +1067,20 @@ mod tests {
         let data = ok(json!({"op": "stats", "object": "Box"}));
         assert_eq!(data["objects"][0]["kind"], "Box");
         assert!((data["objects"][0]["volume"].as_f64().unwrap() - 960.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stats_on_an_empty_document_is_zero_not_an_error() {
+        // The studio refreshes into an empty document right after
+        // `new` (and after removing or undoing back to nothing) — the
+        // whole-document query must report zero, not fail.
+        fresh_doc();
+        let data = ok(json!({"op": "stats"}));
+        assert_eq!(data["objects"].as_array().unwrap().len(), 0);
+        assert_eq!(data["total_volume"].as_f64().unwrap(), 0.0);
+        // A named object that does not exist is still an honest error.
+        let error = err(json!({"op": "stats", "object": "Ghost"}));
+        assert!(error.contains("Ghost"), "{error}");
     }
 
     #[test]

@@ -613,6 +613,37 @@ fn recompute_detects_two_object_cycle() {
 }
 
 #[test]
+fn same_object_expression_binding_recomputes_without_a_cycle() {
+    // `Box.Length ← Box.Height * 2` — the studio README's own flagship
+    // example — is a property-to-property edge INSIDE one object:
+    // `evaluate_bindings` resolves it against the object's current
+    // values, and the recompute graph must not read it as the
+    // one-object "cycle" it never was. (Found by the studio's browser
+    // pass: the workbench's expression field rejected it with
+    // "cyclic dependency: Box -> Box".)
+    let log = log();
+    let mut doc = Document::new("Expr");
+    let mut object = Recorder::new("Box", &log);
+    object.container.set("Length", Property::Float(3.0));
+    object.container.set("Height", Property::Float(2.0));
+    doc.add(Box::new(object));
+
+    doc.bind_expression("Box", "Length", "Box.Height * 2")
+        .expect("the binding is legal");
+    doc.recompute_all()
+        .expect("a same-object expression is not a cycle");
+    let bound = doc.get_by_name("Box").unwrap().properties().get("Length");
+    assert_eq!(
+        bound,
+        Some(&Property::Float(4.0)),
+        "Length ← Height * 2 evaluated against the current value"
+    );
+    // The object still executed (bindings first, execute after — the
+    // recorded name is the proof).
+    assert_eq!(logged(&log), vec!["Box".to_string()]);
+}
+
+#[test]
 fn recompute_reports_missing_link() {
     let log = log();
     let mut doc = Document::new("Dangling");
