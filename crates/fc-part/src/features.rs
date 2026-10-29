@@ -821,12 +821,18 @@ impl DocumentObject for MeshFeature {
 }
 
 /// Tessellated geometry of any part feature (any concrete type), via
-/// downcast. `None` for non-part objects or features that have not
-/// computed a shape yet.
+/// downcast. `None` for non-part objects, features that have not
+/// computed a shape yet — or a shape whose tessellation the exact tier
+/// refuses (a B-spline face): no mesh is more honest than an empty
+/// one pretending to be the solid. The refusal reason is available on
+/// the shape itself (`TopoShape::try_tessellate`).
 pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
     let any = obj.as_any();
     if let Some(f) = any.downcast_ref::<MeshFeature>() {
-        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+        return f
+            .shape
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<MultiFuseFeature>() {
         return f.result.clone();
@@ -835,19 +841,34 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
         return f.result.clone();
     }
     if let Some(f) = any.downcast_ref::<BoxFeature>() {
-        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+        return f
+            .shape
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<SphereFeature>() {
-        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+        return f
+            .shape
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<CylinderFeature>() {
-        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+        return f
+            .shape
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<ConeFeature>() {
-        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+        return f
+            .shape
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<TorusFeature>() {
-        return f.shape.as_ref().map(|s| s.tessellate(deflection));
+        return f
+            .shape
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<TransformFeature>() {
         return f.result.clone();

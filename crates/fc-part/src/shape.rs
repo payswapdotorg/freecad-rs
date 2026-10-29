@@ -1,4 +1,4 @@
-//! Parametric primitives and triangle meshes.
+//! Parametric primitives, triangle meshes, and the exact B-rep.
 //!
 //! # Conventions — verified against real FreeCAD 1.0 (AppImage r39109)
 //!
@@ -19,8 +19,34 @@
 //! * **Meshes** produced by [`TopoShape::tessellate`] are watertight for the
 //!   analytic primitives (vertices shared through the index buffer) and wound
 //!   CCW when viewed from outside (right-hand rule normals point outward).
+//!
+//! # The exact B-rep variant — and its honesty contract
+//!
+//! **Brep** carries an [`ExactBRep`] — typically read from a real OCCT
+//! BRep payload (a FreeCAD `.FCStd` shape sidecar, [`crate::occt_brp`]).
+//! Unlike the analytic five it is not guaranteed to measure or
+//! tessellate: the exact tiers refuse some geometry **by name** (a
+//! B-spline face has no deflection-true interior sampling yet). The
+//! polymorphic surface therefore comes in two forms per operation:
+//!
+//! * the infallible `volume`/`surface_area`/`tessellate` — exact for
+//!   the analytic five and meshes; for a measuring B-rep equally
+//!   exact, for a refusing one honestly *empty* (`NaN` never reads as
+//!   a number, the empty mesh never draws a solid — neither can
+//!   silently lie the way a returned `0.0` would);
+//! * the `try_volume`/`try_surface_area`/`try_tessellate` channels —
+//!   `Result` with the refusing geometry named, for callers that
+//!   report rather than display.
+//!
+//! The bounding box is the one place a cheap answer is documented as
+//! approximate: the tessellation box grown by the deflection (an outer
+//! bound — see [`TopoShape::bbox`]).
 
 use fc_base::{BoundBox3, Matrix4, Vector3};
+
+use crate::measure::{brep_area, brep_volume};
+use crate::tessellate::tessellate_brep;
+use crate::topology::{ExactBRep, Surface};
 
 /// Tessellation quality used when a caller doesn't care
 /// (max chordal deviation, model units).
@@ -57,11 +83,19 @@ pub enum TopoShape {
         radius1: f64,
         radius2: f64,
     },
+    /// The exact boundary representation — real OCCT BRep geometry
+    /// (read from a FreeCAD payload by [`crate::occt_brp`], or built
+    /// by hand). It measures and tessellates exactly wherever the
+    /// exact tiers support the geometry, and refuses **by name**
+    /// where they do not (B-spline faces) — see the module doc for the
+    /// two-channel honesty contract.
+    Brep(ExactBRep),
     Mesh(Mesh),
 }
 
 impl TopoShape {
-    /// `"Box"`, `"Sphere"`, `"Cylinder"`, `"Cone"`, `"Torus"`, `"Mesh"`.
+    /// `"Box"`, `"Sphere"`, `"Cylinder"`, `"Cone"`, `"Torus"`, `"Brep"`,
+    /// `"Mesh"`.
     pub fn kind_name(&self) -> &'static str {
         match self {
             TopoShape::Box { .. } => "Box",
@@ -69,6 +103,7 @@ impl TopoShape {
             TopoShape::Cylinder { .. } => "Cylinder",
             TopoShape::Cone { .. } => "Cone",
             TopoShape::Torus { .. } => "Torus",
+            TopoShape::Brep(_) => "Brep",
             TopoShape::Mesh(_) => "Mesh",
         }
     }
@@ -83,6 +118,11 @@ impl TopoShape {
     /// FreeCAD's). Meshes must have finite vertices and in-range triangle
     /// indices. Messages use the FreeCAD property names so feature errors
     /// read like `Length must be > 0`.
+    ///
+    /// `Brep` re-runs [`ExactBRep::validate`] — the same structural
+    /// contract the OCCT reader already enforced on read (finite
+    /// geometry, bit-exact edge endpoints, closed wires); cheap,
+    /// total, and honest about what it checks.
     pub fn validate(&self) -> Result<(), String> {
         fn require_finite(name: &str, v: f64) -> Result<(), String> {
             if v.is_finite() {
@@ -140,12 +180,30 @@ impl TopoShape {
                 require_positive("Radius1", *radius1)?;
                 require_positive("Radius2", *radius2)
             }
+            TopoShape::Brep(brep) => brep.validate(),
             TopoShape::Mesh(mesh) => mesh.validate(),
         }
     }
 
     /// Exact analytic bounding box. A `Mesh` variant with no vertices yields
     /// the empty (default) box.
+    ///
+    /// `Brep` — the one documented approximation on this surface: the
+    /// box of the [`DEFAULT_DEFLECTION`] tessellation, grown by that
+    /// deflection on every side. Every mesh vertex lies ON the surface
+    /// (rim samples and surface evaluations), so the mesh box sits
+    /// inside the true box; every surface point lies within the
+    /// deflection of the mesh (the sagitta discipline), so growing by
+    /// the deflection contains the true box — an **outer bound** exact
+    /// for planar faces (where the growth is pure slack) and
+    /// deflection-true for curved ones. A BndLib-style per-surface
+    /// closed form would be tight; this is the cheap honest path, and
+    /// it says so. When the tessellator refuses (a B-spline face) the
+    /// fallback is the union of the model's vertex box with every
+    /// B-spline face's control-net box — the hull property makes the
+    /// poles an outer bound of the patch, but the vertices alone can
+    /// UNDER-bound curved analytic faces in such a mixed payload:
+    /// documented, not silent.
     pub fn bbox(&self) -> BoundBox3 {
         match self {
             TopoShape::Box {
@@ -180,12 +238,20 @@ impl TopoShape {
                     Vector3::new(outer, outer, *radius2),
                 )
             }
+            TopoShape::Brep(brep) => brep_bbox(brep),
             TopoShape::Mesh(mesh) => mesh.bbox().unwrap_or_default(),
         }
     }
 
     /// Exact analytic volume (mesh variant: sum of signed tetrahedra
     /// against the origin).
+    ///
+    /// `Brep`: the exact divergence-theorem measure when every face
+    /// reads ([`crate::measure`]), `NaN` when a face refuses by name —
+    /// NaN never displays as a plausible number and it propagates
+    /// through sums (a poisoned total stays poisoned), which is the
+    /// honest "no number" a silent `0.0` would never be. Callers that
+    /// need the refusing face use [`TopoShape::try_volume`].
     pub fn volume(&self) -> f64 {
         match self {
             TopoShape::Box {
@@ -213,11 +279,16 @@ impl TopoShape {
                 // self-intersecting ring reports, by convention here).
                 2.0 * std::f64::consts::PI * std::f64::consts::PI * radius1 * radius2 * radius2
             }
+            TopoShape::Brep(brep) => brep_volume(brep).unwrap_or(f64::NAN),
             TopoShape::Mesh(mesh) => mesh.volume(),
         }
     }
 
     /// Exact analytic surface area (mesh variant: sum of triangle areas).
+    ///
+    /// `Brep`: exact when every face reads, `NaN` when a face refuses
+    /// by name — the same honesty contract as [`TopoShape::volume`];
+    /// the reason is available through [`TopoShape::try_surface_area`].
     pub fn surface_area(&self) -> f64 {
         let pi = std::f64::consts::PI;
         match self {
@@ -252,17 +323,44 @@ impl TopoShape {
                 // A = 4*pi^2 * R * r.
                 4.0 * pi * pi * radius1 * radius2
             }
+            TopoShape::Brep(brep) => brep_area(brep).unwrap_or(f64::NAN),
             TopoShape::Mesh(mesh) => mesh.surface_area(),
+        }
+    }
+
+    /// The exact volume, or the refusing geometry named — the honest
+    /// channel behind [`TopoShape::volume`]. Infallible for the
+    /// analytic five and meshes (always `Ok`).
+    pub fn try_volume(&self) -> Result<f64, String> {
+        match self {
+            TopoShape::Brep(brep) => brep_volume(brep),
+            other => Ok(other.volume()),
+        }
+    }
+
+    /// The exact surface area, or the refusing geometry named — the
+    /// honest channel behind [`TopoShape::surface_area`].
+    pub fn try_surface_area(&self) -> Result<f64, String> {
+        match self {
+            TopoShape::Brep(brep) => brep_area(brep),
+            other => Ok(other.surface_area()),
         }
     }
 
     /// Tessellate. `deflection` controls chordal deviation: smaller is
     /// finer. For `Mesh` variants the mesh is returned as-is.
     ///
-    /// Non-positive or non-finite `deflection` means "finest" and clamps to
-    /// the per-primitive segment maximum. All analytic primitives produce
+    /// Non-positive or non-finite `deflection` means "finest" and clamps
+    /// to the per-primitive segment maximum. All analytic primitives produce
     /// watertight meshes with vertices shared through the index buffer and
     /// triangles wound CCW viewed from outside.
+    ///
+    /// `Brep`: the exact tessellation ([`crate::tessellate`]) under the
+    /// same deflection discipline, or — when the tessellator refuses
+    /// (a B-spline face; a non-positive deflection, which the adaptive
+    /// recursion has no segment-count clamp to interpret as
+    /// "finest") — the **empty mesh**: visibly nothing, never a
+    /// wrong solid. The reason rides [`TopoShape::try_tessellate`].
     pub fn tessellate(&self, deflection: f64) -> Mesh {
         match self {
             TopoShape::Box {
@@ -282,7 +380,18 @@ impl TopoShape {
             TopoShape::Torus { radius1, radius2 } => {
                 tessellate_torus(*radius1, *radius2, deflection)
             }
+            TopoShape::Brep(brep) => tessellate_brep(brep, deflection).unwrap_or_default(),
             TopoShape::Mesh(mesh) => mesh.clone(),
+        }
+    }
+
+    /// The tessellation, or the refusing geometry named — the honest
+    /// channel behind [`TopoShape::tessellate`]. Infallible for the
+    /// analytic five and meshes.
+    pub fn try_tessellate(&self, deflection: f64) -> Result<Mesh, String> {
+        match self {
+            TopoShape::Brep(brep) => tessellate_brep(brep, deflection),
+            other => Ok(other.tessellate(deflection)),
         }
     }
 }
@@ -290,6 +399,36 @@ impl TopoShape {
 // ---------------------------------------------------------------------------
 // Tessellation internals
 // ---------------------------------------------------------------------------
+
+/// The bounding box of an exact B-rep — see [`TopoShape::bbox`] for the
+/// documented contract. The tessellable path: the mesh box (which
+/// contains only on-surface points, so it sits inside the true box)
+/// grown by the deflection (which pulls it back outside the true box
+/// — an outer bound). The refused path: vertices ∪ B-spline control
+/// nets — poles bound their patch by the hull property; plain vertices
+/// bound the model's vertex table exactly but may under-bound curved
+/// analytic faces of a mixed payload.
+fn brep_bbox(brep: &ExactBRep) -> BoundBox3 {
+    const SLACK: f64 = DEFAULT_DEFLECTION;
+    if let Ok(mesh) = tessellate_brep(brep, DEFAULT_DEFLECTION) {
+        let Some(mut box3) = mesh.bbox() else {
+            return BoundBox3::default();
+        };
+        let s = Vector3::new(SLACK, SLACK, SLACK);
+        box3.min = box3.min - s;
+        box3.max = box3.max + s;
+        return box3;
+    }
+    let mut points: Vec<Vector3> = brep.vertices.iter().map(|v| v.point).collect();
+    for face in &brep.faces {
+        if let Surface::Bspline { points: net, .. } = &face.surface {
+            for row in net {
+                points.extend(row.iter().copied());
+            }
+        }
+    }
+    BoundBox3::from_points(&points).unwrap_or_default()
+}
 
 /// Segment count over an arc of `span` radians for chordal deviation
 /// `deflection` on a circle of `radius`, using the kernel convention

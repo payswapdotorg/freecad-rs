@@ -17,7 +17,7 @@ use fc_part::features::{
 use fc_part::partdesign::{
     LinearPatternFeature, PadFeature, PocketFeature, PolarPatternFeature, RevolutionFeature,
 };
-use fc_part::{TopoShape, DEFAULT_DEFLECTION};
+use fc_part::{read_occt_brp, Mesh, TopoShape, DEFAULT_DEFLECTION};
 use fc_sketcher::constraint::Constraint;
 use fc_sketcher::geometry::Geometry;
 use fc_sketcher::{SketchObject, SketchPreservation};
@@ -331,9 +331,24 @@ fn build_document_xml(
         // errored features) saves as Touched, not Valid: the status is
         // the file's promise about its geometry, and a reader without
         // OCCT — a real FreeCAD restoring our file — must recompute
-        // before the shapes exist. Our own reader agrees.
+        // before the shapes exist. Our own reader agrees. A preserved
+        // shape payload is geometry in the file too — FreeCAD's own
+        // OCCT bytes, riding verbatim — so an object whose payload
+        // survives the re-save AND still is its geometry keeps the
+        // Valid promise: this kernel's reader restores the exact model
+        // from it, a real FreeCAD the OCCT original. The "still is"
+        // matters: once a recompute rebuilt the shape from parameters
+        // (the live shape is no longer the `Brep` the payload
+        // restored), the payload is stale — writing Valid would hand a
+        // real FreeCAD a restored shape it will never recompute,
+        // quietly disagreeing with the parameters beside it. A rebuilt
+        // feature therefore loses the promise (Touched above) while
+        // its stale bytes ride unused, superseded by the rebuild.
+        let payload_still_geometry = !obj.preservation().payloads.is_empty()
+            && computed_shape(obj).map_or(true, |s| matches!(s, TopoShape::Brep(_)));
         let persisted = obj.as_any().downcast_ref::<MeshFeature>().is_some()
-            || matches!(obj.status(), ObjectStatus::Error(_));
+            || matches!(obj.status(), ObjectStatus::Error(_))
+            || payload_still_geometry;
         match obj.status() {
             ObjectStatus::Touched => xml.push_str(" status=\"Touched\""),
             ObjectStatus::Valid if persisted || !expects_geometry(&o.type_name) => {
@@ -419,6 +434,27 @@ fn build_document_xml(
             computed_shape(obj)
         } else {
             None
+        };
+        // The exact B-rep has no FCBREP v1 form (brep::write_shape refuses
+        // the variant by name) and this kernel writes no OCCT dialect: a
+        // Brep the file itself carried is serialized by the file's own
+        // payload — the preserved bytes ARE that shape's serialization,
+        // so they win over the (unwritable) live geometry and ride back
+        // out verbatim under their original entry name. A Brep with no
+        // preserved payload was built in memory (the loader always pairs
+        // the two): saving it silently would drop geometry no parameter
+        // set can rebuild — the loud refusal is the honest alternative.
+        let shape = match shape {
+            Some(TopoShape::Brep(_)) if preservation.payloads.is_empty() => {
+                return Err(FcstdError::Unsupported(format!(
+                    "object '{}': TopoShape::Brep has no FCBREP v1 form and no preserved OCCT \
+                     payload to round-trip — this kernel parses OCCT but does not write it; \
+                     refusing the save rather than silently dropping the geometry",
+                    o.name
+                )));
+            }
+            Some(TopoShape::Brep(_)) => None,
+            other => other,
         };
         // Live geometry wins over the preserved payload: an object this
         // kernel computed has nothing to preserve — its shape is its own
@@ -2166,32 +2202,111 @@ fn parse_object_properties(
                     (false, Some(PropValue::Shape(shape_ref))) => {
                         let (shape, preserved) =
                             load_shape_payload(zip, &shape_ref, owner, report, consumed)?;
+                        // The payload rides into the preservation bag
+                        // whichever way the geometry landed — attached
+                        // live (the OCCT success: this kernel parses
+                        // OCCT but writes none of it, so the file's own
+                        // bytes stay the only truthful serialization,
+                        // exactly like the skip paths) or skipped. One
+                        // landing, not two copies of the same push.
+                        let payload_kept = preserved.is_some();
+                        if let Some((entry, data, stored)) = preserved {
+                            if let Some(start) = tag_start(xml, after_start) {
+                                let raw_property =
+                                    String::from_utf8_lossy(&xml[start..after_end]).into_owned();
+                                if let Some(p) = object.preservation_mut() {
+                                    p.payloads.push(PreservedShape {
+                                        property: name.clone(),
+                                        raw_property,
+                                        entry,
+                                        data,
+                                        stored,
+                                    });
+                                }
+                            }
+                        }
                         match shape {
-                            Some(shape) => attach_shape(object, shape, owner, report),
-                            // Geometry not restorable: keep the parameters,
-                            // stay Touched so recompute regenerates what it
-                            // can — and preserve the payload verbatim when
-                            // the file still carries one (OCCT BRep,
-                            // unknown formats: the only copy of the data).
-                            None => {
-                                if let Some((entry, data, stored)) = preserved {
-                                    if let Some(start) = tag_start(xml, after_start) {
-                                        let raw_property =
-                                            String::from_utf8_lossy(&xml[start..after_end])
-                                                .into_owned();
-                                        if let Some(p) = object.preservation_mut() {
-                                            p.payloads.push(PreservedShape {
-                                                property: name.clone(),
-                                                raw_property,
-                                                entry,
-                                                data,
-                                                stored,
-                                            });
+                            Some(shape) => {
+                                // A live B-rep that the exact tiers cannot
+                                // yet tessellate (a B-spline face — K4-2d)
+                                // still attaches: the exact model IS the
+                                // live geometry, queryable through its own
+                                // honest channels (`TopoShape::try_volume`).
+                                // But no display mesh will ever exist for
+                                // it, and "no mesh" must not read as "no
+                                // geometry" — the loader says so. (The one
+                                // tessellation run here is the price of
+                                // knowing; the mesh itself is not kept —
+                                // `mesh_of` regenerates it per deflection.)
+                                let brep_display_refusal = match &shape {
+                                    TopoShape::Brep(_) => {
+                                        shape.try_tessellate(DEFAULT_DEFLECTION).err()
+                                    }
+                                    _ => None,
+                                };
+                                match attach_shape(object, shape) {
+                                    // Live geometry: the object keeps the
+                                    // file's status (restored — not
+                                    // Touched, no rebuild owed).
+                                    AttachOutcome::Attached => {
+                                        if let Some(reason) = brep_display_refusal {
+                                            report.warnings.push(format!(
+                                                "{owner}: the restored OCCT B-rep will not \
+                                             tessellate ({reason}) — geometry loaded exactly, \
+                                             no display mesh; payload preserved verbatim for \
+                                             round-trip"
+                                            ));
                                         }
                                     }
+                                    // The type carries no shape field (the
+                                    // unknown-family containers: a
+                                    // `Part::Plane` datum, say). With a
+                                    // payload riding along that is a
+                                    // preservation — the object keeps its
+                                    // parameters and its bytes; without one
+                                    // (an FCBREP shape this kernel itself
+                                    // parsed) the geometry is honestly
+                                    // lost, and the warning says so.
+                                    AttachOutcome::NoField => match payload_kept {
+                                        true => report.warnings.push(format!(
+                                            "{owner}: object type '{}' carries no live shape \
+                                         field — geometry skipped (parameters kept), payload \
+                                         preserved verbatim for round-trip",
+                                            object.type_name()
+                                        )),
+                                        false => report.warnings.push(format!(
+                                            "{owner}: object type '{}' carries no shape field \
+                                         — geometry skipped",
+                                            object.type_name()
+                                        )),
+                                    },
+                                    // A B-rep the exact tiers cannot cross
+                                    // into a mesh field: the payload READ
+                                    // but nothing could land — the reader-
+                                    // rejection semantics, with the
+                                    // tessellator's own reason standing in
+                                    // for the reader's. Touched so a
+                                    // recompute regenerates the feature
+                                    // from its parameters; the payload is
+                                    // already preserved verbatim above.
+                                    AttachOutcome::TessellationRefused(reason) => {
+                                        report.warnings.push(format!(
+                                            "{owner}: OCCT BRep payload read, but its \
+                                         tessellation refused ({reason}) — geometry skipped \
+                                         (parameters kept), payload preserved verbatim for \
+                                         round-trip"
+                                        ));
+                                        object.set_status(ObjectStatus::Touched);
+                                    }
                                 }
-                                object.set_status(ObjectStatus::Touched);
                             }
+                            // Geometry not restorable: keep the parameters,
+                            // stay Touched so recompute regenerates what it
+                            // can — the payload is already preserved
+                            // verbatim above (when the file still carries
+                            // one: OCCT BRep, unknown formats — the only
+                            // copy of the data).
+                            None => object.set_status(ObjectStatus::Touched),
                         }
                     }
                     (true, _) => {
@@ -3793,10 +3908,12 @@ type PreservedPayload = (String, Vec<u8>, bool);
 /// file's geometry could not be restored) and, when the payload's bytes
 /// are worth keeping, the raw preservation triple (zip entry name —
 /// empty for inline payloads — bytes, and the entry's storage form):
-/// OCCT BRep, unknown formats and malformed FCBREP payloads all ride
-/// back out of a re-save verbatim under their original entry names.
-/// `consumed` records archive entries read (the load's final sweep
-/// preserves every unclaimed entry).
+/// unknown formats, malformed FCBREP payloads, and OCCT BReps the
+/// reader rejects all skip with their bytes preserved verbatim — and
+/// so does an OCCT BRep the reader ACCEPTS: it loads as live geometry
+/// while its bytes stay the only truthful serialization (this kernel
+/// writes no OCCT dialect). `consumed` records archive entries read
+/// (the load's final sweep preserves every unclaimed entry).
 fn load_shape_payload(
     zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
     shape_ref: &ShapeRef,
@@ -3846,14 +3963,43 @@ fn load_shape_payload(
             }
         },
         BrpFormat::OcctBrep => {
-            report.warnings.push(format!(
-                "{owner}: OCCT BRep shape not modeled — geometry skipped (parameters kept), \
-                 payload preserved verbatim for round-trip"
-            ));
-            Ok((
-                None,
-                provenance.map(|(entry, stored)| (entry, bytes, stored)),
-            ))
+            // The real OCCT BRep dialect (FreeCAD's own shape payloads):
+            // hand the bytes to the exact-model reader (K4-1). A payload
+            // the reader takes becomes live geometry — `TopoShape::Brep`,
+            // measured and tessellated exactly wherever the exact tiers
+            // support the geometry, refusing by name where they do not.
+            // The payload STILL rides back out verbatim: unlike FCBREP
+            // (this kernel's own dialect, which the writer re-serializes
+            // from the model — hence no provenance on that success path),
+            // an OCCT payload has no writer here, so the file's own bytes
+            // remain the only truthful serialization of that geometry.
+            // A payload the reader REJECTS keeps the honest skip — with
+            // the reader's own reason in the warning: the skip is the
+            // reader's verdict now, and the message says whose. Non-UTF-8
+            // bytes are one such verdict (a CASCADE BRep payload is ASCII
+            // text; bytes that are not can never parse).
+            let read = std::str::from_utf8(&bytes)
+                .map_err(|_| {
+                    "the bytes are not valid UTF-8 — a CASCADE BRep payload is ASCII text"
+                        .to_string()
+                })
+                .and_then(read_occt_brp);
+            match read {
+                Ok(read) => Ok((
+                    Some(TopoShape::Brep(read.brep)),
+                    provenance.map(|(entry, stored)| (entry, bytes, stored)),
+                )),
+                Err(reason) => {
+                    report.warnings.push(format!(
+                        "{owner}: OCCT BRep payload rejected by the reader: {reason} — geometry \
+                         skipped (parameters kept), payload preserved verbatim for round-trip"
+                    ));
+                    Ok((
+                        None,
+                        provenance.map(|(entry, stored)| (entry, bytes, stored)),
+                    ))
+                }
+            }
         }
         BrpFormat::Unknown => {
             report.warnings.push(format!(
@@ -3868,80 +4014,97 @@ fn load_shape_payload(
     }
 }
 
+/// Where a parsed shape landed on the concrete feature owning it.
+#[derive(Debug)]
+enum AttachOutcome {
+    /// A field of the type took it (exactly for shape-holding
+    /// features, as the DEFAULT_DEFLECTION tessellation for the
+    /// mesh-result features).
+    Attached,
+    /// The object type carries no shape field at all (the
+    /// unknown-family containers: a `Part::Plane` datum, say). The
+    /// case's warning is the CALLER's to make: only the caller knows
+    /// whether the payload rides along preserved (the OCCT path — a
+    /// preservation note) or was parsed from this kernel's own FCBREP
+    /// and is honestly lost.
+    NoField,
+    /// A B-rep bound for a mesh-result feature whose tessellation
+    /// refused (a B-spline face): the exact model cannot live in a
+    /// mesh field and the mesh stand-in does not exist, so NOTHING
+    /// landed — the same observable state as a reader rejection. The
+    /// caller applies that path's semantics: Touched, warning with the
+    /// reason, payload already preserved. (A refusing B-rep on a
+    /// shape-holding feature DOES attach — the exact model is live
+    /// there, and the per-operation refusal rides its own honest
+    /// channels: `TopoShape::try_volume` et al.)
+    TessellationRefused(String),
+}
+
 /// Attach a parsed shape to the concrete feature owning it.
-fn attach_shape(
-    object: &mut Box<dyn DocumentObject>,
-    shape: TopoShape,
-    owner: &str,
-    report: &mut LoadReport,
-) {
+fn attach_shape(object: &mut Box<dyn DocumentObject>, shape: TopoShape) -> AttachOutcome {
     let any = object.as_any_mut();
     if let Some(f) = any.downcast_mut::<BoxFeature>() {
         f.shape = Some(shape);
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<SphereFeature>() {
         f.shape = Some(shape);
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<CylinderFeature>() {
         f.shape = Some(shape);
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<ConeFeature>() {
         f.shape = Some(shape);
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<MeshFeature>() {
         f.shape = Some(shape);
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<TorusFeature>() {
         f.shape = Some(shape);
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<TransformFeature>() {
         // Transform features persist their computed mesh.
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<BooleanFeature>() {
         // Boolean features persist their computed mesh.
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<MultiFuseFeature>() {
         // Multi-fuse features persist their computed mesh.
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<MirroringFeature>() {
         // Mirror features persist their computed mesh.
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<PadFeature>() {
         // PartDesign features persist their computed mesh.
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<PocketFeature>() {
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<RevolutionFeature>() {
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<LinearPatternFeature>() {
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<PolarPatternFeature>() {
-        f.result = match shape {
-            TopoShape::Mesh(mesh) => Some(mesh),
-            other => Some(other.tessellate(DEFAULT_DEFLECTION)),
-        };
+        mesh_result(&mut f.result, shape)
     } else {
-        report.warnings.push(format!(
-            "{owner}: object type carries no shape field — geometry skipped"
-        ));
+        // No shape field on this type — the caller warns.
+        AttachOutcome::NoField
+    }
+}
+
+/// Bridge a parsed shape into a mesh-result feature field: a mesh
+/// payload lands as itself, anything else crosses the tessellation
+/// bridge at [`DEFAULT_DEFLECTION`] — an exact B-rep becomes its
+/// deflection-true stand-in (the payload still rides verbatim in the
+/// preservation bag, so the exact bytes outlive the lossy display
+/// mesh). A tessellation that refuses by name leaves the field
+/// empty and carries the reason out — an empty mesh masquerading as
+/// geometry would be the silent nothing this loader refuses to be.
+fn mesh_result(field: &mut Option<Mesh>, shape: TopoShape) -> AttachOutcome {
+    match shape.try_tessellate(DEFAULT_DEFLECTION) {
+        Ok(mesh) => {
+            *field = Some(mesh);
+            AttachOutcome::Attached
+        }
+        Err(reason) => AttachOutcome::TessellationRefused(reason),
     }
 }
 

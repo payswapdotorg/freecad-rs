@@ -88,7 +88,21 @@ pub fn probe_format(data: &[u8]) -> BrpFormat {
 
 /// Serialize `shape` in FCBREP v1. Mesh variants are written with their
 /// full geometry; analytic variants as parameters.
+///
+/// `TopoShape::Brep` refuses by name: the v1 grammar has no structural
+/// form — the exact model serializes through [`write_brep`] (FCBREP
+/// v2+), and the `.FCStd` writer does not route a Brep here at all (it
+/// keeps the file's own OCCT payload verbatim instead, so a real
+/// FreeCAD keeps reading its own bytes). The refusal is loud rather
+/// than emitting a payload `read_shape_bytes` would reject.
 pub fn write_shape<W: std::io::Write>(w: &mut W, shape: &TopoShape) -> std::io::Result<()> {
+    if let TopoShape::Brep(_) = shape {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "TopoShape::Brep has no FCBREP v1 form — serialize the exact model with write_brep \
+             (FCBREP v2), or preserve the file's own OCCT payload",
+        ));
+    }
     writeln!(w, "FCBREP 1")?;
     match shape {
         TopoShape::Box {
@@ -135,6 +149,9 @@ pub fn write_shape<W: std::io::Write>(w: &mut W, shape: &TopoShape) -> std::io::
                 writeln!(w, "t {} {} {}", t[0], t[1], t[2])?;
             }
         }
+        // Covered by the refusal above; the match stays total so a
+        // future variant cannot slip through unwritten.
+        TopoShape::Brep(_) => unreachable!("refused before the header was written"),
     }
     writeln!(w, "end")
 }
