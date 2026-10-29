@@ -961,6 +961,26 @@ fn splice_merge(
         None => k1,
     };
     band_merge(dm, &current[k0..p_end.max(k0 + 1)], run);
+    // The pinch-out closure (K4-2c): a run whose window pinches shut
+    // before the frontier does — a wavy band's rim dipping through the
+    // row level — ends its band at an edge (under-stretch's last, run's
+    // last) that still faces untiled region on its upper side: the new
+    // frontier chain edge (run's last → the first not-under vertex)
+    // gets its carrier from above by the next splice or the final
+    // merge, but nothing tiles the wedge between the two. One closure
+    // triangle does: {under-stretch's last, run's last, first
+    // not-under} — its bottom edge pairs with the previous band's own
+    // upper boundary, its right edge with the final merge's carrier of
+    // the new chain edge. In the full-width case the three vertices
+    // are the collinear seam corner (all at the u-maximum) and the
+    // emit skips the zero-area triangle exactly — the analytic five's
+    // green paths are untouched. Only a merge that ran its p-range to
+    // the under-stretch's end (p_end == k1) may close: an earlier cut
+    // (the previous run's last, the widening case) leaves the stretch
+    // between, and a triangle spanning it would create unpaired edges.
+    if p_end == k1 && k1 >= k0 + 2 && k1 < current.len() {
+        emit_band_tri(dm, [current[k1 - 1], run[run.len() - 1], current[k1]]);
+    }
     let mut next = Vec::with_capacity(current.len() + run.len());
     next.extend_from_slice(&current[..=k0]);
     next.extend_from_slice(run);
@@ -1156,6 +1176,19 @@ fn build_band_domain(
     let mut runs: Vec<Vec<u32>> = Vec::with_capacity(rows.len());
     let mut lone_left: Vec<(f64, u32)> = Vec::new();
     let mut lone_right: Vec<(f64, u32)> = Vec::new();
+    // The per-level seam registry (K4-2c): a wavy row can punch into
+    // several runs, and every run of the SAME level must share one
+    // pair of seam points. Per-run points would duplicate an attached
+    // point with an unattached twin — one 3D point, two domain
+    // vertices — and the twin's insertion into the frontier would
+    // make the final merge walk it, emitting carriers whose edges
+    // skip over the true column points (the fine-deflection defect).
+    // Loneship is decided only after every run had its chance to
+    // attach: a side's point is lone when NO run of its level reached
+    // that side.
+    let mut seam_of: HashMap<u64, (u32, u32)> = HashMap::new();
+    let mut left_attached: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut right_attached: std::collections::HashSet<u64> = std::collections::HashSet::new();
     for row in rows {
         if row.len() < 2 || dm.pts.len() >= MAX_DOMAIN_VERTS {
             continue;
@@ -1177,23 +1210,33 @@ fn build_band_domain(
         let mut run: Vec<u32> = Vec::with_capacity(row.len() + 2);
         // Both seam points exist for every in-range level — the two
         // columns must carry the same levels or the seam cannot close.
-        // A point whose side's run was punched away (a wavy band's
-        // one-cell window) stays unattached here and joins the
+        // A point whose side's runs were all punched away (a wavy
+        // band's one-cell window) stays unattached and joins the
         // frontier directly after the splices.
         let (mut m_left, mut m_right) = (None, None);
         if in_range {
-            let seam_p3 = surface.point(u_left, v);
-            dm.pts.push(Point2::new(u_left, v));
-            dm.p3.push(seam_p3);
-            m_left = Some(dm.pts.len() as u32 - 1);
-            dm.pts.push(Point2::new(u_right, v));
-            dm.p3.push(seam_p3);
-            m_right = Some(dm.pts.len() as u32 - 1);
+            let key = v.to_bits();
+            let (l, r) = *seam_of.entry(key).or_insert_with(|| {
+                let seam_p3 = surface.point(u_left, v);
+                dm.pts.push(Point2::new(u_left, v));
+                dm.p3.push(seam_p3);
+                let l = dm.pts.len() as u32 - 1;
+                dm.pts.push(Point2::new(u_right, v));
+                dm.p3.push(seam_p3);
+                let r = dm.pts.len() as u32 - 1;
+                (l, r)
+            });
+            m_left = Some(l);
+            m_right = Some(r);
+            if reaches_left {
+                left_attached.insert(key);
+            }
+            if reaches_right {
+                right_attached.insert(key);
+            }
         }
         if reaches_left {
             run.push(m_left.unwrap());
-        } else if let Some(m) = m_left {
-            lone_left.push((v, m));
         }
         for p in row {
             let i = dm.pts.len() as u32;
@@ -1203,11 +1246,20 @@ fn build_band_domain(
         }
         if reaches_right {
             run.push(m_right.unwrap());
-        } else if let Some(m) = m_right {
-            lone_right.push((v, m));
         }
         runs.push(run);
     }
+    for (&key, &(l, r)) in &seam_of {
+        if !left_attached.contains(&key) {
+            lone_left.push((f64::from_bits(key), l));
+        }
+        if !right_attached.contains(&key) {
+            lone_right.push((f64::from_bits(key), r));
+        }
+    }
+    // v-ascending (the rows were; a hash map's iteration is not).
+    lone_left.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    lone_right.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     // The stack: rows spliced into the lower chain, then the final
     // merge against the upper chain. The corner regions fall out of
@@ -1223,7 +1275,21 @@ fn build_band_domain(
     }
     // The unattached seam points join the frontier directly: the left
     // ones into the u-minimum prefix (v-ordered among the seam points),
-    // the right ones before the u-maximum tail.
+    // the right ones before the u-maximum tail. Each lone point also
+    // gets its seam-column carrier (K4-2c): the strip between the seam
+    // column segment (previous seam level → the lone level) and the
+    // frontier chain below it would otherwise stay untiled — no run
+    // reached this level, so no splice's band paired the column here,
+    // and the final merge only tiles ABOVE the frontier. The carrier
+    // is the triangle {frontier vertex before, lone point, frontier
+    // vertex after}: its seam edge pairs with the opposite column's
+    // band carrier of the same segment (the shared-point seam closes
+    // bit-exactly through it), its chain edges pair with the previous
+    // band below and the final merge above. When the frontier's
+    // next vertex is itself a seam point (a higher row did reach the
+    // seam — the strip already tiled by that row's splice), the three
+    // vertices are collinear on the seam and the emit skips the
+    // zero-area triangle exactly.
     if !lone_left.is_empty() {
         let prefix_end = current
             .iter()
@@ -1236,6 +1302,9 @@ fn build_band_domain(
                 .map(|p| p + 1)
                 .unwrap_or(0);
             current.insert(pos, m);
+            if pos > 0 && pos + 1 < current.len() {
+                emit_band_tri(&mut dm, [current[pos - 1], m, current[pos + 1]]);
+            }
         }
     }
     if !lone_right.is_empty() {
@@ -1252,6 +1321,9 @@ fn build_band_domain(
                 .map(|p| at + p)
                 .unwrap_or(current.len());
             current.insert(pos, m);
+            if pos > 0 && pos + 1 < current.len() {
+                emit_band_tri(&mut dm, [current[pos - 1], m, current[pos + 1]]);
+            }
             at = pos + 1;
         }
     }

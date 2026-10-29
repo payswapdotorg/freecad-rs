@@ -691,11 +691,44 @@ behind us.
       B-spline faces still refuse by name (no curvature estimate yet
       drives a grid over the patch), as do hole-trimmed faces and
       non-monotone (non-band) trims.
-- [ ] **K4-2c** the wavy-band seam corner (the oblique cut's
-      single-cell window carrier), then NURBS measure (Gauss–
-      Legendre on polynomial integrands), the mixed-strip fillet
-      corner, and general booleans with subsurface classification
-      and trimming on the loaded operands
+- [x] **K4-2c (landing 2026-10-29)** the wavy-band closures — the
+      oblique cut tessellates watertight at every deflection. Three
+      defects fell out of the fine runs, all in
+      `crates/fc-part/src/tessellate.rs`'s band stack: (1) the
+      **pinch-out wedge** — a run whose window shuts before the
+      frontier does ended its band at an edge that still faced
+      untiled region on its upper side; one closure triangle
+      `{under-stretch's last, run's last, first not-under vertex}`
+      tiles it, pairing its bottom edge with the previous band's
+      upper boundary and its right edge with the final merge's
+      carrier of the new chain edge (in the full-width case the three
+      vertices are the collinear seam corner and the zero-area emit
+      skips it exactly — the analytic five's paths unchanged);
+      (2) the **lone seam point's carrier** — a level whose side's
+      runs were all punched away joined the frontier but nothing
+      carried its seam-column segment; the insertion now emits the
+      strip triangle `{frontier vertex before, lone point, frontier
+      vertex after}`; (3) the **per-level seam registry** — a wavy
+      row punches into several runs, and per-run seam points
+      duplicated an attached point with an unattached twin (one 3D
+      point, two domain vertices) whose frontier insertion made the
+      final merge walk the twin, emitting carriers whose edges
+      skipped over the true column points (five unpaired edges at
+      d=0.0125); every run of one level now shares one pair of seam
+      points, and loneship is decided only after every run had its
+      chance to attach. Acceptance: the formerly-`#[ignore]`d
+      `oblique_cut_tessellates_watertight_within_deflection` now runs,
+      watertight and deflection-true at d=0.05 AND d=0.0125, with the
+      volume and area deficits inside the measured polygonal
+      tolerances and the deficit shrinking when the deflection
+      quarters. The full suite: 649 tests, none ignored. B-spline
+      faces still refuse by
+      name, as do hole-trimmed faces and non-monotone (non-band)
+      trims.
+- [ ] **K4-2d** NURBS measure (Gauss–Legendre on polynomial
+      integrands), the mixed-strip fillet corner, and general
+      booleans with subsurface classification and trimming on the
+      loaded operands
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

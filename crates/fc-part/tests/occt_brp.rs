@@ -624,14 +624,18 @@ fn torus_tessellates_watertight_within_deflection() {
 }
 
 #[test]
-#[ignore = "the wavy-band seam corner: where the elliptical rim's window over the \
-mantle pinches to a single cell, the left seam column's closing edges lack a carrier \
-(9 unpaired edges at d=0.05); volume and area are already within tolerance — the \
-corner-carrier fix is the named next slice"]
 fn oblique_cut_tessellates_watertight_within_deflection() {
     // The elliptical rim over the cylinder mantle: a trim whose band
-    // height varies with u.
-    curved_acceptance("cyl_oblique_cut", 0.05, 2.5e-2, 1.0e-2);
+    // height varies with u — the wavy band. The pinch-outs (the rim
+    // dipping through a row level, the row's window collapsing to a
+    // single cell) close through the splice's corner carrier and the
+    // lone seam point's carrier (K4-2c).
+    let rel = curved_acceptance("cyl_oblique_cut", 0.05, 2.5e-2, 1.0e-2);
+    let fine = curved_acceptance("cyl_oblique_cut", 0.0125, 2.5e-2, 1.0e-2);
+    assert!(
+        fine < 0.45 * rel,
+        "oblique cut: quartering the deflection must shrink the deficit ({fine:.3e} vs {rel:.3e})"
+    );
 }
 
 #[test]
