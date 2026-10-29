@@ -83,9 +83,36 @@ fn visit(
         return Ok(());
     };
     let name = object.name().to_string();
+    // Same-object expression references (`Box.Length ← Box.Height * 2`)
+    // are property-to-property edges INSIDE one object: the object's own
+    // binding evaluation resolves them against its current values (see
+    // `evaluate_bindings` — "self-references read the object's current
+    // (pre-execute) values"). They are not object-graph cycles, so the
+    // walk skips exactly those — an expression-sourced self-edge. A LINK
+    // to the same object stays the pathological self-edge it always was
+    // (`link_targets` merges both sources; only the expression-sourced
+    // name set is skipped, and only when it names THIS object).
+    let expr_self: BTreeSet<String> = object
+        .expressions()
+        .values()
+        .filter_map(|text| crate::expression::parse(text).ok())
+        .flat_map(|expression| {
+            expression
+                .variables()
+                .into_iter()
+                .filter_map(|(object_name, _)| object_name)
+        })
+        .filter(|referenced| *referenced == name)
+        .collect();
     let targets = link_targets(object);
     path.push(id);
     for target in targets {
+        if expr_self.contains(&target) {
+            // The object's own binding evaluation owns this edge; the
+            // walk would otherwise close a one-object "cycle" that the
+            // evaluator resolves by design.
+            continue;
+        }
         match doc.get_id(&target) {
             None => {
                 return Err(RecomputeError::MissingLink {
@@ -195,6 +222,13 @@ fn evaluate_bindings(object: &mut dyn crate::DocumentObject, doc: &Document) -> 
             _ => None,
         })
         .collect();
+    // The object is OUT of the document map while it executes
+    // (`take_out`), so a reference spelled with the object's OWN name
+    // (`Box.Height` from inside `Box`) cannot resolve through
+    // `doc.get_by_name` — the documented self-reference resolution
+    // applies to it exactly like the bare-name spelling (`Height`):
+    // FreeCAD resolves both against the object itself.
+    let self_name = object.name().to_string();
     for (property, text) in bindings {
         let expression = crate::expression::parse(&text)
             .map_err(|err| format!("expression for '{property}' does not parse: {err}"))?;
@@ -203,6 +237,14 @@ fn evaluate_bindings(object: &mut dyn crate::DocumentObject, doc: &Document) -> 
                     prop: &str|
              -> Result<Quantity, crate::expression::ExprError> {
                 match object {
+                    Some(object_name) if object_name == self_name => self_values
+                        .get(prop)
+                        .copied()
+                        .map(Quantity::dimensionless)
+                        .ok_or_else(|| crate::expression::ExprError::UnresolvableReference {
+                            object: Some(object_name.to_string()),
+                            property: prop.to_string(),
+                        }),
                     Some(object_name) => doc
                         .get_by_name(object_name)
                         .and_then(|target| match target.properties().get(prop) {
