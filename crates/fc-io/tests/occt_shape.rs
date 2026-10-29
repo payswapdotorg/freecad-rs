@@ -466,7 +466,7 @@ fn provenance_free_brep_refuses_the_save_loudly() {
     // ZipWriter closes an EMPTY zip (its 22-byte end-of-central-
     // directory record) — no document inside, no half document.
     assert!(
-        zip_entries(&temp).get("Document.xml").is_none(),
+        !zip_entries(&temp).contains_key("Document.xml"),
         "no document was written into the refused save: {:?}",
         zip_entries(&temp).keys().collect::<Vec<_>>()
     );

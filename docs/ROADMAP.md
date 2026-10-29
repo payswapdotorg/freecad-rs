@@ -725,6 +725,55 @@ behind us.
       faces still refuse by
       name, as do hole-trimmed faces and non-monotone (non-band)
       trims.
+- [x] **K4-1-integration (landing 2026-10-29, worker-b)** the
+      payloads live — a `.FCStd` carrying real OCCT BRep geometry
+      loads it as `TopoShape::Brep`: the loader's
+      `BrpFormat::OcctBrep` branch hands the bytes to K4-1's reader,
+      a readable payload becomes live exact geometry (measured and
+      tessellated exactly wherever the exact tiers support the
+      geometry, refusing by name where they do not — the two-channel
+      honesty contract: `volume`/`tessellate` answer exactly or
+      visibly — NaN, the empty mesh — while `try_volume`/
+      `try_tessellate` carry the refusing face's name), and the
+      payload STILL rides back out verbatim on re-save: this kernel
+      parses OCCT but writes none of it, so the file's own bytes stay
+      the only truthful serialization, and the object keeps the
+      file's `Valid` verdict (exactly what a real FreeCAD leaves
+      after its own restore). A rejected payload keeps the honest
+      skip with the reader's own reason in the warning (non-UTF-8
+      bytes are one such verdict). The save side refuses loudly when
+      a Brep has no preserved payload to round-trip (built in memory
+      — the loader always pairs the two) rather than silently
+      dropping geometry no parameter set can rebuild. Acceptance:
+      `tests/shape_brep.rs` (4) + `tests/occt_shape.rs` (7); the
+      corpus' group_links boxes read (Valid, the OCCT measure
+      reconciling with the parameters to 1e-9), partdesign_body's
+      payloads reject by name (negative references, wire roots — the
+      reader's coverage boundary, documented). Suite: 660, none
+      ignored.
+- [x] **K4-studio (landing 2026-10-29, worker-c)** the studio's
+      golden path — the browser workbench driving the real wasm
+      engine, verified end-to-end in a real browser (agent-browser
+      over the packaged self-contained build; evidence in
+      `docs/evidence/wc-*.png`, the dated section in
+      VERIFICATION.md): the five primitives' stats exact against the
+      closed forms, property edits exact, expression binding live,
+      the Cut boolean exact (V 3.000 / A 14.000), undo/redo exact,
+      the `.FCStd` round-trip carrying the expression binding, STL
+      byte-exact (684 = 84 + 12·50). The pass pulled one real engine
+      defect out with it: the same-object expression binding
+      (`Box.Length ← Box.Height * 2` — the studio README's own
+      flagship example) failed twice in `fc-app`'s recompute — the
+      topological walk read the expression-sourced self-edge as a
+      one-object cycle, and the binding evaluator could not resolve
+      the self-name spelling (the object sits out of the map while it
+      executes). Same-object expression references are
+      property-to-property edges inside one object — now skipped in
+      the walk and resolved by the evaluator, exactly like the
+      bare-name form; a self-LINK stays pathological, two-object
+      cycles unchanged. Two studio defects fixed with it (stats on an
+      empty document reported as zero, the OBJ text download). Suite:
+      662, none ignored.
 - [ ] **K4-2d** NURBS measure (Gauss–Legendre on polynomial
       integrands), the mixed-strip fillet corner, and general
       booleans with subsurface classification and trimming on the
