@@ -976,6 +976,49 @@ behind us.
       sections), box×box and box×cylinder families, the
       polygon-domain tessellation, and the OCCT-authored-result
       reader widening.
+- [x] **K4-2d/3 slice 2 (landing 2026-10-30)** the offset face
+      stations — the interior center whose ball crosses exactly ONE
+      face. The classification's crossing count (axis k's low face
+      crossed iff `d(k) < r`, the high likewise — strict, tangency the
+      contained arm's own boundary) routes the single-crossing case to
+      the new station; two or more crossings refuse by name with the
+      count. The bite is the **small-circle cap** the face plane cuts
+      from the ball: `ρ = √(r² − δ²)` at center depth `δ ∈ (0, r)`,
+      the section circle on the face plane at the center's foot. Cut
+      = the box minus the deep cap (the holed face + the REVERSED
+      deep cap, height `δ + r`); Fuse = the box plus the shallow cap
+      (height `r − δ`, unreversed); Common = the disk (`ρ`) + the
+      deep cap. Every patch is a single-circle-trimmed sphere face —
+      the CAP class the measure's cap reader already reads exactly
+      (`s = ∓δ`, `ρ² + s² = r²`); no new measure was needed, only the
+      station. Both sides measured (the low face and the mirrored
+      high face): the closed forms (`V_deep = π(δ+r)²(2r−δ)/3`,
+      `V_shallow = π(r−δ)²(2r+δ)/3`, the disk `πρ²`, the cap areas
+      `2πr(δ+r)` / `2πr(r−δ)`) AND real OCCT's own numbers
+      (`face_offset` / `face_offset_high` in the regenerated corpus —
+      `box_sphere_cut_face_offset: V=2967.92957499 A=1738.48451001`,
+      the face counts 7/7/2 matching the construction), the FCBREP
+      round-trip bit-identical. The near-plane centers route here
+      exactly too: a center at depth `1e-12` (classified interior,
+      not on-plane) constructs honestly — no snap, no refusal —
+      because the station's arithmetic IS the input's. **A real
+      tessellator defect fell out**: the sphere CAP face (a
+      single-closed-circle trim) sailed past the loop-bounds check
+      (a latitude spans the u period) into the band machinery, whose
+      two u-monotone chains COINCIDE — emitting NOTHING, then passing
+      the shell's volume check as an open flat patch (the disk at
+      z=5 alone, volume `area·z/3 > 0` — a plausible-looking Ok that
+      is not a shell; the slice-1 face station's hemisphere had the
+      same nothing-emitted path, masked by its disk sitting at z=0
+      where the flat volume reads 0). The tessellator now refuses the
+      class by name — the cap and its complement share the loop, the
+      wire-orientation classification is the K4-2d slice — never a
+      silently open shell. Acceptance: `tests/box_sphere_boolean.rs`
+      (10 total) + `tests/exact_boolean.rs` (12 total — the offset
+      bite through the real dispatch, all three ops). Suite: 695,
+      none ignored. The remaining K4-2d/3 surface: box×box,
+      box×cylinder, the polygon-domain and cap tessellations, and the
+      OCCT-authored-result reader widening.
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

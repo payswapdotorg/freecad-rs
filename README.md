@@ -22,7 +22,7 @@ placements, sketches) — lives in
 **Verified baseline** — v0.1.8 (`main` @ 2026-10-24, plus the
 v0.2.0 — the browser workbench; v0.2.1 makes the workbench a durable
 in-repo asset; v0.2.2 — feature patterns, the mechanical workflow):
-ten crates, **692 tests**
+ten crates, **695 tests**
 (counted 2026-10-30; per-crate counts live in
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the authoritative
 green run is CI: `cargo build` / `cargo test --workspace --locked` /

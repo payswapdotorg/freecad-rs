@@ -144,7 +144,8 @@ fn acceptance(
     assert!(
         err.contains("spherical polygon")
             || err.contains("holes")
-            || err.contains("non-positive volume"),
+            || err.contains("non-positive volume")
+            || err.contains("single closed circle"),
         "{name}: the tessellation refusal names its reason: {err}"
     );
 }
@@ -454,5 +455,78 @@ fn spherical_polygon_reads_the_octant_and_complement() {
     assert!(
         (octant_patch + bulge_patch - 4.0 * PI * r * r).abs() < 1e-9,
         "the patch areas partition the sphere"
+    );
+}
+
+/// The offset face stations (K4-2d/3 slice 2): the center at depth
+/// δ inside the box, the ball crossing exactly ONE face — the bite is
+/// the small-circle cap. Both sides (the low face and the mirrored
+/// high face), all three ops, against the closed forms AND real
+/// OCCT's own numbers, the FCBREP round-trip, and the render refusal.
+#[test]
+fn offset_face_bite_measures_the_closed_forms_and_occt() {
+    let r = 2.0;
+    let delta = 1.5;
+    let rho2 = r * r - delta * delta; // 1.75
+                                      // The cap closed forms: deep (height δ + r), shallow (r − δ).
+    let deep_v = PI * (delta + r) * (delta + r) * (2.0 * r - delta) / 3.0;
+    let shallow_v = PI * (r - delta) * (r - delta) * (2.0 * r + delta) / 3.0;
+    let deep_a = 2.0 * PI * r * (delta + r);
+    let shallow_a = 2.0 * PI * r * (r - delta);
+    let disk_a = PI * rho2;
+    // The low face: the center at (15, 10, 1.5).
+    let cs_lo = v3(15.0, 10.0, 1.5);
+    // The mirrored high face: (15, 10, 3.5) — δ = 5 − 3.5.
+    let cs_hi = v3(15.0, 10.0, 3.5);
+    for (tag, cs) in [("low", cs_lo), ("high", cs_hi)] {
+        acceptance(
+            &format!("offset-{tag} cut"),
+            "box_sphere_cut_face_offset",
+            BooleanOp::Cut,
+            cs,
+            r,
+            3000.0 - deep_v,
+            1700.0 - disk_a + deep_a,
+            7,
+        );
+        acceptance(
+            &format!("offset-{tag} fuse"),
+            "box_sphere_fuse_face_offset",
+            BooleanOp::Fuse,
+            cs,
+            r,
+            3000.0 + shallow_v,
+            1700.0 - disk_a + shallow_a,
+            7,
+        );
+        acceptance(
+            &format!("offset-{tag} common"),
+            "box_sphere_common_face_offset",
+            BooleanOp::Common,
+            cs,
+            r,
+            deep_v,
+            disk_a + deep_a,
+            2,
+        );
+    }
+}
+
+/// The offset boundaries, refusing by name: a ball crossing TWO
+/// faces (bottom and top, or a lateral beside the face) has no
+/// single-section construction — the count named, never a guess.
+#[test]
+fn offset_multi_face_crossings_refuse_by_name() {
+    // The center mid-height, r spanning the slab: bottom AND top.
+    let why = refused(run(BooleanOp::Cut, v3(15.0, 10.0, 2.5), 4.0));
+    assert!(
+        why.contains("crosses 2 of the box's faces"),
+        "the two-face crossing names its count: {why}"
+    );
+    // A lateral crossing beside the face bite.
+    let why = refused(run(BooleanOp::Cut, v3(1.0, 10.0, 1.5), 2.0));
+    assert!(
+        why.contains("crosses 2 of the box's faces"),
+        "the lateral+face crossing names its count: {why}"
     );
 }

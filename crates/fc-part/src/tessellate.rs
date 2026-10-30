@@ -508,6 +508,43 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
                 // by name: the exact channels still measure it, and
                 // the trim-domain classification slice (K4-2d) is the
                 // honest widening path.
+                // The cap and its complement share one loop: a
+                // sphere face whose single wire is ONE closed circle
+                // (a latitude) bounds both the cap (loop → pole) and
+                // the complement (loop → the far pole) — the same
+                // interior/exterior ambiguity, and the wire-orientation
+                // classification that would settle it is the same
+                // K4-2d slice. The band machinery cannot tile it
+                // either: the boundary walk's two u-monotone chains
+                // COINCIDE (the full latitude), the band has no
+                // height, and nothing would be emitted — a silently
+                // open shell, worse than a refusal. Found by the
+                // K4-2d/3 offset stations (their caps and the
+                // slice-1 face station's hemisphere patch all carry
+                // exactly this trim).
+                if let Surface::Sphere { .. } = face.surface {
+                    let cap_loop = face.wires.len() == 1 && {
+                        let uses: Vec<usize> = face.wires[0]
+                            .edges
+                            .iter()
+                            .filter(|we| !brep.is_degenerate(we.edge))
+                            .map(|we| we.edge)
+                            .collect();
+                        uses.len() == 1 && {
+                            let e = &brep.edges[uses[0]];
+                            e.start == e.end
+                        }
+                    };
+                    if cap_loop {
+                        return Err(format!(
+                            "face {fi}: a sphere face trimmed by a single closed circle — the \
+                             cap and its complement share that loop (the wire-orientation \
+                             classification is the K4-2d slice); the band tessellator's two \
+                             chains would coincide and emit nothing, so this is a refusal, not \
+                             a silently open shell; the exact channels still measure it"
+                        ));
+                    }
+                }
                 if let Surface::Sphere { .. } = face.surface {
                     let polygon = face.wires.len() == 1 && {
                         let uses: Vec<usize> = face.wires[0]

@@ -90,9 +90,10 @@ For `Part::Cut` / `Part::Fuse` / `Part::Common`, in priority order
     reason. The pairing table (amended by K4-2d/3): sphere×sphere,
     cylinder×cylinder, cylinder×sphere, **box×sphere** — the
     box×sphere family covering the boundary-skeleton stations
-    (corner/edge/face bites) and the classification tier (whole
-    shapes, the empty set, the named refusals the kernel itself
-    carries).
+    (corner/edge/face bites), the offset face stations (slice 2: an
+    interior center whose ball crosses exactly one face — the
+    small-circle cap), and the classification tier (whole shapes, the
+    empty set, the named refusals the kernel itself carries).
   - The other operand is faceted, or either operand is an exact class
     the kernel cannot pair (a multi-surface B-rep, a B-spline face,
     cone or torus classes, or an unpaired combination such as
@@ -157,13 +158,17 @@ This architecture lands in slices; each stays green on its own.
   widens with the box×sphere family — the hexahedral box class (an
   imported box-class B-rep or a `Box` primitive, placements applied
   analytically) pairs with the sphere through the kernel's
-  boundary-skeleton bite taxonomy; the tessellator refuses the new
-  patch classes by name (the spherical polygon and the holed face —
-  trim-domain classification is the named widening path, and tiling
-  them through the band machinery would tear). The box-class refusal
-  of slice 1 is retired: what refused as "a planar-faced (box-class)
-  solid" now runs exact against a sphere and refuses by name against
-  everything else (the pairing-table message).
+  boundary-skeleton bite taxonomy and (the same day's second slice)
+  the offset face stations; the tessellator refuses the new patch
+  classes by name (the spherical polygon, the holed face, and — a
+  defect the offset stations flushed out — the sphere cap face whose
+  single-closed-circle trim sent the band machinery into a silently
+  open shell; trim-domain/wire-orientation classification is the
+  named widening path, and tiling these through the band machinery
+  would tear or vanish). The box-class refusal of slice 1 is retired:
+  what refused as "a planar-faced (box-class) solid" now runs exact
+  against a sphere and refuses by name against everything else (the
+  pairing-table message).
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
   results; widening the supported-combination table as K4-2d/3 lands
@@ -174,11 +179,12 @@ This architecture lands in slices; each stays green on its own.
 
 - **General BRep booleans through features.** Four families
   (sphere×sphere, cylinder×cylinder, cylinder×sphere, box×sphere at
-  the boundary-skeleton stations) are wired; the rest refuse by name —
-  including the box family's own honest boundaries (the
-  off-skeleton/interior-crossing general overlaps, the oversized
-  bite, the near-but-not-bit-exact station, box×box, box×cylinder).
-  K4-2d/3's later slices widen further.
+  the boundary-skeleton and offset stations) are wired; the rest
+  refuse by name — including the box family's own honest boundaries
+  (the off-skeleton general overlaps, the interior center crossing
+  two or more faces, the oversized bite, the near-but-not-bit-exact
+  station, box×box, box×cylinder). K4-2d/3's later slices widen
+  further.
 - **That the mesh fallback for unsupported primitive combinations is
   exactness.** It is faceted, the representation says so, and the
   narrowing path is more exact families, not relabeling.
@@ -192,9 +198,10 @@ This architecture lands in slices; each stays green on its own.
 
 - When K4-2d/3 lands additional exact-boolean families, the dispatch
   table grows and the faceted-fallback set shrinks — by amendment to
-  this ADR, not silently. *(Exercised 2026-10-30: the K4-2d/3 slice 1
-  landing amended rules 3 and this section's lists — the box×sphere
-  family above.)*
+  this ADR, not silently. *(Exercised 2026-10-30: the K4-2d/3
+  landings — slice 1 and the offset-station slice 2 the same day —
+  amended rules 3 and this section's lists: the box×sphere family
+  above.)*
 - If a real downstream workflow requires saved derived-exact payloads
   (consumers that cannot recompute), revisit rule 4 with an explicit
   serialization ADR — an FCBREP exact form is the candidate, and it

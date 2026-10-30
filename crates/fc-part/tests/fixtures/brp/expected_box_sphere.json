@@ -252,6 +252,92 @@
     "Plane",
     "Plane"
    ]
+  },
+  "box_sphere_cut_face_offset": {
+   "volume": 2967.9295749946045,
+   "area": 1738.484510006475,
+   "faces": 7,
+   "edges": 29,
+   "vertices": 58,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_fuse_face_offset": {
+   "volume": 3001.4398966328954,
+   "area": 1700.7853981633973,
+   "faces": 7,
+   "edges": 29,
+   "vertices": 58,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_common_face_offset": {
+   "volume": 32.070425005395826,
+   "area": 49.480084294039266,
+   "faces": 2,
+   "edges": 5,
+   "vertices": 10,
+   "surface_kinds": [
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_cut_face_offset_high": {
+   "volume": 2967.9295749946045,
+   "area": 1738.484510006475,
+   "faces": 7,
+   "edges": 29,
+   "vertices": 58,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_fuse_face_offset_high": {
+   "volume": 3001.4398966328954,
+   "area": 1700.7853981633973,
+   "faces": 7,
+   "edges": 29,
+   "vertices": 58,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_common_face_offset_high": {
+   "volume": 32.0704250053958,
+   "area": 49.480084294039216,
+   "faces": 2,
+   "edges": 5,
+   "vertices": 10,
+   "surface_kinds": [
+    "Plane",
+    "SphericalSurface"
+   ]
   }
  }
 }

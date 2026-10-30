@@ -269,8 +269,14 @@ fn cut_of_imported_sphere_by_primitive_runs_exact_through_the_round_trip() {
     let tess_err = result
         .try_tessellate(0.05)
         .expect_err("the trim class refuses");
+    // The cap/complement refusal (K4-2d/3 slice 2's tessellator
+    // guard: a sphere face trimmed by a single closed circle — the
+    // crescent's complement face IS one — names the wire-orientation
+    // classification; the earlier interior/exterior-ambiguous message
+    // covered the same slice from the loop-bounds side.
     assert!(
-        tess_err.contains("trim-domain classification"),
+        tess_err.contains("trim-domain classification")
+            || tess_err.contains("wire-orientation classification"),
         "the display refusal names the slice: {tess_err}"
     );
 
@@ -1014,4 +1020,92 @@ fn sphere_base_box_tool_cut_refuses_with_the_swap() {
         other => panic!("expected ExecuteFailed, got {other:?}"),
     }
     std::fs::remove_file(&path).ok();
+}
+
+/// The offset bite through the feature (K4-2d/3 slice 2): the sphere
+/// primitive placed at depth δ inside the imported box — the ball
+/// crossing exactly ONE face, the bite a small-circle cap, the closed
+/// forms through the real dispatch.
+#[test]
+fn offset_bite_of_imported_box_runs_exact() {
+    // δ = 1.5, r = 2: the deep cap V = π(δ+r)²(2r−δ)/3 = π·12.25·2.5/3
+    // (= 10.2083̄π, real OCCT's own number in the corpus); the shallow
+    // cap π(r−δ)²(2r+δ)/3 = π·0.25·5.5/3.
+    let want_cut = 3000.0 - 12.25 * 2.5 * std::f64::consts::PI / 3.0;
+    let want_common = 12.25 * 2.5 * std::f64::consts::PI / 3.0;
+    let want_fuse = 3000.0 + 0.25 * 5.5 * std::f64::consts::PI / 3.0;
+    for (kind, want) in [
+        ("Part::Cut", want_cut),
+        ("Part::Fuse", want_fuse),
+        ("Part::Common", want_common),
+    ] {
+        let path = temp_path("box-offset");
+        let boxbrp = brp_fixture("box");
+        // The sphere at (15, 10, 1.5) — depth 1.5 above the bottom
+        // face, r = 2 crossing exactly that one face.
+        let xml = format!(
+            "\
+<Document SchemaVersion=\"4\" ProgramVersion=\"test\" FileVersion=\"1\">
+ <Objects Count=\"3\" Dependencies=\"1\">
+  <Object type=\"Part::Feature\" name=\"Import\" id=\"1\"/>
+  <Object type=\"Part::Sphere\" name=\"Ball\" id=\"2\"/>
+  <Object type=\"{kind}\" name=\"Op\" id=\"3\"/>
+ </Objects>
+ <ObjectData Count=\"3\">
+  <Object name=\"Import\">
+   <Properties Count=\"1\">
+    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">
+     <Part file=\"ImportShape.brp\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Ball\">
+   <Properties Count=\"2\">
+    <Property name=\"Radius\" type=\"App::PropertyFloat\">
+     <Float value=\"2\"/>
+    </Property>
+    <Property name=\"Placement\" type=\"App::PropertyPlacement\">
+     <PropertyPlacement Px=\"15\" Py=\"10\" Pz=\"1.5\" Q0=\"0\" Q1=\"0\" Q2=\"0\" Q3=\"1\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Op\">
+   <Properties Count=\"2\">
+    <Property name=\"Base\" type=\"App::PropertyLink\">
+     <Link value=\"Import\"/>
+    </Property>
+    <Property name=\"Tool\" type=\"App::PropertyLink\">
+     <Link value=\"Ball\"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>
+"
+        );
+        craft_fcstd(&path, &xml, &[("ImportShape.brp", &boxbrp)]);
+        let (mut doc, _) = load_document(&path).expect("loads");
+        doc.recompute_all().expect("recompute executes");
+        let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+        assert_eq!(
+            result.kind_name(),
+            "Brep",
+            "{kind}: the offset bite carries the exact model"
+        );
+        let got = result.try_volume().expect("measures exactly");
+        assert!(
+            (got - want).abs() <= 1e-9 * want,
+            "{kind}: the offset-bite volume {got} is the closed form {want}"
+        );
+        // The display channel refuses by name (the cap class), the
+        // two-channel contract.
+        let tess_err = result
+            .try_tessellate(0.05)
+            .expect_err("the cap class refuses");
+        assert!(
+            tess_err.contains("single closed circle") || tess_err.contains("holes"),
+            "{kind}: the display refusal names its reason: {tess_err}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
 }

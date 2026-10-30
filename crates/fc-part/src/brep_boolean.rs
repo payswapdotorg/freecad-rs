@@ -5107,10 +5107,39 @@ pub fn box_sphere_boolean(
             [sig(on[0]), sig(on[1])],
         ),
         1 => face_station(op, o, axes, dims, cs, r, on[0], sig(on[0])),
-        _ => Ok(refused(
-            "the sphere crosses the box's faces from an interior center — the general \
-             spherical section is not constructed in this family",
-        )),
+        _ => {
+            // All axes strictly inside the slabs. Count the face
+            // crossings: axis k's low face is crossed iff the ball
+            // reaches past it (d(k) < r), the high face likewise
+            // (dims[k] − d(k) < r) — strict, tangency being the
+            // contained arm's own boundary. Exactly ONE crossing is
+            // the offset face station (the small-circle section,
+            // K4-2d/3 slice 2); the ball reaching two faces or more
+            // is the general overlap this family does not construct.
+            let crossings: Vec<(usize, u8)> = (0..3)
+                .flat_map(|k| {
+                    let mut c = Vec::new();
+                    if d[k] < r {
+                        c.push((k, 0u8));
+                    }
+                    if dims[k] - d[k] < r {
+                        c.push((k, 1u8));
+                    }
+                    c
+                })
+                .collect();
+            if crossings.len() == 1 {
+                let (n, sig_n) = crossings[0];
+                offset_face_station(op, o, axes, dims, cs, r, n, sig_n)
+            } else {
+                Ok(refused(&format!(
+                    "the sphere crosses {} of the box's faces from an interior center — the \
+                     general spherical section is not constructed in this family (one crossed \
+                     face is the offset bite; two or more have no single-section construction)",
+                    crossings.len()
+                )))
+            }
+        }
     }
 }
 
@@ -5298,6 +5327,258 @@ fn rect_face(
         }],
         reversed: false,
     });
+}
+
+/// The OFFSET face station (K4-2d/3 slice 2): the center strictly
+/// inside the box, the ball crossing EXACTLY ONE face — the bite is
+/// the spherical cap the face plane cuts from the ball, a **small
+/// circle** section (radius `ρ = √(r² − δ²)` at center depth `δ ∈
+/// (0, r)` from the crossed face). The single-crossing guarantee is
+/// the caller's (the classification's crossing count): the lateral
+/// extent of the cap is the ball's own (≤ r, inside by the count) and
+/// the far face is unreached (or tangent — measure-zero, the
+/// construction unaffected).
+///
+/// * **Cut** — the box with the cap-shaped bite removed: the five
+///   untouched faces + the station face with the disk hole + the
+///   REVERSED deep cap (the solid lies outside the sphere there);
+/// * **Fuse** — the box plus the outside part of the ball: the SAME
+///   five faces + the holed face + the unreversed SHALLOW cap (the
+///   part beyond the face plane, height `r − δ`);
+/// * **Common** — the bite itself: the flat disk (`ρ`) + the
+///   unreversed deep cap (height `δ + r`).
+///
+/// Every patch is a single-circle-trimmed sphere face — the CAP
+/// class the measure's cap reader already reads exactly (`s = ∓δ`
+/// with `ρ² + s² = r²`); the disk hole is the plane reader's own.
+#[allow(clippy::too_many_arguments)] // the box frame is the vocabulary
+fn offset_face_station(
+    op: BooleanOp,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    cs: Vector3,
+    r: f64,
+    n: usize,
+    sig_n: u8,
+) -> Result<BooleanOutcome, String> {
+    let d = |k: usize| v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&axes[k]);
+    let others: Vec<usize> = (0..3).filter(|&m| m != n).collect();
+    let (i, j) = (others[0], others[1]);
+    // The inward direction of the crossed face and the center's depth
+    // from it — both exact arithmetic on the input parameters.
+    let u_n = if sig_n == 1 {
+        v3(-axes[n].x, -axes[n].y, -axes[n].z)
+    } else {
+        axes[n]
+    };
+    let delta = if sig_n == 1 { dims[n] - d(n) } else { d(n) };
+    // The caller guarantees 0 < δ < r (a strict crossing from an
+    // interior center); defend it anyway — the construction's own
+    // contract, never assumed from afar.
+    if !(delta > 0.0 && delta < r) {
+        return Err(format!(
+            "the offset face station demands 0 < depth < r, got δ = {delta} (r = {r})"
+        ));
+    }
+    let rho = (r * r - delta * delta).sqrt();
+    if rho <= 0.0 {
+        return Err("the offset section circle degenerated (ρ = 0)".into());
+    }
+    let n_out = v3(-u_n.x, -u_n.y, -u_n.z);
+    // The face's frame: (e_a, e_b) from {a_i, a_j}, right-handed
+    // against n_out.
+    let (ia, ib) = if axes[i].cross(&axes[j]).dot(&n_out) > 0.0 {
+        (i, j)
+    } else {
+        (j, i)
+    };
+    let e_a = axes[ia];
+    // The foot of the sphere's center on the crossed face plane —
+    // the section circle's center, canonical.
+    let foot = v3(
+        cs.x - delta * u_n.x,
+        cs.y - delta * u_n.y,
+        cs.z - delta * u_n.z,
+    );
+    // The section circle: a small circle of the sphere ON the face
+    // plane, stored CCW around the inward normal u_n.
+    let circle_curve = Curve::Circle {
+        center: foot,
+        axis: u_n,
+        ref_dir: e_a,
+        radius: rho,
+    };
+    let sphere_surface = Surface::Sphere {
+        center: cs,
+        axis: u_n,
+        ref_dir: e_a,
+        radius: r,
+    };
+    // The station face's side entry (the crossed face's plane).
+    let s_n = if u_n == axes[n] { 0u8 } else { 1 };
+    let s_face = |a: u8, b: u8| -> [u8; 3] {
+        let mut s = [0u8, 0, 0];
+        s[n] = s_n;
+        s[ia] = a;
+        s[ib] = b;
+        s
+    };
+
+    let brep = match op {
+        BooleanOp::Cut | BooleanOp::Fuse => {
+            let mut draft = Draft::new();
+            let circle_edge = draft.circle(circle_curve.clone());
+            // The five untouched faces.
+            for k in 0..3 {
+                for high in [false, true] {
+                    // Skip the crossed face (holed below).
+                    if k == n && ((u_n == axes[n] && !high) || (u_n != axes[n] && high)) {
+                        continue;
+                    }
+                    let n_out_k = if high {
+                        axes[k]
+                    } else {
+                        v3(-axes[k].x, -axes[k].y, -axes[k].z)
+                    };
+                    let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+                    let (ka, kb) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out_k) > 0.0 {
+                        (span[0], span[1])
+                    } else {
+                        (span[1], span[0])
+                    };
+                    let s_of = |a: u8, b: u8| -> [u8; 3] {
+                        let mut s = [0u8, 0, 0];
+                        s[k] = high as u8;
+                        s[ka] = a;
+                        s[kb] = b;
+                        s
+                    };
+                    rect_face(
+                        &mut draft,
+                        box_corner(o, axes, dims, s_of(0, 0)),
+                        box_corner(o, axes, dims, s_of(1, 0)),
+                        box_corner(o, axes, dims, s_of(1, 1)),
+                        box_corner(o, axes, dims, s_of(0, 1)),
+                        n_out_k,
+                        axes[ka],
+                        axes[kb],
+                        dims[ka],
+                        dims[kb],
+                    );
+                }
+            }
+            // The holed face: the outer rectangle CCW + the small
+            // circle hole forward (CCW around the inward normal —
+            // the region-on-left rule for holes).
+            let c00 = box_corner(o, axes, dims, s_face(0, 0));
+            let c10 = box_corner(o, axes, dims, s_face(1, 0));
+            let c11 = box_corner(o, axes, dims, s_face(1, 1));
+            let c01 = box_corner(o, axes, dims, s_face(0, 1));
+            let outer = [
+                draft.seam(c00, c10),
+                draft.seam(c10, c11),
+                draft.seam(c11, c01),
+                draft.seam(c01, c00),
+            ];
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [0.0, dims[ia], 0.0, dims[ib]],
+                wires: vec![
+                    TopoWire {
+                        edges: outer
+                            .iter()
+                            .map(|&(ed, f)| WireEdge {
+                                edge: ed,
+                                forward: f,
+                            })
+                            .collect(),
+                    },
+                    TopoWire {
+                        edges: vec![WireEdge {
+                            edge: circle_edge,
+                            forward: true,
+                        }],
+                    },
+                ],
+                reversed: false,
+            });
+            // The cap patch: Cut keeps the DEEP cap (into the box,
+            // height δ + r — the boundary of the removed bite;
+            // reversed, the solid outside the sphere), Fuse the
+            // SHALLOW cap (beyond the face plane, height r − δ;
+            // unreversed, the solid inside the ball there). Both
+            // traverse the circle backward — the kept side follows
+            // from the cap rule against the stored axis u_n.
+            let reversed = op == BooleanOp::Cut;
+            draft.faces.push(TopoFace {
+                surface: sphere_surface,
+                uv_bounds: [
+                    0.0,
+                    std::f64::consts::TAU,
+                    -std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::FRAC_PI_2,
+                ],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: circle_edge,
+                        forward: false,
+                    }],
+                }],
+                reversed,
+            });
+            draft.finish()?
+        }
+        BooleanOp::Common => {
+            // The bite: the flat disk (ρ) + the deep cap (height
+            // δ + r), sharing the circle in opposite directions.
+            let mut draft = Draft::new();
+            let circle_edge = draft.circle(circle_curve);
+            // The disk (outward −u_n, in the crossed face plane): the
+            // circle backward.
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: foot,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [-rho, rho, -rho, rho],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: circle_edge,
+                        forward: false,
+                    }],
+                }],
+                reversed: false,
+            });
+            // The deep cap (the +u_n side, height δ + r, unreversed):
+            // the circle forward.
+            draft.faces.push(TopoFace {
+                surface: sphere_surface,
+                uv_bounds: [
+                    0.0,
+                    std::f64::consts::TAU,
+                    -std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::FRAC_PI_2,
+                ],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: circle_edge,
+                        forward: true,
+                    }],
+                }],
+                reversed: false,
+            });
+            draft.finish()?
+        }
+    };
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
 }
 
 /// The whole box: six rectangle faces over the canonical corners.

@@ -12,6 +12,9 @@ configurations of the K4-2d/3 taxonomy:
               ball spanning the two adjacent faces;
 * `face`    — the center sits inside a face; the bite is a half ball
               behind an interior circular hole;
+* `face_offset` / `face_offset_high` — the center at depth δ
+              inside, the ball crossing exactly one face: the bite
+              is a small-circle cap (slice 2);
 * `inside`  — the sphere entirely inside the box (containment);
 * `disjoint`— no contact;
 * `engulf`  — the box entirely inside the sphere.
@@ -58,6 +61,12 @@ CONFIGS = [
     ("inside", (15.0, 10.0, 2.5), 1.5),
     ("disjoint", (-10.0, -10.0, -10.0), 5.0),
     ("engulf", (15.0, 10.0, 2.5), 50.0),
+    # K4-2d/3 slice 2 — the offset face stations: the center at depth
+    # δ = 1.5 inside, crossing exactly one face (r = 2): the low face
+    # (bottom) and the mirrored high face (top). The bite is the
+    # small-circle cap: V = π(δ+r)²(2r−δ)/3, A = π(r²−δ²) + 2πr(δ+r).
+    ("face_offset", (15.0, 10.0, 1.5), 2.0),
+    ("face_offset_high", (15.0, 10.0, 3.5), 2.0),
 ]
 
 
