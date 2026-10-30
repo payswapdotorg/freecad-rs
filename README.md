@@ -22,7 +22,7 @@ placements, sketches) — lives in
 **Verified baseline** — v0.1.8 (`main` @ 2026-10-24, plus the
 v0.2.0 — the browser workbench; v0.2.1 makes the workbench a durable
 in-repo asset; v0.2.2 — feature patterns, the mechanical workflow):
-ten crates, **695 tests**
+ten crates, **710 tests**
 (counted 2026-10-30; per-crate counts live in
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the authoritative
 green run is CI: `cargo build` / `cargo test --workspace --locked` /
@@ -104,7 +104,12 @@ concrete terms:
   volume-exact). And since ADR 0004 (2026-10-30), a document boolean
   whose operand carries imported exact geometry (`TopoShape::Brep`)
   dispatches to the exact kernel families — sphere×sphere,
-  cylinder×cylinder, cylinder×sphere, placements applied analytically —
+  cylinder×cylinder, cylinder×sphere, box×sphere (the boundary-skeleton
+  bite taxonomy and the offset cap stations), and box×box (the
+  rectilinear composition — the first family whose constructive
+  results even RENDER: the hole-free rectilinear faces tessellate
+  watertight with the mesh volume exactly the exact volume),
+  placements applied analytically —
   the result carrying the exact model, measuring the kernel's own
   numbers; anything unpairable refuses with the operands and classes
   named, never a silent tessellation of the imported geometry

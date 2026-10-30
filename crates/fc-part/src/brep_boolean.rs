@@ -6464,3 +6464,678 @@ fn face_station(
         kind: BooleanOutcomeKind::Solid(brep),
     })
 }
+
+// ---------------------------------------------------------------------------
+// K4-2d/3 slice 3 — the box×box family: the rectilinear composition
+// ---------------------------------------------------------------------------
+
+/// The per-axis level intervals of one box of the arrangement, in
+/// the base frame's coordinates (`t[k]` the parameter along
+/// `axes[k]`).
+struct Slab {
+    lo: [f64; 3],
+    hi: [f64; 3],
+}
+
+/// One rectilinear region of a face plane: the outer boundary CCW in
+/// the plane's `(ia, ib)` level coordinates, and the optional hole
+/// boundary CW.
+struct PlaneRegion {
+    outer: Vec<(f64, f64)>,
+    hole: Option<Vec<(f64, f64)>>,
+}
+
+/// The canonical point at per-axis levels — ONE fixed accumulation
+/// order (axis 0, then 1, then 2), so every shared vertex is
+/// bit-identical across the faces that reference it (the exactness
+/// discipline; the box-corner precedent).
+fn point_at(o: Vector3, axes: [Vector3; 3], t: [f64; 3]) -> Vector3 {
+    let mut p = o;
+    for k in 0..3 {
+        p = v3(
+            p.x + t[k] * axes[k].x,
+            p.y + t[k] * axes[k].y,
+            p.z + t[k] * axes[k].z,
+        );
+    }
+    p
+}
+
+fn rect_ccw(i0: f64, i1: f64, j0: f64, j1: f64) -> Vec<(f64, f64)> {
+    vec![(i0, j0), (i1, j0), (i1, j1), (i0, j1)]
+}
+
+fn rect_region(i0: f64, i1: f64, j0: f64, j1: f64) -> PlaneRegion {
+    PlaneRegion {
+        outer: rect_ccw(i0, i1, j0, j1),
+        hole: None,
+    }
+}
+
+fn poly_region(outer: Vec<(f64, f64)>) -> PlaneRegion {
+    PlaneRegion { outer, hole: None }
+}
+
+/// The rect `r1 = [i0, i1]×[j0, j1]` minus the rect `r2` (both
+/// axis-aligned in level coordinates, `r2` clipped into `r1` by the
+/// caller): the full rect, the L (two adjacent touches, 6 vertices),
+/// the step/C (one touch, 8 vertices), the ring (no touch — outer
+/// plus hole), or the one-two bands (a spanning touch) — every
+/// region a face the measure's polygon and annulus paths read
+/// exactly, and the hole-free ones the tessellator's planar ear-clip
+/// renders watertight.
+fn rect_minus_rect(r1: [f64; 4], r2: [f64; 4]) -> Vec<PlaneRegion> {
+    let [i0, i1, j0, j1] = r1;
+    let [p0, p1, q0, q1] = r2;
+    // No effective overlap: the face keeps its full rect.
+    if !(p0 < p1 && q0 < q1) || p1 <= i0 || p0 >= i1 || q1 <= j0 || q0 >= j1 {
+        return vec![rect_region(i0, i1, j0, j1)];
+    }
+    // Full cover: the face is consumed.
+    if p0 <= i0 && p1 >= i1 && q0 <= j0 && q1 >= j1 {
+        return Vec::new();
+    }
+    let touch = (p0 == i0, p1 == i1, q0 == j0, q1 == j1);
+    match touch {
+        // Spans the i axis: the two j-bands.
+        (true, true, false, false) => {
+            vec![rect_region(i0, i1, j0, q0), rect_region(i0, i1, q1, j1)]
+        }
+        (true, true, true, false) => vec![rect_region(i0, i1, q1, j1)],
+        (true, true, false, true) => vec![rect_region(i0, i1, j0, q0)],
+        (true, true, true, true) => Vec::new(),
+        // Spans the j axis: the two i-bands.
+        (false, false, true, true) => {
+            vec![rect_region(i0, p0, j0, j1), rect_region(p1, i1, j0, j1)]
+        }
+        (true, false, true, true) => vec![rect_region(p1, i1, j0, j1)],
+        (false, true, true, true) => vec![rect_region(i0, p0, j0, j1)],
+        // Touches nothing: the ring — outer CCW, hole CW.
+        (false, false, false, false) => {
+            let mut hole = rect_ccw(p0, p1, q0, q1);
+            hole.reverse();
+            vec![PlaneRegion {
+                outer: rect_ccw(i0, i1, j0, j1),
+                hole: Some(hole),
+            }]
+        }
+        // Touches one side: the step (C) polygon, 8 vertices.
+        (true, false, false, false) => vec![poly_region(vec![
+            (i0, j0),
+            (i1, j0),
+            (i1, j1),
+            (i0, j1),
+            (i0, q1),
+            (p1, q1),
+            (p1, q0),
+            (i0, q0),
+        ])],
+        (false, true, false, false) => vec![poly_region(vec![
+            (i0, j0),
+            (i1, j0),
+            (i1, q0),
+            (p0, q0),
+            (p0, q1),
+            (i1, q1),
+            (i1, j1),
+            (i0, j1),
+        ])],
+        (false, false, true, false) => vec![poly_region(vec![
+            (i0, j0),
+            (p0, j0),
+            (p0, q1),
+            (p1, q1),
+            (p1, j0),
+            (i1, j0),
+            (i1, j1),
+            (i0, j1),
+        ])],
+        (false, false, false, true) => vec![poly_region(vec![
+            (i0, j0),
+            (i1, j0),
+            (i1, j1),
+            (p1, j1),
+            (p1, q0),
+            (p0, q0),
+            (p0, j1),
+            (i0, j1),
+        ])],
+        // Touches two adjacent sides: the L polygon, 6 vertices.
+        (true, false, true, false) => vec![poly_region(vec![
+            (p1, j0),
+            (i1, j0),
+            (i1, j1),
+            (i0, j1),
+            (i0, q1),
+            (p1, q1),
+        ])],
+        (false, true, true, false) => vec![poly_region(vec![
+            (i0, j0),
+            (p0, j0),
+            (p0, q1),
+            (p1, q1),
+            (i1, j1),
+            (i0, j1),
+        ])],
+        (true, false, false, true) => vec![poly_region(vec![
+            (i0, j0),
+            (i1, j0),
+            (i1, j1),
+            (p1, j1),
+            (p1, q0),
+            (i0, q0),
+        ])],
+        (false, true, false, true) => vec![poly_region(vec![
+            (i0, j0),
+            (i1, j0),
+            (i1, q0),
+            (p0, q0),
+            (p0, j1),
+            (i0, j1),
+        ])],
+    }
+}
+
+/// Emit the faces on one plane of the arrangement: the owner box's
+/// face rect (its other two axes' `[lo, hi]`), minus the footprint
+/// slab where present (the overlap box's own other-extents — the
+/// caller's condition says whether it bites this plane). The plane
+/// is frame axis `k` at level `t[k] = level`, the solid's outward
+/// normal `outward·axes[k]`. The `(ia, ib)` reading order is chosen
+/// right-handed against that normal (both frame handednesses carry);
+/// every region becomes one `TopoFace` — a plane trimmed by its
+/// rectilinear wire, the outer wire CCW viewed from the outward
+/// normal, holes CW — with the vertices canonical (one accumulation
+/// formula) and the edges shared by exact endpoint equality.
+#[allow(clippy::too_many_arguments)] // the plane's own vocabulary
+fn emit_plane_faces(
+    draft: &mut Draft,
+    oa: Vector3,
+    axes: [Vector3; 3],
+    k: usize,
+    level: f64,
+    outward: f64,
+    owner: &Slab,
+    footprint: Option<&Slab>,
+) {
+    let n_out = v3(
+        axes[k].x * outward,
+        axes[k].y * outward,
+        axes[k].z * outward,
+    );
+    let mut others = [0usize; 2];
+    let mut m = 0;
+    for a in 0..3 {
+        if a != k {
+            others[m] = a;
+            m += 1;
+        }
+    }
+    let (ia, ib) = if axes[others[0]].cross(&axes[others[1]]).dot(&n_out) > 0.0 {
+        (others[0], others[1])
+    } else {
+        (others[1], others[0])
+    };
+    let r1 = [owner.lo[ia], owner.hi[ia], owner.lo[ib], owner.hi[ib]];
+    let regions = match footprint {
+        None => vec![rect_region(r1[0], r1[1], r1[2], r1[3])],
+        Some(fp) => rect_minus_rect(r1, [fp.lo[ia], fp.hi[ia], fp.lo[ib], fp.hi[ib]]),
+    };
+    if regions.is_empty() {
+        return; // the face is fully consumed
+    }
+    // The plane's canonical origin: the owner rect's low corner.
+    let mut origin_levels = [0.0f64; 3];
+    origin_levels[k] = level;
+    origin_levels[ia] = r1[0];
+    origin_levels[ib] = r1[2];
+    let origin = point_at(oa, axes, origin_levels);
+    let x_dir = axes[ia];
+    for region in regions {
+        let point_of = |u: f64, v: f64| -> Vector3 {
+            let mut t = [0.0f64; 3];
+            t[k] = level;
+            t[ia] = u;
+            t[ib] = v;
+            point_at(oa, axes, t)
+        };
+        // The wire: the outer boundary's segments in CCW order.
+        let pts: Vec<Vector3> = region.outer.iter().map(|&(u, v)| point_of(u, v)).collect();
+        let n = pts.len();
+        let mut edges = Vec::with_capacity(n);
+        for p in 0..n {
+            let (e, f) = draft.seam(pts[p], pts[(p + 1) % n]);
+            edges.push(WireEdge {
+                edge: e,
+                forward: f,
+            });
+        }
+        let mut wires = vec![TopoWire { edges }];
+        // The hole boundary, CW: the annulus faces.
+        if let Some(hole) = &region.hole {
+            let hpts: Vec<Vector3> = hole.iter().map(|&(u, v)| point_of(u, v)).collect();
+            let hn = hpts.len();
+            let mut hedges = Vec::with_capacity(hn);
+            for p in 0..hn {
+                let (e, f) = draft.seam(hpts[p], hpts[(p + 1) % hn]);
+                hedges.push(WireEdge {
+                    edge: e,
+                    forward: f,
+                });
+            }
+            wires.push(TopoWire { edges: hedges });
+        }
+        // The UV bounds: the region's extents in the plane's own
+        // (u, v) reading (exact level differences against the
+        // origin's levels).
+        let umin = region
+            .outer
+            .iter()
+            .map(|&(u, _)| u - origin_levels[ia])
+            .fold(f64::INFINITY, f64::min);
+        let umax = region
+            .outer
+            .iter()
+            .map(|&(u, _)| u - origin_levels[ia])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let vmin = region
+            .outer
+            .iter()
+            .map(|&(_, v)| v - origin_levels[ib])
+            .fold(f64::INFINITY, f64::min);
+        let vmax = region
+            .outer
+            .iter()
+            .map(|&(_, v)| v - origin_levels[ib])
+            .fold(f64::NEG_INFINITY, f64::max);
+        draft.faces.push(TopoFace {
+            surface: Surface::Plane {
+                origin,
+                normal: n_out,
+                x_dir,
+            },
+            uv_bounds: [umin, umax, vmin, vmax],
+            wires,
+            reversed: false,
+        });
+    }
+}
+
+/// A whole box from per-axis level pairs — the classification tier's
+/// whole-shape answers and Common's overlap box, built by the SAME
+/// emission the partial construction uses (one construction, one
+/// discipline).
+fn framed_box_brep(o: Vector3, axes: [Vector3; 3], lo: [f64; 3], hi: [f64; 3]) -> ExactBRep {
+    let slab = Slab { lo, hi };
+    let mut draft = Draft::new();
+    for k in 0..3 {
+        for &high in &[false, true] {
+            let level = if high { hi[k] } else { lo[k] };
+            let outward = if high { 1.0 } else { -1.0 };
+            emit_plane_faces(&mut draft, o, axes, k, level, outward, &slab, None);
+        }
+    }
+    draft
+        .finish()
+        .expect("the whole box validates by construction")
+}
+
+/// The number of edge-connected face components — the structural
+/// shell count. Every edge being used twice (the measure's
+/// closed-shell rule) says each component is closed; CONNECTIVITY is
+/// what separates one solid from a compound, and the split cut is
+/// refused on it (by name, with the count).
+fn shell_components(brep: &ExactBRep) -> usize {
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            let grandparent = parent[parent[x]];
+            parent[x] = grandparent;
+            x = grandparent;
+        }
+        x
+    }
+    let mut parent: Vec<usize> = (0..brep.faces.len()).collect();
+    for e in 0..brep.edges.len() {
+        if brep.is_degenerate(e) {
+            continue;
+        }
+        let mut users: Vec<usize> = Vec::new();
+        for (fi, f) in brep.faces.iter().enumerate() {
+            if f.wires
+                .iter()
+                .any(|w| w.edges.iter().any(|we| we.edge == e))
+            {
+                users.push(fi);
+            }
+        }
+        if let Some(&first) = users.first() {
+            for &f2 in &users[1..] {
+                let a = find(&mut parent, first);
+                let b = find(&mut parent, f2);
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+    }
+    let mut roots = std::collections::HashSet::new();
+    for f in 0..brep.faces.len() {
+        roots.insert(find(&mut parent, f));
+    }
+    roots.len()
+}
+
+/// Finish a construction as a single-shell outcome: validated, then
+/// the structural shell count — a compound (the split cut) refuses
+/// by name with the count, never a plausible two-solid answer.
+fn finish_single_shell(draft: Draft, what: &str) -> Result<BooleanOutcome, String> {
+    if draft.faces.is_empty() {
+        return Ok(empty());
+    }
+    let brep = draft
+        .finish()
+        .map_err(|e| format!("{what}: the construction failed validation: {e}"))?;
+    let shells = shell_components(&brep);
+    if shells > 1 {
+        return Ok(refused(&format!(
+            "{what} splits the base into {shells} shells — a compound of closed shells, not a \
+             single-solid result in this family"
+        )));
+    }
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
+}
+
+/// The cut `A ∖ O` as the rectilinear composition: the base's six
+/// faces (each minus the overlap's footprint wherever the overlap
+/// touches that face), plus the overlap's own faces at levels
+/// strictly interior to the base's slabs (the bite's walls, outward
+/// normals pointing INTO the removed region). The construction reads
+/// the overlap box only — flush tool faces contribute nothing, which
+/// is the input's own arithmetic, not a snap.
+fn box_box_cut(
+    oa: Vector3,
+    axes: [Vector3; 3],
+    dims_a: [f64; 3],
+    o_lo: [f64; 3],
+    o_hi: [f64; 3],
+) -> Result<BooleanOutcome, String> {
+    let base = Slab {
+        lo: [0.0; 3],
+        hi: dims_a,
+    };
+    let over = Slab { lo: o_lo, hi: o_hi };
+    let mut draft = Draft::new();
+    for k in 0..3 {
+        for &high in &[false, true] {
+            let level = if high { dims_a[k] } else { 0.0 };
+            let outward = if high { 1.0 } else { -1.0 };
+            let touches = if high {
+                o_hi[k] == dims_a[k]
+            } else {
+                o_lo[k] == 0.0
+            };
+            emit_plane_faces(
+                &mut draft,
+                oa,
+                axes,
+                k,
+                level,
+                outward,
+                &base,
+                if touches { Some(&over) } else { None },
+            );
+        }
+    }
+    for k in 0..3 {
+        for &high in &[false, true] {
+            let (level, interior) = if high {
+                (o_hi[k], o_hi[k] < dims_a[k])
+            } else {
+                (o_lo[k], o_lo[k] > 0.0)
+            };
+            if interior {
+                // The bite wall: the solid lies on the far side, the
+                // outward normal points INTO the overlap.
+                let outward = if high { -1.0 } else { 1.0 };
+                emit_plane_faces(&mut draft, oa, axes, k, level, outward, &over, None);
+            }
+        }
+    }
+    finish_single_shell(draft, "the cut")
+}
+
+/// The fuse `A ∪ B` as the rectilinear composition: the base's six
+/// faces (each minus the overlap's footprint wherever the tool
+/// STRICTLY straddles the face's plane), plus the tool's six faces
+/// (each minus the footprint wherever its level lies strictly
+/// interior to the base's slab). Flush faces were refused by name
+/// before this point — the coplanar merge is the named next slice,
+/// never silent.
+#[allow(clippy::too_many_arguments)] // the arrangement's own vocabulary
+fn box_box_fuse(
+    oa: Vector3,
+    axes: [Vector3; 3],
+    dims_a: [f64; 3],
+    b_lo: [f64; 3],
+    b_hi: [f64; 3],
+    o_lo: [f64; 3],
+    o_hi: [f64; 3],
+) -> Result<BooleanOutcome, String> {
+    let base = Slab {
+        lo: [0.0; 3],
+        hi: dims_a,
+    };
+    let tool = Slab { lo: b_lo, hi: b_hi };
+    let over = Slab { lo: o_lo, hi: o_hi };
+    let mut draft = Draft::new();
+    for k in 0..3 {
+        for &high in &[false, true] {
+            let level = if high { dims_a[k] } else { 0.0 };
+            let outward = if high { 1.0 } else { -1.0 };
+            let straddles = if high {
+                b_hi[k] > dims_a[k]
+            } else {
+                b_lo[k] < 0.0
+            };
+            emit_plane_faces(
+                &mut draft,
+                oa,
+                axes,
+                k,
+                level,
+                outward,
+                &base,
+                if straddles { Some(&over) } else { None },
+            );
+        }
+    }
+    for k in 0..3 {
+        for &high in &[false, true] {
+            let level = if high { b_hi[k] } else { b_lo[k] };
+            let outward = if high { 1.0 } else { -1.0 };
+            let interior = 0.0 < level && level < dims_a[k];
+            emit_plane_faces(
+                &mut draft,
+                oa,
+                axes,
+                k,
+                level,
+                outward,
+                &tool,
+                if interior { Some(&over) } else { None },
+            );
+        }
+    }
+    finish_single_shell(draft, "the fuse")
+}
+
+/// K4-2d/3 slice 3 — the **box×box family**: two frame-parallel
+/// boxes' three booleans as exact rectilinear compositions. The
+/// frames must be EXACTLY parallel (each tool axis ±-aligned with a
+/// base axis, the dots bit-exact ±1 — a rotated or near-parallel
+/// frame refuses by name; this kernel never silently snaps). The
+/// tool's extents are recomputed in the base's frame, the overlap
+/// box `O = A ∩ B` is the arrangement's vocabulary, and every result
+/// face is a plane trimmed by an axis-aligned rectilinear wire —
+/// the polygon and annulus paths the measure's plane reader already
+/// reads exactly; no new measure.
+///
+/// **The stations** (how `O` touches the base's boundary): the
+/// corner (one corner — the 9-face notch cut, the 12-face corner
+/// union), the edge (one edge — the through-notch, the
+/// octagonal-prism fuse), the face (one face — a plain slab cut, the
+/// stepped-box fuse with the annular shoulder), the slot (through on
+/// one axis, interior on two — the genus-1 cut), the groove (through,
+/// touching one face, interior on one). **Common is always the
+/// overlap box** — the intersection of two co-oriented boxes is a
+/// box, for every overlap topology at once.
+///
+/// **Cut** reads the overlap box only (flush tool faces contribute
+/// nothing — the construction is the input's own arithmetic);
+/// **Fuse** demands strict straddling (a flush tool face would need
+/// the coplanar merge — the named next slice, refused by name).
+/// Both close through the structural shell count: a construction
+/// that splits the base into several shells (the through-two-axes
+/// cut) refuses by name with the count.
+///
+/// The classification tier answers the whole shapes: disjoint (the
+/// cut is the base, the common empty, the fuse a refused two-shell
+/// compound), contained (the cut empty, the fuse the tool, the
+/// common the base), engulf (the fuse the base, the common the tool,
+/// and the strictly-interior cut the refused internal void — a flush
+/// containment cut is a legitimate notch through the construction).
+pub fn box_box_boolean(
+    op: BooleanOp,
+    oa: Vector3,
+    axes_a: [Vector3; 3],
+    dims_a: [f64; 3],
+    ob: Vector3,
+    axes_b: [Vector3; 3],
+    dims_b: [f64; 3],
+) -> Result<BooleanOutcome, String> {
+    for (what, axes) in [("base", axes_a), ("tool", axes_b)] {
+        require_unit(axes[0], &format!("the {what} box's axis 1"))?;
+        require_unit(axes[1], &format!("the {what} box's axis 2"))?;
+        require_unit(axes[2], &format!("the {what} box's axis 3"))?;
+        if (axes[0].dot(&axes[1])).abs() > 1e-9
+            || (axes[0].dot(&axes[2])).abs() > 1e-9
+            || (axes[1].dot(&axes[2])).abs() > 1e-9
+        {
+            return Err(format!(
+                "the {what} box's axes must be mutually perpendicular"
+            ));
+        }
+    }
+    if dims_a.iter().any(|&d| d <= 0.0) || dims_b.iter().any(|&d| d <= 0.0) {
+        return Err("the box extents must be positive".into());
+    }
+    // The frame map: tool axis i → (base axis k, sign), the dot
+    // EXACTLY ±1. A rotated or near-parallel frame refuses by name.
+    let mut map: [Option<(usize, f64)>; 3] = [None; 3];
+    for (i, b) in axes_b.iter().enumerate() {
+        for (k, a) in axes_a.iter().enumerate() {
+            let d = b.dot(a);
+            if d == 1.0 || d == -1.0 {
+                map[i] = Some((k, d));
+                break;
+            }
+        }
+        if map[i].is_none() {
+            return Ok(refused(
+                "the boxes' frames are not exactly parallel — the rotated box×box is outside \
+                 this family (the extents would be a snap's, not the input's); align the frames \
+                 exactly, or tessellate for the faceted workflow — this kernel never silently \
+                 snaps",
+            ));
+        }
+    }
+    // The bijection (each base axis claimed once): orthogonality of
+    // both frames guarantees it — asserted, not assumed.
+    let mut claimed = [false; 3];
+    for m in &map {
+        let (k, _) = m.expect("every tool axis mapped");
+        if claimed[k] {
+            return Err(
+                "the tool frame's axes map onto one base axis twice — not a box frame".into(),
+            );
+        }
+        claimed[k] = true;
+    }
+    // The tool's extents in the base frame: one offset projection
+    // per axis plus the signed span.
+    let off = v3(ob.x - oa.x, ob.y - oa.y, ob.z - oa.z);
+    let mut b_lo = [0.0f64; 3];
+    let mut b_hi = [0.0f64; 3];
+    for i in 0..3 {
+        let (k, s) = map[i].expect("every tool axis mapped");
+        let d = off.dot(&axes_a[k]);
+        let span = s * dims_b[i];
+        b_lo[k] = d + span.min(0.0);
+        b_hi[k] = d + span.max(0.0);
+    }
+    // The overlap box (the arrangement's vocabulary).
+    let mut o_lo = [0.0f64; 3];
+    let mut o_hi = [0.0f64; 3];
+    for k in 0..3 {
+        o_lo[k] = b_lo[k].max(0.0);
+        o_hi[k] = b_hi[k].min(dims_a[k]);
+    }
+    let solid = |brep: ExactBRep| BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    };
+    // ---- disjoint (external tangency included) ----------------------
+    if !(0..3).all(|k| o_lo[k] < o_hi[k]) {
+        return Ok(match op {
+            BooleanOp::Cut => solid(framed_box_brep(oa, axes_a, [0.0; 3], dims_a)),
+            BooleanOp::Fuse => refused(
+                "disjoint fuse — the result is a two-shell compound, not a single closed shell",
+            ),
+            BooleanOp::Common => empty(),
+        });
+    }
+    // ---- contained: the base inside the tool -------------------------
+    if (0..3).all(|k| b_lo[k] <= 0.0 && b_hi[k] >= dims_a[k]) {
+        return Ok(match op {
+            BooleanOp::Cut => empty(),
+            BooleanOp::Fuse => solid(framed_box_brep(oa, axes_a, b_lo, b_hi)),
+            BooleanOp::Common => solid(framed_box_brep(oa, axes_a, [0.0; 3], dims_a)),
+        });
+    }
+    // ---- engulf: the tool inside the base ----------------------------
+    if (0..3).all(|k| b_lo[k] >= 0.0 && b_hi[k] <= dims_a[k]) {
+        return Ok(match op {
+            BooleanOp::Fuse => solid(framed_box_brep(oa, axes_a, [0.0; 3], dims_a)),
+            BooleanOp::Common => solid(framed_box_brep(oa, axes_a, b_lo, b_hi)),
+            BooleanOp::Cut => {
+                if (0..3).all(|k| b_lo[k] > 0.0 && b_hi[k] < dims_a[k]) {
+                    refused(
+                        "the internal void — the tool box is strictly inside the base, and the \
+                         void needs a second shell, not modeled in this family",
+                    )
+                } else {
+                    // Flush containment: the complement is a
+                    // legitimate single-shell notch — the
+                    // construction's own path.
+                    return box_box_cut(oa, axes_a, dims_a, o_lo, o_hi);
+                }
+            }
+        });
+    }
+    // ---- the partial tier --------------------------------------------
+    match op {
+        BooleanOp::Common => Ok(solid(framed_box_brep(oa, axes_a, o_lo, o_hi))),
+        BooleanOp::Cut => box_box_cut(oa, axes_a, dims_a, o_lo, o_hi),
+        BooleanOp::Fuse => {
+            if (0..3).any(|k| b_lo[k] == 0.0 || b_hi[k] == dims_a[k]) {
+                return Ok(refused(
+                    "a coplanar fuse — the tool's face lies flush on the base's face plane, and \
+                     the union would need the coplanar face merge (the named next slice); this \
+                     kernel never silently merges",
+                ));
+            }
+            box_box_fuse(oa, axes_a, dims_a, b_lo, b_hi, o_lo, o_hi)
+        }
+    }
+}

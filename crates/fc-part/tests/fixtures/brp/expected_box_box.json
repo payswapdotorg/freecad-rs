@@ -1,0 +1,361 @@
+{
+ "generator": "ocp 7.8.1 (cadquery-ocp) via BRepAlgoAPI + BRepTools.Write_s",
+ "box": {
+  "dims": [
+   30.0,
+   20.0,
+   5.0
+  ]
+ },
+ "cases": {
+  "box_box_cut_corner": {
+   "volume": 2925.000000000001,
+   "area": 1700.0,
+   "faces": 9,
+   "edges": 42,
+   "vertices": 84,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_fuse_corner": {
+   "volume": 3525.0,
+   "area": 2030.0,
+   "faces": 12,
+   "edges": 60,
+   "vertices": 120,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_common_corner": {
+   "volume": 74.99999999999999,
+   "area": 110.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_cut_edge": {
+   "volume": 2874.9999999999995,
+   "area": 1650.0,
+   "faces": 8,
+   "edges": 36,
+   "vertices": 72,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_fuse_edge": {
+   "volume": 3874.9999999999995,
+   "area": 2150.0,
+   "faces": 12,
+   "edges": 60,
+   "vertices": 120,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_common_edge": {
+   "volume": 124.99999999999997,
+   "area": 149.99999999999997,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_cut_face": {
+   "volume": 1200.0,
+   "area": 1400.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_fuse_face": {
+   "volume": 6000.0,
+   "area": 3159.9999999999995,
+   "faces": 11,
+   "edges": 48,
+   "vertices": 96,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_common_face": {
+   "volume": 1800.0,
+   "area": 1500.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_cut_slot": {
+   "volume": 2499.9999999999995,
+   "area": 1700.0,
+   "faces": 10,
+   "edges": 48,
+   "vertices": 96,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_fuse_slot": {
+   "volume": 3500.0000000000005,
+   "area": 1900.0,
+   "faces": 16,
+   "edges": 72,
+   "vertices": 144,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_common_slot": {
+   "volume": 499.9999999999999,
+   "area": 399.99999999999994,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_cut_groove": {
+   "volume": 2600.0,
+   "area": 2140.0,
+   "faces": 10,
+   "edges": 48,
+   "vertices": 96,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_fuse_groove": {
+   "volume": 3199.9999999999986,
+   "area": 1940.0,
+   "faces": 16,
+   "edges": 72,
+   "vertices": 144,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_common_groove": {
+   "volume": 399.9999999999999,
+   "area": 520.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_cut_open_groove": {
+   "volume": 2400.0,
+   "area": 1760.0,
+   "faces": 10,
+   "edges": 48,
+   "vertices": 96,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_fuse_open_groove": {
+   "volume": 3900.0,
+   "area": 2120.0,
+   "faces": 14,
+   "edges": 72,
+   "vertices": 144,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_common_open_groove": {
+   "volume": 599.9999999999999,
+   "area": 580.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_box_cut_edge_flush": {
+   "volume": 2874.9999999999995,
+   "area": 1650.0,
+   "faces": 8,
+   "edges": 36,
+   "vertices": 72,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  }
+ }
+}

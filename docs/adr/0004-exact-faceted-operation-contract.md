@@ -3,7 +3,9 @@
 - **Status:** Accepted (2026-10-30); **amended 2026-10-30 by the
   K4-2d/3 slice 1 landing** (the dispatch table widened with the
   box×sphere family — the revisit trigger this ADR itself defined,
-  exercised for the first time). Extends
+  exercised for the first time) **and again 2026-10-30 by the
+  K4-2d/3 slice 3 landing** (box×box joins the pairing table — the
+  rectilinear composition, the second amendment). Extends
   [`0003-geometry-kernel-strategy.md`](0003-geometry-kernel-strategy.md)
   from the kernel program into the application's operation layer; does
   not revisit the kernel decision.
@@ -93,11 +95,18 @@ For `Part::Cut` / `Part::Fuse` / `Part::Common`, in priority order
     (corner/edge/face bites), the offset face stations (slice 2: an
     interior center whose ball crosses exactly one face — the
     small-circle cap), and the classification tier (whole shapes, the
-    empty set, the named refusals the kernel itself carries).
+    empty set, the named refusals the kernel itself carries) — and
+    **box×box** (slice 3: the rectilinear composition of two
+    frame-parallel boxes — every result face a plane trimmed by an
+    axis-aligned rectilinear wire; Common always the overlap box; the
+    cut reading the overlap only, the flush fuse refusing the
+    coplanar merge by name, the split refusing by shell count; the
+    hole-free results rendering watertight with the mesh volume
+    exactly the exact volume).
   - The other operand is faceted, or either operand is an exact class
     the kernel cannot pair (a multi-surface B-rep, a B-spline face,
     cone or torus classes, or an unpaired combination such as
-    box×box or box×cylinder) → **a named refusal**: the error names
+    box×cylinder) → **a named refusal**: the error names
     the operands, their classes, and the reason, and says how to get
     the faceted workflow explicitly (tessellate first or use mesh
     operands). Never a silent tessellation downgrade of the imported
@@ -169,21 +178,34 @@ This architecture lands in slices; each stays green on its own.
   what refused as "a planar-faced (box-class) solid" now runs exact
   against a sphere and refuses by name against everything else (the
   pairing-table message).
+- **Slice 3 (landed 2026-10-30, K4-2d/3):** the dispatch table
+  widens again — box×box, the rectilinear composition. The frame
+  contract is part of the pairing: EXACTLY parallel frames (the axis
+  dots bit-exact ±1 — permuted, sign-flipped, mirrored all run
+  exact), rotated or near-parallel frames refusing by name (never a
+  silent snap). The render channel gains its first constructive
+  WORKING path: the hole-free rectilinear faces tessellate
+  watertight with the mesh volume exactly the exact volume, while the
+  ring faces keep the named refusal. The box×box entry retires from
+  the pairing-table refusal message; box×cylinder remains outside by
+  name.
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
   results; widening the supported-combination table as K4-2d/3 lands
-  more exact-boolean families (the offset face stations, box×box,
-  box×cylinder); PartDesign exact dispatch.
+  more exact-boolean families (box×cylinder is the named next);
+  PartDesign exact dispatch.
 
 ## What we do NOT claim
 
-- **General BRep booleans through features.** Four families
+- **General BRep booleans through features.** Five families
   (sphere×sphere, cylinder×cylinder, cylinder×sphere, box×sphere at
-  the boundary-skeleton and offset stations) are wired; the rest
-  refuse by name — including the box family's own honest boundaries
+  the boundary-skeleton and offset stations, and box×box among
+  frame-parallel boxes) are wired; the rest
+  refuse by name — including the families' own honest boundaries
   (the off-skeleton general overlaps, the interior center crossing
   two or more faces, the oversized bite, the near-but-not-bit-exact
-  station, box×box, box×cylinder). K4-2d/3's later slices widen
+  station, the rotated box×box frame, the box×box coplanar fuse and
+  split cut, box×cylinder). K4-2d/3's later slices widen
   further.
 - **That the mesh fallback for unsupported primitive combinations is
   exactness.** It is faceted, the representation says so, and the
@@ -201,7 +223,8 @@ This architecture lands in slices; each stays green on its own.
   this ADR, not silently. *(Exercised 2026-10-30: the K4-2d/3
   landings — slice 1 and the offset-station slice 2 the same day —
   amended rules 3 and this section's lists: the box×sphere family
-  above.)*
+  above; and slice 3 the same day: the box×box family, the second
+  amendment.)*
 - If a real downstream workflow requires saved derived-exact payloads
   (consumers that cannot recompute), revisit rule 4 with an explicit
   serialization ADR — an FCBREP exact form is the candidate, and it

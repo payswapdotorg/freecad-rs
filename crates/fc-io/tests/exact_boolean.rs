@@ -1109,3 +1109,400 @@ fn offset_bite_of_imported_box_runs_exact() {
         std::fs::remove_file(&path).ok();
     }
 }
+
+/// An imported-box document with a `Part::Box` primitive tool: the
+/// corpus box (30×20×5) as Base, the placed primitive as Tool.
+fn import_box_tool_xml(kind: &str, l: f64, w: f64, h: f64, px: f64, py: f64, pz: f64) -> String {
+    format!(
+        "\
+<Document SchemaVersion=\"4\" ProgramVersion=\"test\" FileVersion=\"1\">
+ <Objects Count=\"3\" Dependencies=\"1\">
+  <Object type=\"Part::Feature\" name=\"Import\" id=\"1\"/>
+  <Object type=\"Part::Box\" name=\"Tool\" id=\"2\"/>
+  <Object type=\"{kind}\" name=\"Op\" id=\"3\"/>
+ </Objects>
+ <ObjectData Count=\"3\">
+  <Object name=\"Import\">
+   <Properties Count=\"1\">
+    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">
+     <Part file=\"ImportShape.brp\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Tool\">
+   <Properties Count=\"4\">
+    <Property name=\"Length\" type=\"App::PropertyFloat\">
+     <Float value=\"{l}\"/>
+    </Property>
+    <Property name=\"Width\" type=\"App::PropertyFloat\">
+     <Float value=\"{w}\"/>
+    </Property>
+    <Property name=\"Height\" type=\"App::PropertyFloat\">
+     <Float value=\"{h}\"/>
+    </Property>
+    <Property name=\"Placement\" type=\"App::PropertyPlacement\">
+     <PropertyPlacement Px=\"{px}\" Py=\"{py}\" Pz=\"{pz}\" Q0=\"0\" Q1=\"0\" Q2=\"0\" Q3=\"1\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Op\">
+   <Properties Count=\"2\">
+    <Property name=\"Base\" type=\"App::PropertyLink\">
+     <Link value=\"Import\"/>
+    </Property>
+    <Property name=\"Tool\" type=\"App::PropertyLink\">
+     <Link value=\"Tool\"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>
+"
+    )
+}
+
+/// The same with a ROTATED tool placement (45° about z): the frames
+/// are not exactly parallel, and the refusal must say so by name.
+fn import_box_tool_rotated_xml(kind: &str) -> String {
+    // A true 45° rotation about z: Q = (0, 0, sin 22.5°, cos 22.5°).
+    let q2 = (std::f64::consts::FRAC_PI_8).sin();
+    let q3 = (std::f64::consts::FRAC_PI_8).cos();
+    format!(
+        "\
+<Document SchemaVersion=\"4\" ProgramVersion=\"test\" FileVersion=\"1\">
+ <Objects Count=\"3\" Dependencies=\"1\">
+  <Object type=\"Part::Feature\" name=\"Import\" id=\"1\"/>
+  <Object type=\"Part::Box\" name=\"Tool\" id=\"2\"/>
+  <Object type=\"{kind}\" name=\"Op\" id=\"3\"/>
+ </Objects>
+ <ObjectData Count=\"3\">
+  <Object name=\"Import\">
+   <Properties Count=\"1\">
+    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">
+     <Part file=\"ImportShape.brp\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Tool\">
+   <Properties Count=\"4\">
+    <Property name=\"Length\" type=\"App::PropertyFloat\">
+     <Float value=\"10\"/>
+    </Property>
+    <Property name=\"Width\" type=\"App::PropertyFloat\">
+     <Float value=\"10\"/>
+    </Property>
+    <Property name=\"Height\" type=\"App::PropertyFloat\">
+     <Float value=\"6\"/>
+    </Property>
+    <Property name=\"Placement\" type=\"App::PropertyPlacement\">
+     <PropertyPlacement Px=\"25\" Py=\"15\" Pz=\"2\" Q0=\"0\" Q1=\"0\" Q2=\"{q2}\" Q3=\"{q3}\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Op\">
+   <Properties Count=\"2\">
+    <Property name=\"Base\" type=\"App::PropertyLink\">
+     <Link value=\"Import\"/>
+    </Property>
+    <Property name=\"Tool\" type=\"App::PropertyLink\">
+     <Link value=\"Tool\"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>
+"
+    )
+}
+
+/// THE box×box decisive chain: the imported OCCT box, an exact
+/// `Part::Cut` by a placed box primitive (the corner bite — 10×10×6
+/// at (25, 15, 2)), the exact result measuring the kernel's own
+/// numbers, the render channel WORKING (the rectilinear faces are
+/// hole-free: a watertight mesh whose volume IS the exact volume —
+/// the planar exactness), and the full save → reopen → recompute
+/// cycle re-deriving the identical exact geometry with the operand's
+/// bytes untouched.
+#[test]
+fn cut_of_imported_box_by_box_primitive_runs_exact_through_the_round_trip() {
+    let path = temp_path("boxbox-cut");
+    let boxbrp = brp_fixture("box");
+    craft_fcstd(
+        &path,
+        &import_box_tool_xml("Part::Cut", 10.0, 10.0, 6.0, 25.0, 15.0, 2.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+
+    let (mut doc, report) = load_document(&path).expect("the crafted document loads");
+    assert!(
+        report.warnings.is_empty(),
+        "a readable payload and a clean primitive warn about nothing: {:?}",
+        report.warnings
+    );
+    doc.recompute_all().expect("recompute executes the cut");
+
+    // The operand: the imported exact box, live.
+    let import_shape = shape_of(doc.get_by_name("Import").unwrap()).expect("the import is live");
+    assert_eq!(import_shape.kind_name(), "Brep");
+    // The result: EXACT — TopoShape::Brep, the kernel's own numbers.
+    let op = doc.get_by_name("Op").unwrap();
+    let result = shape_of(op).expect("the cut computed");
+    assert_eq!(
+        result.kind_name(),
+        "Brep",
+        "the box×box cut carries the exact model (ADR 0004 rule 3)"
+    );
+    let got = result.try_volume().expect("the notch measures exactly");
+    // The reference: the closed form 3000 − 5·5·3 — the same number
+    // real OCCT's own BRepAlgoAPI cut answers (the corpus'
+    // expected_box_box.json).
+    let want = 2925.0;
+    assert!(
+        (got - want).abs() <= 1e-9 * want,
+        "the feature's exact volume {got} is the closed form {want}"
+    );
+    // The differential anchor: the kernel API with the same placed
+    // parameters the dispatch derived.
+    let reference = outcome_volume(
+        fc_part::brep_boolean::box_box_boolean(
+            BooleanOp::Cut,
+            v3(0.0, 0.0, 0.0),
+            [v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, 1.0)],
+            [30.0, 20.0, 5.0],
+            v3(25.0, 15.0, 2.0),
+            [v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, 1.0)],
+            [10.0, 10.0, 6.0],
+        )
+        .expect("the corner station is supported"),
+    );
+    assert!(
+        (got - reference).abs() <= 1e-9 * reference,
+        "the feature's exact volume {got} is the kernel's own {reference}"
+    );
+    // The display channel WORKS: the rectilinear faces are hole-free,
+    // the planar ear-clip renders them watertight, and the mesh's
+    // volume is the exact volume (planar faces triangulate exactly) —
+    // the first boolean family whose constructive results render.
+    let mesh = mesh_of(op, 0.05).expect("the corner notch renders");
+    let mv = mesh.volume();
+    assert!(
+        (mv - got).abs() <= 1e-9 * got,
+        "the display mesh volume {mv} is the exact {got}"
+    );
+
+    // The save: the operand's OCCT bytes ride out verbatim; the
+    // derived exact result is recomputed, not serialized (rule 4).
+    let temp = temp_path("boxbox-cut-roundtrip");
+    save_document(&doc, &temp).expect("the exact-result document saves");
+    assert_eq!(
+        zip_entries(&temp).get("ImportShape.brp"),
+        Some(&boxbrp),
+        "the operand's OCCT payload rides out byte-identically"
+    );
+
+    // The reopen + recompute: the identical exact result.
+    let (mut reloaded, report2) = load_document(&temp).expect("the saved file loads");
+    assert!(
+        report2.warnings.is_empty(),
+        "the round trip is clean: {:?}",
+        report2.warnings
+    );
+    reloaded
+        .recompute_all()
+        .expect("the reload recompute re-derives");
+    let reloaded_result =
+        shape_of(reloaded.get_by_name("Op").unwrap()).expect("the recompute restored the cut");
+    assert_eq!(
+        reloaded_result.kind_name(),
+        "Brep",
+        "the recomputed result is the exact model again"
+    );
+    let got2 = reloaded_result
+        .try_volume()
+        .expect("still measures exactly");
+    assert_eq!(
+        got2, got,
+        "the re-derived exact volume is bit-identical to the first computation"
+    );
+
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&temp).ok();
+}
+
+/// The fuse and the common of the same imported box — the corner
+/// union (3000 + 600 − 75) and the overlap box (75), the closed
+/// forms, through the real features.
+#[test]
+fn fuse_and_common_of_imported_boxes_run_exact() {
+    for (kind, want) in [("Part::Fuse", 3525.0), ("Part::Common", 75.0)] {
+        let path = temp_path("boxbox-bite");
+        let boxbrp = brp_fixture("box");
+        craft_fcstd(
+            &path,
+            &import_box_tool_xml(kind, 10.0, 10.0, 6.0, 25.0, 15.0, 2.0),
+            &[("ImportShape.brp", &boxbrp)],
+        );
+        let (mut doc, _) = load_document(&path).expect("loads");
+        doc.recompute_all().expect("recompute executes");
+        let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+        assert_eq!(
+            result.kind_name(),
+            "Brep",
+            "{kind}: the exact model carries the result"
+        );
+        let got = result.try_volume().expect("measures exactly");
+        assert!(
+            (got - want).abs() <= 1e-9 * want,
+            "{kind}: the exact volume {got} is the closed form {want}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+/// The other stations through the features: the edge bite (the tool
+/// through on z — V = 2875) and the open groove's fuse (the ridge —
+/// V = 3900), the closed forms exact.
+#[test]
+fn edge_and_open_groove_bites_of_imported_boxes_run_exact() {
+    // The edge station: 10×10×10 at (25, 15, −2) — through on z.
+    let path = temp_path("boxbox-edge-cut");
+    let boxbrp = brp_fixture("box");
+    craft_fcstd(
+        &path,
+        &import_box_tool_xml("Part::Cut", 10.0, 10.0, 10.0, 25.0, 15.0, -2.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    doc.recompute_all().expect("recompute executes");
+    let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+    assert_eq!(result.kind_name(), "Brep", "the edge bite is exact");
+    let got = result.try_volume().expect("measures exactly");
+    let want = 2875.0;
+    assert!(
+        (got - want).abs() <= 1e-9 * want,
+        "the edge-bite volume {got} is the closed form {want}"
+    );
+    std::fs::remove_file(&path).ok();
+
+    // The open groove's fuse: 10×30×5 at (10, −5, 2) — the channel
+    // reaching the top face, the tool sticking past it.
+    let path = temp_path("boxbox-groove-fuse");
+    craft_fcstd(
+        &path,
+        &import_box_tool_xml("Part::Fuse", 10.0, 30.0, 5.0, 10.0, -5.0, 2.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    doc.recompute_all().expect("recompute executes");
+    let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+    assert_eq!(result.kind_name(), "Brep", "the open-groove fuse is exact");
+    let got = result.try_volume().expect("measures exactly");
+    let want = 3900.0;
+    assert!(
+        (got - want).abs() <= 1e-9 * want,
+        "the open-groove fuse volume {got} is the closed form {want}"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// The box×box refusals through the features: the rotated tool
+/// placement (the frames not exactly parallel — never a silent
+/// snap), the flush fuse (the coplanar merge), the split cut (the
+/// two-shell compound), and the strictly-interior cut (the internal
+/// void) — every one named, every one keeping the last-good contract.
+#[test]
+fn box_box_refusals_name_their_reasons_through_the_features() {
+    // The rotated tool: 45° about z — the frames refuse.
+    let path = temp_path("boxbox-rotated");
+    let boxbrp = brp_fixture("box");
+    craft_fcstd(
+        &path,
+        &import_box_tool_rotated_xml("Part::Cut"),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the rotated frame refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("not exactly parallel"),
+                "the rotated refusal names the frame: {reason}"
+            );
+            assert!(
+                reason.contains("snap"),
+                "the rotated refusal says the discipline: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    assert!(
+        shape_of(doc.get_by_name("Op").unwrap()).is_none(),
+        "a refused boolean claims no geometry"
+    );
+    std::fs::remove_file(&path).ok();
+
+    // The flush fuse: the tool's bottom face exactly on the base's
+    // bottom face — the coplanar merge refuses.
+    let path = temp_path("boxbox-flush-fuse");
+    craft_fcstd(
+        &path,
+        &import_box_tool_xml("Part::Fuse", 10.0, 10.0, 8.0, 25.0, 15.0, 0.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the flush fuse refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("coplanar"),
+                "the flush refusal names the merge: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+
+    // The split cut: the tool slicing the base into two slabs.
+    let path = temp_path("boxbox-split");
+    craft_fcstd(
+        &path,
+        &import_box_tool_xml("Part::Cut", 40.0, 30.0, 2.0, -5.0, -5.0, 2.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the split cut refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("2 shells"),
+                "the split refusal names the count: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+
+    // The internal void: the tool strictly inside the base.
+    let path = temp_path("boxbox-void");
+    craft_fcstd(
+        &path,
+        &import_box_tool_xml("Part::Cut", 5.0, 5.0, 2.0, 10.0, 5.0, 1.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the void cut refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("internal void"),
+                "the void refusal names the shell: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+}

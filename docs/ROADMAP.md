@@ -1019,6 +1019,72 @@ behind us.
       none ignored. The remaining K4-2d/3 surface: box×box,
       box×cylinder, the polygon-domain and cap tessellations, and the
       OCCT-authored-result reader widening.
+- [x] **K4-2d/3 slice 3 (landing 2026-10-30)** the box×box family —
+      the rectilinear composition. Two frame-parallel boxes (an
+      imported box-class B-rep or a `Box` primitive, placements
+      applied analytically) compose exactly through the real
+      `Part::Cut/Fuse/Common` — the pairing table's second amendment
+      in ADR 0004. **The frame contract**: every tool axis's dot with
+      a base axis is EXACTLY ±1 or 0 (permuted, sign-flipped, and
+      mirrored frames run exact — the extents recomputed in the
+      base's frame, the emission's reading order chosen per face
+      handedness); a rotated or near-parallel frame refuses by name —
+      this kernel never silently snaps (the extents would be a
+      snap's, not the input's). **The construction**: every result
+      face is a plane trimmed by an axis-aligned rectilinear wire —
+      the rect-minus-rect solver (the full rect, the L at two
+      adjacent touches, the step-C at one, the ring at none — outer
+      CCW, hole CW — and the one-two bands at a spanning touch),
+      every vertex from ONE canonical accumulation formula, every
+      edge a `Draft` seam shared by exact endpoint equality. **The
+      stations** (the overlap box `O = A ∩ B` classified by how it
+      touches the base): the corner (O contains one corner — the
+      9-face notch cut whose area is the box's own, the 12-face
+      corner union), the edge (one edge — the 8-face through-notch,
+      the octagonal-prism fuse), the face (one face — a plain slab
+      cut, the stepped-box fuse with the annular shoulder), the slot
+      and its wall-side sibling the groove (through on one axis,
+      interior on two — genus-1 tunnels, the holed faces, the
+      hole-adjusted Euler characteristic 0), and the open groove
+      (through one axis, reaching one face with the tool sticking
+      past — the L walls, the 2-band top, genus 0).
+      **Common is always the overlap box** — the intersection of two
+      co-oriented boxes is a box, for every overlap topology at once.
+      **Cut reads the overlap box only** (flush tool faces contribute
+      nothing — the construction is the input's own arithmetic, no
+      snap); **Fuse demands strict straddling** — a flush tool face
+      is the coplanar merge, refused by name as the named next
+      slice. **The structural shell count** closes both: a
+      construction that splits the base into several shells (the
+      through-two-axes cut) refuses by name WITH the count — a
+      compound is never a plausible two-solid answer. Both sides
+      measured, every station: the hand closed forms (`V_A ∓ V_O`,
+      `V_A + V_B − V_O`, the per-face area sums) AND real OCCT's own
+      numbers (`expected_box_box.json`, authored by
+      `scripts/parity/regen_box_box_corpus.py` via the `ocp` 7.8.1
+      wheels — 19 result payloads committed as the reader
+      differential corpus), the face counts against OCCT's own
+      topology, the FCBREP round-trip bit-identical. **The render
+      channel is honest BOTH ways — a first**: the hole-free
+      rectilinear faces tessellate WATERTIGHT through the planar
+      ear-clip with the MESH VOLUME EXACTLY THE EXACT VOLUME (planar
+      faces triangulate exactly), while the ring faces (the slot's
+      caps, the fuse's shoulders) refuse by name as before. The
+      classification tier answers the whole shapes: disjoint (the
+      cut the base, the common empty, the fuse the refused two-shell
+      compound), contained, engulf (the strictly-interior cut the
+      refused internal void — a flush containment is a legitimate
+      notch through the construction), and the identity degenerate.
+      Acceptance: `tests/box_box_boolean.rs` (11) +
+      `tests/exact_boolean.rs` (+4 — the decisive imported-box × placed-box
+      cut round trip WITH the working display channel, the
+      fuse/common, the edge and open-groove stations, and the four
+      named refusals through the features: the rotated frame, the
+      flush fuse, the split, the void). Suite: 710, none ignored.
+      The remaining K4-2d/3 surface: box×cylinder, the
+      polygon-domain and cap tessellations (the trim-domain
+      classification), the coplanar-face merge, and the
+      OCCT-authored-result reader widening.
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

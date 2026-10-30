@@ -16,8 +16,8 @@ use fc_app::{impl_document_object, Document, DocumentObject, Property, PropertyC
 use fc_base::{Matrix4, Placement, Vector3};
 
 use crate::brep_boolean::{
-    box_sphere_boolean, cylinder_cylinder_boolean, cylinder_sphere_boolean, sphere_sphere_boolean,
-    BooleanOp, BooleanOutcome, BooleanOutcomeKind,
+    box_box_boolean, box_sphere_boolean, cylinder_cylinder_boolean, cylinder_sphere_boolean,
+    sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
 };
 use crate::shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
 use crate::topology::{ExactBRep, Surface};
@@ -927,12 +927,35 @@ fn exact_pair(
                     .to_string(),
             ),
         },
+        // K4-2d/3 slice 3: the box × box family — the rectilinear
+        // composition of two frame-parallel boxes (Cut is
+        // `Base − Tool`; the operands are NOT swapped).
+        (
+            ExactSolid::Box {
+                origin: oa,
+                axes: axes_a,
+                dims: dims_a,
+            },
+            ExactSolid::Box {
+                origin: ob,
+                axes: axes_b,
+                dims: dims_b,
+            },
+        ) => boolean_op(box_box_boolean(
+            op.as_boolean_op(),
+            *oa,
+            *axes_a,
+            *dims_a,
+            *ob,
+            *axes_b,
+            *dims_b,
+        )),
         // The rest of the table is empty by name — K4-2d lands the
         // families per-pair, and this refusal is the honest boundary.
         _ => Err(
-            "the exact kernel pairs sphere×sphere, cylinder×cylinder, cylinder×sphere, and \
-             box×sphere — this combination is outside the pairing table (more K4-2d families \
-             land per-pair)"
+            "the exact kernel pairs sphere×sphere, cylinder×cylinder, cylinder×sphere, \
+             box×sphere, and box×box — this combination is outside the pairing table (more \
+             K4-2d families land per-pair)"
                 .to_string(),
         ),
     }
