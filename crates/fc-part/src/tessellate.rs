@@ -995,12 +995,30 @@ fn splice_merge(
     // The merge input ends at the previous run's own last vertex: past
     // it, the under-stretch is stale — seam-edge samples the earlier
     // splices left below — which the splice consumes without merging.
+    // Stale samples hug the run's u-span boundaries (the seam columns
+    // sit at the u-extremes); a stretch carrying points STRICTLY INSIDE
+    // the run's span is genuine untiled frontier — the widening case:
+    // a wavy LOWER chain punching ever-wider runs (the fillet corner's
+    // ellipse rim) leaves chain vertices below the run's level inside
+    // its span, and cutting the merge before them leaves the wedge
+    // between them and the run uncovered — a torn mesh. The merge must
+    // reach them.
     let p_end = match prev_run_last {
         Some(last) => current
             .iter()
             .position(|&c| c == last)
             .filter(|&pos| pos >= k0 && pos < k1)
-            .map(|pos| pos + 1)
+            .map(|pos| {
+                let cut = pos + 1;
+                let interior_frontier = current[cut..k1]
+                    .iter()
+                    .any(|&c| u(c) > rlo + slack && u(c) < rhi - slack);
+                if interior_frontier {
+                    k1
+                } else {
+                    cut
+                }
+            })
             .unwrap_or(k1),
         None => k1,
     };
@@ -1181,9 +1199,14 @@ fn build_band_domain(
         // their closing vertex on one walk, so the endpoints differ by
         // one sample — but the two walks are the SAME edge table in
         // opposite directions: the interior samples match bit-exactly,
-        // reversed.
+        // reversed. A real curved seam carries interior samples to
+        // verify (n ≥ 3); two 2-point runs with mismatched endpoints
+        // are NOT a seam — the fillet corner's two distinct generator
+        // lines pair vacuously without this guard, and the "seam
+        // points" it would mint land interior to shared straight edges
+        // the neighboring plane face carries whole (a torn mesh).
         let n = a.len().min(b.len());
-        (1..n.saturating_sub(1)).all(|k| dm.p3[a[k]] == dm.p3[b[b.len() - 1 - k]])
+        n >= 3 && (1..n - 1).all(|k| dm.p3[a[k]] == dm.p3[b[b.len() - 1 - k]])
     };
     let seam_v_range = [&pref_up, &pref_lo, &suff_up, &suff_lo]
         .iter()

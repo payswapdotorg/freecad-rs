@@ -214,12 +214,15 @@ fn oblique_cut_loads_with_its_ellipse() {
 }
 
 #[test]
-fn fillet_box_loads_validates_and_round_trips() {
-    // The straight-edge fillet: quarter-cylinder patches, quarter-arc
-    // rims, and — where two fillets meet at a corner — an elliptical
-    // corner curve. Everything loads, validates and round-trips; the
-    // mixed arc/elliptical-arc strip trim is the next measure slice
-    // (the refusal is honest and names the geometry).
+fn fillet_box_loads_validates_measures_and_round_trips() {
+    // The straight-edge fillet (K4-2d/2): quarter-cylinder patches,
+    // quarter-arc rims, and — where two fillets meet at a corner — the
+    // Steinmetz elliptical section: the corner strip's wire mixes the
+    // circular arc rim (the flat-face cut) with the elliptical arc rim
+    // (the crossing fillet cylinders' section), the u-interval closed
+    // by the two tangent generators. Everything loads, validates,
+    // MEASURES EXACTLY (the closed-form partial-interval integrals),
+    // tessellates watertight at every deflection, and round-trips.
     let data = fixture("fillet_box");
     let read = read_occt_brp(&data).unwrap_or_else(|e| panic!("read failed: {e}"));
     let brep = &read.brep;
@@ -232,11 +235,41 @@ fn fillet_box_loads_validates_and_round_trips() {
     write_brep(&mut out, brep).unwrap();
     let back = read_brep_bytes(&out).unwrap();
     assert_eq!(&back, brep);
-    let err = brep_volume(brep).unwrap_err();
+    // The exact channels carry OCCT's own numbers (the partial-interval
+    // sinusoid integrals; the residual is evaluation rounding).
+    let want = expected("fillet_box");
+    let volume = brep_volume(brep).unwrap_or_else(|e| panic!("measures: {e}"));
+    let area = brep_area(brep).unwrap_or_else(|e| panic!("measures: {e}"));
     assert!(
-        err.contains("unrecognized rim") || err.contains("not a trim this reader knows"),
-        "the honest refusal names the trim: {err}"
+        (volume - want.volume).abs() / want.volume <= 1e-9,
+        "volume {volume} vs OCCT {}",
+        want.volume
     );
+    assert!(
+        (area - want.area).abs() / want.area <= 1e-9,
+        "area {area} vs OCCT {}",
+        want.area
+    );
+    // The FCBREP v2 round-trip measures bit-identically.
+    assert_eq!(brep_volume(&back).unwrap(), volume);
+    assert_eq!(brep_area(&back).unwrap(), area);
+    // The tessellation: watertight at every deflection, converging.
+    let mut last_err = f64::INFINITY;
+    for d in [0.5, 0.2, 0.1, 0.05] {
+        let mesh = tessellate_brep(brep, d).unwrap_or_else(|e| panic!("tess d={d}: {e}"));
+        assert_closed_manifold(&mesh, &format!("the fillet box at d={d}"));
+        let err = (mesh.volume() - want.volume).abs() / want.volume;
+        assert!(
+            err < last_err + 1e-12,
+            "deflection convergence at d={d}: err {err} after {last_err}"
+        );
+        last_err = err;
+        assert!(
+            err <= 1.5e-2,
+            "volume within the deflection discipline at d={d}: {err}"
+        );
+    }
+    assert!(last_err <= 5.0e-3, "the finest mesh converges: {last_err}");
 }
 
 #[test]

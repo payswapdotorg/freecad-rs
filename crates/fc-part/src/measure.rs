@@ -1099,6 +1099,7 @@ fn sphere_band(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<(f64, f64), Strin
 /// An elliptical rim recognized on a strip face — the K3a section
 /// curve, stored with its own plane (the axis is the plane normal;
 /// `δ = axis·center` is the plane's offset).
+#[derive(Clone)]
 struct StripEllipse {
     center: Vector3,
     axis: Vector3,
@@ -1224,9 +1225,18 @@ fn conic_arc_of(curve: &Curve) -> Result<Option<ConicArc>, String> {
 type ArcRim = (usize, ConicArc);
 
 /// Everything a strip face's wires carry: the section-circle rims,
-/// at most one ellipse (the composed oblique section), and the K3d
-/// conic arcs.
-type StripTrims = (Vec<CircleRim>, Option<StripEllipse>, Vec<ArcRim>);
+/// at most one closed ellipse (the composed oblique section), the K3d
+/// conic arcs, and the OPEN elliptical arcs (the fillet corner's
+/// Steinmetz sections — K4-2d/2).
+type StripTrims = (
+    Vec<CircleRim>,
+    Option<StripEllipse>,
+    Vec<ArcRim>,
+    Vec<ArcEllipse>,
+);
+
+/// One open elliptical arc rim: `(edge index, the ellipse)`.
+type ArcEllipse = (usize, StripEllipse);
 
 /// The rims a strip face carries: its section circles (checked
 /// coaxial with `axis` and — when `radius` is `Some` — of the
@@ -1252,6 +1262,7 @@ fn strip_rims(
     let mut rims: Vec<(Vector3, f64)> = Vec::new();
     let mut ellipse: Option<StripEllipse> = None;
     let mut arcs: Vec<ArcRim> = Vec::new();
+    let mut partial_ellipses: Vec<ArcEllipse> = Vec::new();
     for wire in &face.wires {
         for we in &wire.edges {
             let edge = &brep.edges[we.edge];
@@ -1368,6 +1379,35 @@ fn strip_rims(
                         minor_radius: *minor_radius,
                     });
                 }
+                // An OPEN elliptical arc — the fillet corner's Steinmetz
+                // section, read verbatim from the OCCT reader's trimmed
+                // ellipse (K4-2d/2). Validation against the surface
+                // lives at the consumer (the corner strip) — the same
+                // split as the open circle arcs above.
+                Curve::Ellipse {
+                    center,
+                    axis: e_axis,
+                    major_dir,
+                    major_radius,
+                    minor_radius,
+                } if edge.start != edge.end => {
+                    if *major_radius < *minor_radius || *minor_radius <= 0.0 {
+                        return Err(format!(
+                            "face {i}: a malformed elliptical arc rim (a = {major_radius}, \
+                             b = {minor_radius})"
+                        ));
+                    }
+                    partial_ellipses.push((
+                        we.edge,
+                        StripEllipse {
+                            center: *center,
+                            axis: *e_axis,
+                            major_dir: *major_dir,
+                            major_radius: *major_radius,
+                            minor_radius: *minor_radius,
+                        },
+                    ));
+                }
                 Curve::Bspline { degree: 2, .. } => match conic_arc_of(&edge.curve)? {
                     Some(arc) => arcs.push((we.edge, arc)),
                     None => {
@@ -1396,7 +1436,7 @@ fn strip_rims(
             }
         }
     }
-    Ok((rims, ellipse, arcs))
+    Ok((rims, ellipse, arcs, partial_ellipses))
 }
 
 fn cylinder_face(
@@ -1417,13 +1457,30 @@ fn cylinder_face(
             "face {i}: an untrimmed cylinder face — an unbounded region"
         ));
     }
-    let (rims, ellipse, arcs) = strip_rims(&ctx, o, axis, Some(radius), false)?;
+    let (rims, ellipse, arcs, partial_ellipses) = strip_rims(&ctx, o, axis, Some(radius), false)?;
     if !arcs.is_empty() {
-        if ellipse.is_some() {
+        if ellipse.is_some()
+            || (!partial_ellipses.is_empty()
+                && (partial_ellipses.len() != 1 || arcs.len() != 1 || !rims.is_empty()))
+        {
             return Err(format!(
                 "face {i}: a mixed ellipse/arc cylinder strip — not a trim this \
                  reader knows"
             ));
+        }
+        // K4-2d/2: the fillet corner — one circular arc rim (the flat-
+        // face cut) + one open elliptical arc rim (the Steinmetz
+        // section of two crossing fillet cylinders), the u-interval
+        // closed by generator seams.
+        if partial_ellipses.len() == 1 {
+            return cylinder_corner_strip(
+                ctx,
+                o,
+                axis,
+                radius,
+                partial_ellipses[0].1.clone(),
+                &arcs[0],
+            );
         }
         // The K3d arc-trimmed strips: the standalone side face (arcs
         // only) or the notched mantle (two circle rims + the window's
@@ -1432,6 +1489,12 @@ fn cylinder_face(
             return cylinder_arc_strip(ctx, o, axis, radius, arcs);
         }
         return cylinder_notched_strip(ctx, o, axis, radius, &rims, &arcs);
+    }
+    if !partial_ellipses.is_empty() {
+        return Err(format!(
+            "face {i}: an elliptical arc rim without its circular arc partner — not a trim \
+             this reader knows"
+        ));
     }
     if let Some(e) = ellipse {
         // The composed oblique section: ONE circle rim + the elliptical
@@ -1798,6 +1861,227 @@ fn cylinder_notched_strip(
     Ok((full_area - win_area, sigma * (full_flux - win_flux)))
 }
 
+/// The mixed-strip fillet corner (K4-2d/2): a cylinder patch between
+/// one circular ARC rim (a constant-`v` plane cut — where the fillet
+/// meets a flat face) and one open elliptical ARC rim (the Steinmetz
+/// section — where two perpendicular equal-radius fillet cylinders
+/// cross), the u-interval closed by two generator seams.
+///
+/// The elliptical rim's plane reduces — in the cylinder's own frame —
+/// to the same sinusoid `v(u) = z0 + A·cos u + B·sin u` as the
+/// composed oblique section ([`cylinder_ellipse_strip`]); the patch is
+/// `{u ∈ [u0, u1], v between the arc rim and v(u)}`. Over the PARTIAL
+/// interval the full-turn identities (`∫cos = ∫sin = 0`) do not apply,
+/// so both domain integrals are carried in closed form:
+///
+/// * `∫ g du` and `∫ g·cos u du`, `∫ g·sin u du` with
+///   `g = G0 + A·cos u + B·sin u` — sums of `u`, `sin 2u`, `sin²u`
+///   primitives, exact;
+/// * the flux `σ·R·(R·∫∫ du dv + ∫∫ (ô·r̂(u)) du dv)` with
+///   `p·n̂ = ô·r̂(u) + R` on a cylinder — the `o_x`/`o_y` moments of
+///   the same three primitives.
+///
+/// The full-turn limit reproduces [`cylinder_ellipse_strip`]'s formulas
+/// exactly (the reduction below is its generalization).
+fn cylinder_corner_strip(
+    ctx: FaceRef<'_>,
+    o: Vector3,
+    axis: Vector3,
+    radius: f64,
+    e: StripEllipse,
+    arc: &ArcRim,
+) -> Result<(f64, f64), String> {
+    let FaceRef {
+        brep,
+        face,
+        i,
+        sigma,
+        tol,
+        ..
+    } = ctx;
+    let (arc_ei, conic) = arc;
+    let conic_center = conic.center;
+    // The arc rim is a constant-v cut (strip_rims verified its plane
+    // ⊥ axis, its radius, its coaxial center) — its v is the patch's
+    // flat side.
+    let v_bot = v3(
+        conic_center.x - o.x,
+        conic_center.y - o.y,
+        conic_center.z - o.z,
+    )
+    .dot(&axis);
+    // The elliptical rim: a cylinder section (the Steinmetz class) —
+    // the plane not parallel to the axis, the center on it, the arc on
+    // the surface.
+    let nu = e.axis.dot(&axis);
+    if nu == 0.0 {
+        return Err(format!(
+            "face {i}: an elliptical arc rim whose plane is parallel to the axis — not a \
+             cylinder section"
+        ));
+    }
+    let off_c = v3(e.center.x - o.x, e.center.y - o.y, e.center.z - o.z);
+    let along = off_c.dot(&axis);
+    let residual = v3(
+        off_c.x - axis.x * along,
+        off_c.y - axis.y * along,
+        off_c.z - axis.z * along,
+    );
+    if residual.length() > tol {
+        return Err(format!(
+            "face {i}: an elliptical arc rim not centered on the axis — not a cylinder \
+             section"
+        ));
+    }
+    // The ellipse's arc endpoints and on-surface check: sample the OPEN
+    // range (endpoints included — they are the shared corners).
+    let x_hat = match &face.surface {
+        Surface::Cylinder { ref_dir, .. } => *ref_dir,
+        _ => unreachable!("the cylinder face"),
+    };
+    let y_hat = axis.cross(&x_hat);
+    let ellipse_ei = brep
+        .edges
+        .iter()
+        .position(|ed| {
+            matches!(&ed.curve, Curve::Ellipse { center, axis: ea, major_dir, major_radius, minor_radius }
+                if *center == e.center && *ea == e.axis && *major_dir == e.major_dir
+                    && *major_radius == e.major_radius && *minor_radius == e.minor_radius)
+        })
+        .ok_or_else(|| format!("face {i}: the elliptical arc rim is not in the edge table"))?;
+    let (t0, t1) = {
+        let ed = &brep.edges[ellipse_ei];
+        (ed.range.0, ed.range.1)
+    };
+    let curve = Curve::Ellipse {
+        center: e.center,
+        axis: e.axis,
+        major_dir: e.major_dir,
+        major_radius: e.major_radius,
+        minor_radius: e.minor_radius,
+    };
+    for k in 0..=6 {
+        let t = t0 + (t1 - t0) * (k as f64 / 6.0);
+        let p = curve.point(t);
+        let d = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+        let a = d.dot(&axis);
+        let r = v3(d.x - axis.x * a, d.y - axis.y * a, d.z - axis.z * a).length();
+        if (r - radius).abs() > tol {
+            return Err(format!(
+                "face {i}: an elliptical arc rim not lying on the cylinder — not a section \
+                 curve"
+            ));
+        }
+    }
+    // The u-interval: the four rim endpoints (the arc's two, the
+    // ellipse's two) sit at the interval's ends — the arc's at v_bot,
+    // the ellipse's at v(u). Cluster by u.
+    let u_of = |p: Vector3| -> f64 {
+        let d = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+        d.dot(&y_hat).atan2(d.dot(&x_hat))
+    };
+    let mut u_vals: Vec<f64> = Vec::new();
+    for ei in [*arc_ei, ellipse_ei] {
+        let ed = &brep.edges[ei];
+        for t in [ed.range.0, ed.range.1] {
+            let p = ed.curve.point(t);
+            // On-surface check for the arc's own endpoints too.
+            let d = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+            let a = d.dot(&axis);
+            let r = v3(d.x - axis.x * a, d.y - axis.y * a, d.z - axis.z * a).length();
+            if (r - radius).abs() > tol {
+                return Err(format!("face {i}: a rim endpoint off the cylinder surface"));
+            }
+            u_vals.push(u_of(p));
+        }
+    }
+    // Cluster: at most two distinct u values.
+    let mut distinct: Vec<f64> = Vec::new();
+    for &u in &u_vals {
+        if !distinct.iter().any(|&d| {
+            (d - u).abs() <= 1e-7 || ((d - u).abs() - 2.0 * std::f64::consts::PI).abs() <= 1e-7
+        }) {
+            distinct.push(u);
+        }
+    }
+    if distinct.len() != 2 {
+        return Err(format!(
+            "face {i}: the mixed strip's rims do not share two corner u values (found {})",
+            distinct.len()
+        ));
+    }
+    let (mut u0, mut u1) = (distinct[0], distinct[1]);
+    if u1 < u0 {
+        std::mem::swap(&mut u0, &mut u1);
+    }
+    let du = u1 - u0;
+    if !(du > tol && du < 2.0 * std::f64::consts::PI - tol) {
+        return Err(format!(
+            "face {i}: the mixed strip's u-interval is degenerate (Δu = {du})"
+        ));
+    }
+    // The sinusoid over the interval (exact from the stored vectors).
+    let delta = e.axis.dot(&e.center);
+    let z0 = (delta - e.axis.dot(&o)) / nu;
+    let a_c = -radius * e.axis.dot(&x_hat) / nu;
+    let b_c = -radius * e.axis.dot(&y_hat) / nu;
+    let g0 = z0 - v_bot;
+    // The side: g(u) = G0 + A·cos u + B·sin u must keep one sign on
+    // [u0, u1] (the harmonic's extremum inside the interval decides;
+    // outside it, the endpoints do).
+    let m = (a_c * a_c + b_c * b_c).sqrt();
+    let phi = b_c.atan2(a_c);
+    let in_range = |t: f64| -> bool {
+        let w = (t - u0).rem_euclid(2.0 * std::f64::consts::PI);
+        w <= du
+    };
+    let h_min = if m > 0.0 && in_range(phi + std::f64::consts::PI) {
+        -m
+    } else {
+        let ha = a_c * u0.cos() + b_c * u0.sin();
+        let hb = a_c * u1.cos() + b_c * u1.sin();
+        ha.min(hb)
+    };
+    let h_max = if m > 0.0 && in_range(phi) {
+        m
+    } else {
+        let ha = a_c * u0.cos() + b_c * u0.sin();
+        let hb = a_c * u1.cos() + b_c * u1.sin();
+        ha.max(hb)
+    };
+    let scale = g0.abs().max(m).max(radius).max(1.0);
+    let s = if g0 + h_min > tol * scale {
+        1.0
+    } else if g0 + h_max < -tol * scale {
+        -1.0
+    } else {
+        return Err(format!(
+            "face {i}: the elliptical arc's sinusoid crosses the circular arc rim inside \
+             the interval — not a strip this reader knows"
+        ));
+    };
+    // The three closed-form primitives of g over [u0, u1]:
+    //   I0 = ∫ g du
+    //   Ic = ∫ g·cos u du
+    //   Is = ∫ g·sin u du
+    let (s0, s1) = (u0.sin(), u1.sin());
+    let (c0, c1) = (u0.cos(), u1.cos());
+    let (ss0, ss1) = (s0 * s0, s1 * s1);
+    let (q0, q1) = ((2.0 * u0).sin(), (2.0 * u1).sin());
+    let i0 = g0 * du + a_c * (s1 - s0) + b_c * (c0 - c1);
+    let ic = g0 * (s1 - s0) + a_c * (du / 2.0 + (q1 - q0) / 4.0) + b_c * (ss1 - ss0) / 2.0;
+    let is = g0 * (c0 - c1) + a_c * (ss1 - ss0) / 2.0 + b_c * (du / 2.0 - (q1 - q0) / 4.0);
+    let (i0, ic, is) = (s * i0, s * ic, s * is);
+    // The area and the flux — the divergence integrals of the cylinder
+    // (p·n̂ = ô·r̂(u) + R; dA = R du dv), the partial-interval moments
+    // standing in for the full-turn ones.
+    let area = radius * i0;
+    let o_x = o.dot(&x_hat);
+    let o_y = o.dot(&y_hat);
+    let flux = sigma * radius * (radius * i0 + o_x * ic + o_y * is);
+    Ok((area, flux))
+}
+
 /// The ellipse-trimmed cylinder strip: the region between the rim
 /// circle at `v_rim` and the sinusoid `v_e(u) = z0 + A·cos u +
 /// B·sin u` — the oblique plane's height on the cylinder, derived
@@ -1930,7 +2214,13 @@ fn cone_face(
     }
     // Rim check against the surface's own radius function w(v) = r1
     // + v·sin(semi), then read the slant parameters.
-    let (rims, ellipse, _arcs) = strip_rims(&ctx, o, axis, None, true)?;
+    let (rims, ellipse, _arcs, partial_ellipses) = strip_rims(&ctx, o, axis, None, true)?;
+    if !partial_ellipses.is_empty() {
+        return Err(format!(
+            "face {i}: an open elliptical arc rim on a cone — the corner strip is the \
+             cylinder's (K4-2d/2)"
+        ));
+    }
     if let Some(e) = ellipse {
         if rims.len() != 1 {
             return Err(format!(
