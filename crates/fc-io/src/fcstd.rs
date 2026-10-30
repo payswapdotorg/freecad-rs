@@ -345,7 +345,17 @@ fn build_document_xml(
         // feature therefore loses the promise (Touched above) while
         // its stale bytes ride unused, superseded by the rebuild.
         let payload_still_geometry = !obj.preservation().payloads.is_empty()
-            && computed_shape(obj).map_or(true, |s| matches!(s, TopoShape::Brep(_)));
+            && computed_shape(obj).map_or(true, |s| matches!(s, TopoShape::Brep(_)))
+            // A boolean's exact result is the payload's geometry only
+            // while it is what the loader restored
+            // (`result_from_payload`); once a recompute rebuilt it from
+            // parameters the payload is stale beside the rebuild — the
+            // `Brep` kind alone must not vouch for bytes the
+            // parameters have superseded (ADR 0004 rule 4).
+            && obj
+                .as_any()
+                .downcast_ref::<BooleanFeature>()
+                .map_or(true, |f| f.result_from_payload);
         let persisted = obj.as_any().downcast_ref::<MeshFeature>().is_some()
             || matches!(obj.status(), ObjectStatus::Error(_))
             || payload_still_geometry;
@@ -1188,7 +1198,8 @@ fn push_constrain_element<F: Fn(fc_sketcher::GeoId) -> u32>(
 }
 
 /// Computed geometry of a part feature, if any: primitives carry their
-/// analytic `TopoShape`, transform/boolean/PartDesign features their
+/// analytic `TopoShape`, the boolean its ADR 0004 result channel
+/// (exact or faceted, as itself), transform/PartDesign features their
 /// result mesh. Objects without geometry (or features without a
 /// result) return `None`.
 fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
@@ -1206,7 +1217,9 @@ fn computed_shape(obj: &dyn DocumentObject) -> Option<TopoShape> {
     } else if let Some(f) = any.downcast_ref::<TransformFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<BooleanFeature>() {
-        f.result.clone().map(TopoShape::Mesh)
+        // ADR 0004 rule 1: the result channel carries the
+        // representation — `Brep` exact, `Mesh` faceted — as itself.
+        f.result.clone()
     } else if let Some(f) = any.downcast_ref::<MultiFuseFeature>() {
         f.result.clone().map(TopoShape::Mesh)
     } else if let Some(f) = any.downcast_ref::<MirroringFeature>() {
@@ -4065,8 +4078,17 @@ fn attach_shape(object: &mut Box<dyn DocumentObject>, shape: TopoShape) -> Attac
         // Transform features persist their computed mesh.
         mesh_result(&mut f.result, shape)
     } else if let Some(f) = any.downcast_mut::<BooleanFeature>() {
-        // Boolean features persist their computed mesh.
-        mesh_result(&mut f.result, shape)
+        // ADR 0004 rule 4: the mesh bridge for booleans is retired — a
+        // readable payload IS the feature's last-good computation, and
+        // it lands as the exact model (the file's own bytes remain its
+        // truthful serialization, riding back out verbatim; a recompute
+        // re-derives from Base/Tool when the links exist). A B-rep the
+        // display tier cannot tessellate still attaches — the caller's
+        // no-display-mesh warning covers it, the exact channels
+        // refusing by name instead.
+        f.result = Some(shape);
+        f.result_from_payload = true;
+        AttachOutcome::Attached
     } else if let Some(f) = any.downcast_mut::<MultiFuseFeature>() {
         // Multi-fuse features persist their computed mesh.
         mesh_result(&mut f.result, shape)

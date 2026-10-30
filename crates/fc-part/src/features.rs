@@ -13,9 +13,14 @@
 //! it bakes its Placement (and Scale) into the computed mesh itself.
 
 use fc_app::{impl_document_object, Document, DocumentObject, Property, PropertyContainer};
-use fc_base::{Placement, Vector3};
+use fc_base::{Matrix4, Placement, Vector3};
 
+use crate::brep_boolean::{
+    cylinder_cylinder_boolean, cylinder_sphere_boolean, sphere_sphere_boolean, BooleanOp,
+    BooleanOutcome, BooleanOutcomeKind,
+};
 use crate::shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
+use crate::topology::{ExactBRep, Surface};
 
 /// Read a required `App::PropertyFloat` (registered by `new`, so a miss
 /// means someone tampered with the property map).
@@ -313,6 +318,17 @@ impl BooleanKind {
         }
     }
 
+    /// The exact-kernel operation of the same meaning — the bridge
+    /// [`BooleanFeature`]'s dispatch uses to reach
+    /// [`crate::brep_boolean`].
+    fn as_boolean_op(self) -> BooleanOp {
+        match self {
+            BooleanKind::Cut => BooleanOp::Cut,
+            BooleanKind::Fuse => BooleanOp::Fuse,
+            BooleanKind::Common => BooleanOp::Common,
+        }
+    }
+
     fn apply(self, base: &Mesh, tool: &Mesh) -> Mesh {
         match self {
             BooleanKind::Cut => crate::boolean::cut(base, tool),
@@ -322,19 +338,419 @@ impl BooleanKind {
     }
 }
 
+/// An exact analytic solid with the operand's placement baked into
+/// its parameters — the dispatch vocabulary of ADR 0004 rule 3: the
+/// operand classes the exact boolean kernel can pair (a sphere- or
+/// cylinder-class `Brep`, a `Sphere`/`Cylinder` primitive).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExactSolid {
+    Sphere {
+        center: Vector3,
+        radius: f64,
+    },
+    Cylinder {
+        origin: Vector3,
+        /// Unit length.
+        axis: Vector3,
+        radius: f64,
+        height: f64,
+    },
+}
+
+/// An operand resolved for execution (ADR 0004 rule 2): the computed
+/// shape in its local frame plus the operand's own `Placement` — the
+/// dispatch applies it analytically per operand class (a sphere's
+/// center, a cylinder's origin and axis), the faceted path wholesale
+/// as a mesh transform. Never a silent tessellation: the exact shape
+/// stays exact until a branch that says what it is doing with it.
+#[derive(Debug)]
+struct OperandShape {
+    shape: TopoShape,
+    placement: Matrix4,
+}
+
+/// Resolve one boolean operand link (`Base`/`Tool`) to its shape with
+/// named refusals: a missing link, an unresolved name, an object with
+/// no computed geometry, and a tessellation refusal that names the
+/// face (a B-spline) all arrive as their own message — never the
+/// generic "no computed geometry" the old mesh-only path collapsed
+/// them into.
+fn resolve_operand(
+    container: &PropertyContainer,
+    doc: &Document,
+    key: &str,
+    type_name: &str,
+    name: &str,
+) -> Result<OperandShape, String> {
+    let target = match container.get(key) {
+        Some(Property::Link(target)) if !target.is_empty() => target.clone(),
+        _ => {
+            return Err(format!(
+                "{type_name} '{name}': {key} must link to a document object"
+            ))
+        }
+    };
+    let object = doc
+        .get_by_name(&target)
+        .ok_or_else(|| format!("{type_name} '{name}': {key} '{target}' not found"))?;
+    let shape = shape_of(object).ok_or_else(|| {
+        // The operand is a part feature without a computed shape — the
+        // one ambiguity worth naming separately: the object exists,
+        // its geometry does not (not yet recomputed).
+        format!(
+            "{type_name} '{name}': {key} '{target}' has no computed geometry \
+         (not a part feature, or not yet recomputed)"
+        )
+    })?;
+    let placement = match object.properties().get("Placement") {
+        Some(Property::Placement(p)) => p.to_matrix(),
+        _ => Matrix4::IDENTITY,
+    };
+    Ok(OperandShape { shape, placement })
+}
+
+/// ADR 0004 rule 2 — operand resolution resolves shapes, not meshes.
+/// The operand's computed shape with named refusals: an object that is
+/// not a part feature, a feature not yet recomputed, or geometry whose
+/// channels refuse arrives as its own message. Meshes are returned
+/// with the operand's `Placement` applied (the same rule
+/// [`placed_mesh_of`] applies); exact shapes and primitives keep
+/// their local frames — consumers apply placements analytically per
+/// class (the boolean dispatch does: a sphere's center, a cylinder's
+/// origin and axis), because a general B-rep transform is not part of
+/// this contract.
+pub fn placed_shape_of(obj: &dyn DocumentObject) -> Result<TopoShape, String> {
+    let shape = shape_of(obj).ok_or_else(|| {
+        format!(
+            "object '{}': no computed geometry (not a part feature, or not yet recomputed)",
+            obj.name()
+        )
+    })?;
+    if let TopoShape::Mesh(mesh) = &shape {
+        if obj.type_name() != "Part::Transform" {
+            if let Some(Property::Placement(p)) = obj.properties().get("Placement") {
+                return Ok(TopoShape::Mesh(mesh.transformed(&p.to_matrix())));
+            }
+        }
+    }
+    Ok(shape)
+}
+
+/// Classify an `ExactBRep` to the dispatch classes, with the
+/// unsupported class named — never a guess. A sphere solid is its one
+/// sphere face; a cylinder solid is one cylindrical lateral face plus
+/// two planar caps perpendicular to the axis (the height is the cap
+/// separation, the origin the lateral face's own base point).
+fn classify_brep_solid(brep: &ExactBRep) -> Result<ExactSolid, String> {
+    if brep.faces.len() == 1 {
+        if let Surface::Sphere { center, radius, .. } = &brep.faces[0].surface {
+            return Ok(ExactSolid::Sphere {
+                center: *center,
+                radius: *radius,
+            });
+        }
+    }
+    if brep.faces.len() == 3 {
+        let mut lateral = None;
+        let mut caps = Vec::new();
+        for face in &brep.faces {
+            match &face.surface {
+                Surface::Cylinder { .. } if lateral.is_none() => lateral = Some(face),
+                Surface::Plane { .. } => caps.push(face),
+                _ => {
+                    lateral = None;
+                    break;
+                }
+            }
+        }
+        if let (Some(lateral), true) = (lateral, caps.len() == 2) {
+            if let Surface::Cylinder {
+                origin,
+                axis,
+                radius,
+                ..
+            } = &lateral.surface
+            {
+                // Both caps perpendicular to the axis: each planar
+                // face's own normal is ±axis (the face orientation
+                // flag flips the outward normal, not the plane's).
+                let caps_perpendicular = caps.iter().all(|cap| match &cap.surface {
+                    Surface::Plane { normal, .. } => normal.normalized().is_some_and(|n| {
+                        (n.dot(axis) - 1.0).abs() < 1e-9 || (n.dot(axis) + 1.0).abs() < 1e-9
+                    }),
+                    _ => false,
+                });
+                let cap_points: Option<(Vector3, Vector3)> =
+                    match (&caps[0].surface, &caps[1].surface) {
+                        (Surface::Plane { origin: a, .. }, Surface::Plane { origin: b, .. }) => {
+                            Some((*a, *b))
+                        }
+                        _ => None,
+                    };
+                if caps_perpendicular {
+                    if let Some((a, b)) = cap_points {
+                        let height = (a - b).dot(axis).abs();
+                        if height > 0.0 {
+                            return Ok(ExactSolid::Cylinder {
+                                origin: *origin,
+                                axis: *axis,
+                                radius: *radius,
+                                height,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Name the unsupported class honestly.
+    let kinds: Vec<&str> = brep.faces.iter().map(|f| f.surface.kind_name()).collect();
+    if kinds.iter().all(|k| *k == "Plane") {
+        return Err(format!(
+            "a planar-faced (box-class) solid ({} faces)",
+            brep.faces.len()
+        ));
+    }
+    if kinds.contains(&"Bspline") {
+        return Err("B-spline-faced geometry".to_string());
+    }
+    if brep.faces.len() == 1 && kinds[0] == "Torus" {
+        return Err("a torus solid".to_string());
+    }
+    if brep.faces.len() == 1 && kinds[0] == "Sphere" {
+        return Err("a sphere-solid variant this classifier does not recognize".to_string());
+    }
+    Err(format!(
+        "a multi-surface solid (face kinds: {})",
+        kinds.join(", ")
+    ))
+}
+
+/// The operand's exact class with its placement applied analytically
+/// — or the named refusal. Primitives carry their parameters; a
+/// `Brep` goes through the solid classifier; a mesh or an unpaired
+/// primitive is an honest error naming what it is.
+fn classify_operand(operand: &OperandShape) -> Result<ExactSolid, String> {
+    match &operand.shape {
+        TopoShape::Sphere { radius } => Ok(ExactSolid::Sphere {
+            center: operand
+                .placement
+                .transform_point(&Vector3::new(0.0, 0.0, 0.0)),
+            radius: *radius,
+        }),
+        TopoShape::Cylinder { radius, height } => Ok(ExactSolid::Cylinder {
+            origin: operand
+                .placement
+                .transform_point(&Vector3::new(0.0, 0.0, 0.0)),
+            axis: operand
+                .placement
+                .transform_direction(&Vector3::new(0.0, 0.0, 1.0)),
+            radius: *radius,
+            height: *height,
+        }),
+        TopoShape::Brep(brep) => {
+            let solid = classify_brep_solid(brep)?;
+            Ok(match solid {
+                ExactSolid::Sphere { center, radius } => ExactSolid::Sphere {
+                    center: operand.placement.transform_point(&center),
+                    radius,
+                },
+                ExactSolid::Cylinder {
+                    origin,
+                    axis,
+                    radius,
+                    height,
+                } => ExactSolid::Cylinder {
+                    origin: operand.placement.transform_point(&origin),
+                    axis: operand.placement.transform_direction(&axis),
+                    radius,
+                    height,
+                },
+            })
+        }
+        TopoShape::Mesh(_) => Err("a faceted operand (a mesh)".to_string()),
+        TopoShape::Box { .. } => Err("a Box operand (no exact pairing)".to_string()),
+        TopoShape::Cone { .. } => Err("a Cone operand (no exact pairing)".to_string()),
+        TopoShape::Torus { .. } => Err("a Torus operand (no exact pairing)".to_string()),
+    }
+}
+
+/// The faceted path's placed mesh: the operand tessellated at
+/// [`DEFAULT_DEFLECTION`] and transformed by its placement — with the
+/// tessellation refusal named (a B-spline face), never collapsed into
+/// "no computed geometry".
+fn placed_operand_mesh(operand: &OperandShape, what: &str) -> Result<Mesh, String> {
+    let mesh = operand
+        .shape
+        .try_tessellate(DEFAULT_DEFLECTION)
+        .map_err(|reason| format!("{what}: the operand's tessellation refused ({reason})"))?;
+    Ok(if operand.placement == Matrix4::IDENTITY {
+        mesh
+    } else {
+        mesh.transformed(&operand.placement)
+    })
+}
+
+/// The ADR 0004 rule 3 outcome as a result channel.
+enum ExactOutcome {
+    /// The exact solid — the result is `TopoShape::Brep`.
+    Solid(ExactBRep),
+    /// The empty set — an exact answer; an empty mesh result carries
+    /// it (emptiness has no geometry identity to lose).
+    Empty,
+}
+
+/// Pair the classified operands through the exact kernel — the
+/// supported families of [`crate::brep_boolean`], the operand order
+/// respected (`Cut` is `Base − Tool`).
+fn exact_pair(
+    op: BooleanKind,
+    base: &ExactSolid,
+    tool: &ExactSolid,
+) -> Result<ExactOutcome, String> {
+    let boolean_op = |out: Result<BooleanOutcome, String>| match out {
+        Ok(BooleanOutcome {
+            kind: BooleanOutcomeKind::Solid(brep),
+        }) => Ok(ExactOutcome::Solid(brep)),
+        Ok(BooleanOutcome {
+            kind: BooleanOutcomeKind::Empty,
+        }) => Ok(ExactOutcome::Empty),
+        Ok(BooleanOutcome {
+            kind: BooleanOutcomeKind::Refused { why },
+        }) => Err(why),
+        Err(e) => Err(e),
+    };
+    match (base, tool) {
+        (
+            ExactSolid::Sphere {
+                center: ca,
+                radius: ra,
+            },
+            ExactSolid::Sphere {
+                center: cb,
+                radius: rb,
+            },
+        ) => boolean_op(sphere_sphere_boolean(
+            op.as_boolean_op(),
+            *ca,
+            *ra,
+            *cb,
+            *rb,
+        )),
+        (
+            ExactSolid::Cylinder {
+                origin: o1,
+                axis: a1,
+                radius: r1,
+                height: h1,
+            },
+            ExactSolid::Cylinder {
+                origin: o2,
+                axis: a2,
+                radius: r2,
+                height: h2,
+            },
+        ) => boolean_op(cylinder_cylinder_boolean(
+            op.as_boolean_op(),
+            *o1,
+            *a1,
+            *r1,
+            *h1,
+            *o2,
+            *a2,
+            *r2,
+            *h2,
+        )),
+        (
+            ExactSolid::Cylinder {
+                origin: o,
+                axis: a,
+                radius: r_c,
+                height: h_c,
+            },
+            ExactSolid::Sphere {
+                center: c,
+                radius: r_s,
+            },
+        ) => boolean_op(cylinder_sphere_boolean(
+            op.as_boolean_op(),
+            *o,
+            *a,
+            *r_c,
+            *h_c,
+            *c,
+            *r_s,
+        )),
+        (ExactSolid::Sphere { .. }, ExactSolid::Cylinder { .. }) => match op {
+            // Fuse/Common are commutative: the kernel's cylinder-first
+            // API answers them with the operands swapped.
+            BooleanKind::Fuse | BooleanKind::Common => {
+                let (
+                    ExactSolid::Cylinder {
+                        origin: o,
+                        axis: a,
+                        radius: r_c,
+                        height: h_c,
+                    },
+                    ExactSolid::Sphere {
+                        center: c,
+                        radius: r_s,
+                    },
+                ) = (tool, base)
+                else {
+                    unreachable!("the match arm pinned the classes")
+                };
+                boolean_op(cylinder_sphere_boolean(
+                    op.as_boolean_op(),
+                    *o,
+                    *a,
+                    *r_c,
+                    *h_c,
+                    *c,
+                    *r_s,
+                ))
+            }
+            // Sphere − cylinder has no kernel path in that order: say
+            // so, and say the workaround — never a silent swap that
+            // changes the answer.
+            BooleanKind::Cut => Err(
+                "sphere − cylinder with the sphere as Base has no exact path — swap Base and \
+                 Tool for the exact cut"
+                    .to_string(),
+            ),
+        },
+    }
+}
+
 /// FreeCAD `Part::Cut` / `Part::Fuse` / `Part::Common`: links to a
-/// `Base` and a `Tool` object and applies the mesh boolean of
-/// [`BooleanKind`] to their tessellated geometry at `execute` time.
+/// `Base` and a `Tool` object and applies the ADR 0004 operation
+/// contract at `execute` time.
 ///
-/// FreeCAD hands these to OCCT's `BRepAlgoAPI` on exact BRep geometry;
-/// this kernel runs the BSP mesh boolean ([`crate::boolean`]) on the
-/// tessellations — watertight for watertight operands, exact volumes
-/// only up to tessellation resolution.
+/// * A `Brep` operand (imported exact geometry, or a derived exact
+///   result) signals exact intent: the operands classify to the
+///   supported analytic classes and the exact kernel runs, the result
+///   carrying `TopoShape::Brep`; anything the kernel cannot pair
+///   refuses with the operands and classes named — never a silent
+///   tessellation of the imported geometry.
+/// * Without a `Brep` operand, today's faceted path runs — the BSP
+///   mesh boolean ([`crate::boolean`]) on the placed tessellations,
+///   exact volumes up to tessellation resolution, the result carrying
+///   `TopoShape::Mesh` so every consumer can tell faceted from exact.
 pub struct BooleanFeature {
     pub container: PropertyContainer,
     pub kind: BooleanKind,
-    /// Boolean result mesh, set by `execute_impl`.
-    pub result: Option<Mesh>,
+    /// Boolean result, set by `execute_impl` — the ADR 0004 result
+    /// channel: `TopoShape::Brep` for an exact execution, a `Mesh` for
+    /// the faceted path (or the exact empty set). The loader restores
+    /// a readable payload into this field as the exact model it is
+    /// (the last-good computation), with `result_from_payload` set.
+    pub result: Option<TopoShape>,
+    /// True when `result` is the geometry the loader restored from the
+    /// file's own payload — the bytes still ARE that shape, so a
+    /// re-save keeps the `Valid` promise. False once a recompute
+    /// rebuilds the result from parameters: the preserved payload (if
+    /// any) is stale beside the rebuild and must not vouch for it.
+    pub result_from_payload: bool,
 }
 
 impl BooleanFeature {
@@ -347,36 +763,80 @@ impl BooleanFeature {
             container,
             kind,
             result: None,
+            result_from_payload: false,
         }
     }
 
     fn execute_impl(&mut self, doc: &Document) -> Result<(), String> {
         let type_name = self.kind.type_name();
         let name = self.container.name().to_string();
-        let operand =
-            |container: &PropertyContainer, doc: &Document, key: &str| -> Result<Mesh, String> {
-                let target = match container.get(key) {
-                    Some(Property::Link(target)) if !target.is_empty() => target.clone(),
-                    _ => {
-                        return Err(format!(
-                            "{type_name} '{name}': {key} must link to a document object"
-                        ))
-                    }
-                };
-                let object = doc
-                    .get_by_name(&target)
-                    .ok_or_else(|| format!("{type_name} '{name}': {key} '{target}' not found"))?;
-                placed_mesh_of(object, DEFAULT_DEFLECTION).ok_or_else(|| {
-                    format!(
-                        "{type_name} '{name}': {key} '{target}' has no computed geometry \
-                     (not a part feature, or not yet recomputed)"
-                    )
-                })
-            };
-        let base = operand(&self.container, doc, "Base")?;
-        let tool = operand(&self.container, doc, "Tool")?;
-        self.result = Some(self.kind.apply(&base, &tool));
+        let base = resolve_operand(&self.container, doc, "Base", type_name, &name)?;
+        let tool = resolve_operand(&self.container, doc, "Tool", type_name, &name)?;
+        self.result = Some(self.dispatch(&base, &tool, type_name, &name)?);
+        self.result_from_payload = false;
         Ok(())
+    }
+
+    /// The ADR 0004 rule 3 dispatch (see the type documentation).
+    fn dispatch(
+        &self,
+        base: &OperandShape,
+        tool: &OperandShape,
+        type_name: &str,
+        name: &str,
+    ) -> Result<TopoShape, String> {
+        let brep_operand =
+            matches!(base.shape, TopoShape::Brep(_)) || matches!(tool.shape, TopoShape::Brep(_));
+        if !brep_operand {
+            // The faceted path — today's behavior, with the operand
+            // refusals now named (rule 2: a B-spline tessellation
+            // refusal arrives as the face's name).
+            let base_mesh = placed_operand_mesh(base, "Base")
+                .map_err(|reason| format!("{type_name} '{name}': {reason}"))?;
+            let tool_mesh = placed_operand_mesh(tool, "Tool")
+                .map_err(|reason| format!("{type_name} '{name}': {reason}"))?;
+            return Ok(TopoShape::Mesh(self.kind.apply(&base_mesh, &tool_mesh)));
+        }
+        // Exact intent: classify both operands, pair them through the
+        // kernel, refuse by name wherever the pairing does not exist.
+        let classify = |operand: &OperandShape, role: &str, link: &str| {
+            classify_operand(operand).map_err(|class| {
+                format!(
+                    "{type_name} '{name}': {role} '{link}' is {class}; the exact path needs a \
+                 sphere- or cylinder-class operand — tessellate first or use mesh operands for \
+                 the faceted workflow"
+                )
+            })
+        };
+        let base_link = self
+            .container
+            .get("Base")
+            .and_then(|p| match p {
+                Property::Link(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let tool_link = self
+            .container
+            .get("Tool")
+            .and_then(|p| match p {
+                Property::Link(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let base_solid = classify(base, "Base", &base_link)?;
+        let tool_solid = classify(tool, "Tool", &tool_link)?;
+        match exact_pair(self.kind, &base_solid, &tool_solid) {
+            Ok(ExactOutcome::Solid(brep)) => Ok(TopoShape::Brep(brep)),
+            Ok(ExactOutcome::Empty) => {
+                // An exact empty answer: an empty mesh carries it —
+                // emptiness has no geometry identity to lose.
+                Ok(TopoShape::Mesh(Mesh::new(Vec::new(), Vec::new())))
+            }
+            Err(reason) => Err(format!(
+                "{type_name} '{name}': the exact boolean refused — {reason}"
+            )),
+        }
     }
 }
 
@@ -874,7 +1334,15 @@ pub fn mesh_of(obj: &dyn DocumentObject, deflection: f64) -> Option<Mesh> {
         return f.result.clone();
     }
     if let Some(f) = any.downcast_ref::<BooleanFeature>() {
-        return f.result.clone();
+        // ADR 0004 rule 1: the result channel is a `TopoShape` — the
+        // display mesh derives from it at the caller's deflection. A
+        // tessellation refusal (a B-spline face) is `None` here and
+        // the named reason on `try_tessellate`: no mesh is more
+        // honest than an empty one pretending to be the solid.
+        return f
+            .result
+            .as_ref()
+            .and_then(|s| s.try_tessellate(deflection).ok());
     }
     if let Some(f) = any.downcast_ref::<crate::partdesign::PadFeature>() {
         return f.result.clone();
@@ -919,7 +1387,9 @@ pub fn shape_of(obj: &dyn DocumentObject) -> Option<TopoShape> {
         return f.result.clone().map(TopoShape::Mesh);
     }
     if let Some(f) = any.downcast_ref::<BooleanFeature>() {
-        return f.result.clone().map(TopoShape::Mesh);
+        // ADR 0004 rule 1: the result channel carries the
+        // representation — exact or faceted — as itself.
+        return f.result.clone();
     }
     if let Some(f) = any.downcast_ref::<crate::partdesign::PadFeature>() {
         return f.result.clone().map(TopoShape::Mesh);

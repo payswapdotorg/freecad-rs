@@ -522,15 +522,17 @@ fn assert_closed_manifold(mesh: &fc_part::Mesh, ctx: &str) {
     }
 }
 
-/// A mesh-result feature (`Part::Cut`) cannot hold the exact model —
-/// its field is a mesh — so a readable payload crosses the
-/// tessellation bridge: the deflection-true stand-in lands live, the
-/// object keeps the file's Valid verdict (geometry restored), and the
-/// exact bytes ride out verbatim (they are still the only truthful
-/// serialization of that cut).
+/// A boolean's payload IS its last-good computation — a readable one
+/// lands as the exact model (ADR 0004 rule 4: the mesh bridge for
+/// booleans is retired). The object keeps the file's `Valid` verdict
+/// (the geometry restored, exactly what a real FreeCAD leaves after
+/// its own restore), the exact channels measure OCCT's own numbers,
+/// the display mesh is the deflection-true tessellation of the exact
+/// model — and the exact bytes ride out verbatim (they are still the
+/// only truthful serialization of that computation).
 #[test]
-fn mesh_result_feature_bridges_the_brep_at_default_deflection() {
-    let path = temp_path("bridge");
+fn boolean_payload_lands_as_the_exact_last_good_result() {
+    let path = temp_path("exact-restore");
     let cylinder = brp_fixture("cylinder");
     craft_fcstd(
         &path,
@@ -539,46 +541,54 @@ fn mesh_result_feature_bridges_the_brep_at_default_deflection() {
     );
 
     let (doc, report) = load_document(&path).expect("the crafted document loads");
-    // The payload reads and tessellates — the honest report is silence.
+    // The payload reads — the honest report is silence.
     assert!(
         report.warnings.is_empty(),
-        "a bridged payload warns about nothing: {:?}",
+        "a restored payload warns about nothing: {:?}",
         report.warnings
     );
     let obj = doc.get_by_name("Obj").expect("the cut loads");
     assert_eq!(
         obj.status(),
         &ObjectStatus::Valid,
-        "the bridged geometry keeps the file's Valid verdict"
+        "the restored geometry keeps the file's Valid verdict"
     );
-    // No EXACT shape on a boolean (its field is a mesh — the bridge
-    // stand-in, not the B-rep); the display mesh is live and
-    // watertight, within the deflection discipline of the bridge.
+    // THE exact model is live on the boolean (no bridge, no stand-in):
+    // its channels carry OCCT's own measure — the r=2, h=10 cylinder.
+    let shape = shape_of(obj).expect("the exact model is live geometry");
     assert_eq!(
-        shape_of(obj)
-            .expect("the bridge stand-in is live")
-            .kind_name(),
-        "Mesh",
-        "a boolean carries the bridged mesh, not the exact model"
+        shape.kind_name(),
+        "Brep",
+        "the boolean carries the exact model, not a bridged mesh"
     );
-    let mesh = mesh_of(obj, 0.05).expect("the bridge produced a display mesh");
-    assert_closed_manifold(&mesh, "the bridged cylinder");
-    // The measured inscribed deficit at the bridge's d=0.2 (64-vertex
-    // mesh: ~7 rim segments on r=2) is 1.1146e-1 — the tolerance sits
-    // just above it (the same measurement style as the reader-side
-    // acceptance, which pins 2.712e-2 at d=0.05).
     let want_volume = 125.6637061435917; // OCCT's own measure, r=2 h=10
+    let got = shape.try_volume().expect("the cylinder measures exactly");
     assert!(
-        (mesh.volume() - want_volume).abs() / want_volume <= 1.2e-1,
-        "bridged mesh volume {} within the measured d=0.2 deficit of {want_volume}",
+        (got - want_volume).abs() / want_volume <= 1e-12,
+        "the exact channel carries OCCT's own volume: {got} vs {want_volume}"
+    );
+    assert!(
+        (shape.volume() - want_volume).abs() / want_volume <= 1e-12,
+        "the infallible channel agrees — every face reads (to rounding)"
+    );
+    // The display mesh derives from the exact model at the caller's
+    // deflection: watertight, within the deflection discipline (the
+    // reader-side acceptance pins a 2.712e-2 inscribed deficit at
+    // d=0.05 — the same measurement style).
+    let mesh = mesh_of(obj, 0.05).expect("the exact model tessellates");
+    assert_closed_manifold(&mesh, "the tessellated cylinder");
+    assert!(
+        (mesh.volume() - want_volume).abs() / want_volume <= 3.0e-2,
+        "display mesh volume {} within the d=0.05 deficit of {want_volume}",
         mesh.volume()
     );
 
     // The re-save: the exact payload rides out byte-identically (the
-    // lossy bridge never evicts it), and the boolean re-saves Touched —
-    // the writer's standing convention for parametric features (its
-    // rebuild truth is Base/Tool, not any restored mesh).
-    let temp = temp_path("bridge-resave");
+    // restore never evicts it), and the boolean re-saves `Valid` —
+    // the payload still IS the live geometry (`result_from_payload`),
+    // so the file's promise holds for any reader (ours restores the
+    // exact model; a real FreeCAD its own OCCT original).
+    let temp = temp_path("exact-restore-resave");
     save_document(&doc, &temp).expect("re-save works");
     assert_eq!(
         zip_entries(&temp).get("CutShape.brp"),
@@ -586,13 +596,23 @@ fn mesh_result_feature_bridges_the_brep_at_default_deflection() {
         "the exact payload rides out byte-identically"
     );
     assert!(
-        zip_xml(&temp).contains("status=\"Touched\""),
-        "the parametric convention: a boolean re-saves Touched"
+        zip_xml(&temp).contains("status=\"Valid\""),
+        "the exact restore keeps the Valid promise — the payload is the geometry"
     );
-    // And the reload bridges again — the fixed point holds.
+    // And the reload lands exact again — the fixed point holds.
     let (doc2, report2) = load_document(&temp).expect("the re-saved file loads");
     assert!(report2.warnings.is_empty(), "still nothing to warn");
-    assert!(mesh_of(doc2.get_by_name("Obj").unwrap(), 0.05).is_some());
+    let shape2 = shape_of(doc2.get_by_name("Obj").unwrap()).expect("still live");
+    assert_eq!(
+        shape2.kind_name(),
+        "Brep",
+        "the reload restores the exact model"
+    );
+    let got2 = shape2.try_volume().expect("still exact");
+    assert!(
+        (got2 - want_volume).abs() / want_volume <= 1e-12,
+        "the fixed point measures identically: {got2} vs {want_volume}"
+    );
 
     std::fs::remove_file(&path).ok();
     std::fs::remove_file(&temp).ok();

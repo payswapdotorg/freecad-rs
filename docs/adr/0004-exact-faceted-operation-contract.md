@@ -73,26 +73,30 @@ into a generic "no computed geometry".
 
 ### 3. Boolean dispatch is explicit and total
 
-For `Part::Cut` / `Part::Fuse` / `Part::Common`:
+For `Part::Cut` / `Part::Fuse` / `Part::Common`, in priority order
+(a `Brep` operand signals exact intent and dominates):
 
-- **A faceted operand is present** → the mesh boolean runs and the
-  result is `Mesh`. The approximation is the input's nature, recorded
-  in the representation where statistics, the viewer, and the studio
-  can label it.
-- **Both operands are exact-representable and the combination is
-  supported** — sphere×sphere, cylinder×cylinder, cylinder×sphere
-  (each side either a `Brep` payload classified to that analytic
-  class, or a `Sphere`/`Cylinder` primitive; placements applied) →
-  the exact BRep boolean runs and the result is `Brep`. An `Empty`
-  outcome is an exact answer represented as an empty mesh result
-  (emptiness has no geometry identity to lose); a `Refused` outcome is
-  an execution error carrying the kernel's own reason.
-- **Exact operands, unsupported combination** — a box-class BRep, a
-  B-spline face, cone or torus classes, unsupported axis
-  configurations → **a named refusal**: the error names the operands,
-  their classes, and the reason. Never a silent tessellation
-  downgrade. (The message says how to get the faceted workflow
-  explicitly: tessellate first or use mesh operands.)
+- **A `Brep` operand is present** → exact execution is required:
+  - Both operands classify to the supported analytic classes (a
+    `Brep` payload recognized as a sphere or cylinder solid, or a
+    `Sphere`/`Cylinder` primitive; placements applied) → the exact
+    BRep boolean runs and the result is `Brep`. An `Empty` outcome is
+    an exact answer represented as an empty mesh result (emptiness
+    has no geometry identity to lose); a `Refused` outcome is an
+    execution error carrying the kernel's own reason.
+  - The other operand is faceted, or either operand is an exact class
+    the kernel cannot pair (a box-class BRep, a B-spline face, cone or
+    torus classes, unsupported axis configurations) → **a named
+    refusal**: the error names the operands, their classes, and the
+    reason, and says how to get the faceted workflow explicitly
+    (tessellate first or use mesh operands). Never a silent
+    tessellation downgrade of the imported geometry.
+- **No `Brep` operand is present** → today's behavior: a faceted
+  operand runs the mesh boolean (result `Mesh` — the approximation
+  is the input's nature, recorded in the representation where
+  statistics, the viewer, and the studio can label it); unsupported
+  primitive combinations likewise stay on the mesh path until they
+  join a later slice.
 - The cone/plane, sphere/plane and cylinder/plane kernel APIs stay
   kernel-level: no document object is a halfspace, so they are not
   dispatch targets.
@@ -132,9 +136,13 @@ computed", "rejected payload", and "exact-kernel refusal".
 
 This architecture lands in slices; each stays green on its own.
 
-- **Slice 1 (landing now):** `BooleanFeature` only — the dispatch of
-  rule 3, the `Option<TopoShape>` result of rule 1, the loader and
-  save-side behavior of rule 4, the `placed_shape_of` of rule 2.
+- **Slice 1 (landing now):** `BooleanFeature` only — the `Brep`-operand
+  dispatch of rule 3 (exact when imported exact geometry participates;
+  primitive-pair combinations keep today's faceted path until the
+  refused-configuration handling — a disjoint fuse, say — and the
+  recompute-on-load of derived exact results are field-proven), the
+  `Option<TopoShape>` result of rule 1, the loader and save-side
+  behavior of rule 4, the `placed_shape_of` of rule 2.
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
   results; widening the supported-combination table as K4-2d/3 lands

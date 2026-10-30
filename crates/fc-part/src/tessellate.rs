@@ -460,7 +460,7 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
         // only) evaluate the surface at their parameters — or, on the
         // seam, share one evaluated point from both sides so the seam
         // closes bit-exactly.
-        let (face_tris, p3_of): (Vec<[u32; 3]>, Vec<Vector3>) =
+        let (face_tris, p3): (Vec<[u32; 3]>, Vec<Vector3>) =
             if !matches!(face.surface, Surface::Plane { .. }) {
                 // K4-2b: a curved face's domain is a monotone band — its
                 // boundary walk splits into two u-monotone chains (rim
@@ -472,6 +472,50 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
                 // deflection referee only refines from there. No ear
                 // clip, no fan, no stitch: the slanted-panel defect
                 // cannot arise.
+                //
+                // Region inference first: the band machinery below tiles
+                // the INTERIOR of a boundary walk that bounds the
+                // face's own UV box — every K4-1/K4-2 corpus face
+                // walks its box (natural domains and seam-wrapped bands
+                // span the u period up to end-sampling slop; a partial
+                // band touches its box's u-extremes), the rim chains
+                // entering as genuine boundary edges. A loop that
+                // neither spans the period nor touches the extremes is
+                // an AMBIGUOUS trim: the same loop+box serves the cap
+                // (interior) and the complement (the sphere minus its
+                // cap — the exact booleans' outer faces), and tiling
+                // the interior unconditionally would render the wrong
+                // face as a plausible-looking mesh. A cap's loop spans
+                // at most half the period (2·atan(ρ/c) < π), so
+                // three-quarters of the period separates every
+                // box-bounding walk from every cap/complement loop with
+                // margin. The wire-orientation convention that would
+                // classify the ambiguous case is real (region on the
+                // left of the traversal, viewed from the outward
+                // normal) but its per-surface parameter-orientation
+                // signs are not yet carried here — the trim-domain
+                // classification slice (K4-2d). Until then: refuse by
+                // name, the exact channels still measuring the solid.
+                let loop_umin = outer.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+                let loop_umax = outer.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+                let loop_span = loop_umax - loop_umin;
+                let touch_tol = (umax - umin).max(1.0) * 1e-6;
+                let loop_bounds_box = match uper {
+                    Some(p) => {
+                        loop_span >= p - p / 4.0
+                            || (loop_umax >= umax - touch_tol && loop_umin <= umin + touch_tol)
+                    }
+                    None => loop_umax >= umax - touch_tol && loop_umin <= umin + touch_tol,
+                };
+                if !loop_bounds_box {
+                    return Err(format!(
+                        "face {fi}: a {} face whose trim loop does not bound its UV box (an \
+                         interior/exterior-ambiguous trim — the exact booleans' cap and \
+                         complement faces) — trim-domain classification is the K4-2d slice; \
+                         the exact channels still measure it",
+                        face.surface.kind_name()
+                    ));
+                }
                 let rows = grid_rows(&face.surface, &outer, deflection);
                 let mut dm = build_band_domain(loop_verts, &face.surface, rows)
                     .map_err(|e| format!("face {fi}: {e}"))?;
@@ -550,7 +594,7 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
             };
             let mut idx = [0u32; 3];
             for (k, ti) in tri.iter().enumerate() {
-                let p3 = p3_of[*ti as usize];
+                let p3 = p3[*ti as usize];
                 let key = [p3.x.to_bits(), p3.y.to_bits(), p3.z.to_bits()];
                 if let Some(&i) = index_of.get(&key) {
                     idx[k] = i;
