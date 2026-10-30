@@ -82,7 +82,7 @@ list: a claim with no evidence gets marked, not made.
 
 ## Test counts (measured 2026-10-30)
 
-**673 tests** across ten crates (673 passed, 0 `#[ignore]`d), all
+**680 tests** across ten crates (680 passed, 0 `#[ignore]`d), all
 built and run locally on this
 station (`fc-wasm`'s suite — 13 tests — now builds natively as well
 as on `wasm32-unknown-unknown` in CI; method: a full
@@ -96,7 +96,7 @@ now 9 tests) on top of that: 583; the K3c-2 measure pair
 pair on top of that (9 more in `tests/brep_boolean.rs`, 2 more in
 `tests/measure.rs`, 1 in the new `tests/measure_differential.rs`): 605; the K3d
 cylinder×cylinder pair on top of that (8 more in
-`tests/brep_boolean.rs`) the blind drill (2 more), and the coincident-staggered pieces (1 more), and the K3e cylinder×sphere family (9 more, the capsule cuts), and the K3f nested staggered pieces (2 more, the partial bore and the chimney): 627; K4-1's reader suite (15 in `tests/occt_brp.rs`) and K4-2a's bit-exact box: 642; K4-2b's curved suite (8 more, one `#[ignore]`d): 649; K4-2c un-`#[ignore]`d it and added the quartering-convergence assertion: 649, none ignored; the worker pair the same day: worker-b's payload wiring (+4 `tests/shape_brep.rs`, +7 `tests/occt_shape.rs`) and worker-c's engine fix and stats zero-report (+1 `fc-app`, +1 `fc-wasm`): 662, none ignored; K4-2d/1 the next day: the NURBS-measure suite (+10 `tests/bspline_measure.rs`) and the inline GL-table row test (+1 `measure.rs` unit): **673, none ignored**.
+`tests/brep_boolean.rs`) the blind drill (2 more), and the coincident-staggered pieces (1 more), and the K3e cylinder×sphere family (9 more, the capsule cuts), and the K3f nested staggered pieces (2 more, the partial bore and the chimney): 627; K4-1's reader suite (15 in `tests/occt_brp.rs`) and K4-2a's bit-exact box: 642; K4-2b's curved suite (8 more, one `#[ignore]`d): 649; K4-2c un-`#[ignore]`d it and added the quartering-convergence assertion: 649, none ignored; the worker pair the same day: worker-b's payload wiring (+4 `tests/shape_brep.rs`, +7 `tests/occt_shape.rs`) and worker-c's engine fix and stats zero-report (+1 `fc-app`, +1 `fc-wasm`): 662, none ignored; K4-2d/1 the next day: the NURBS-measure suite (+10 `tests/bspline_measure.rs`) and the inline GL-table row test (+1 `measure.rs` unit): 673, none ignored; ADR 0004 slice 1 the same day: the exact-boolean dispatch suite (+7 `tests/exact_boolean.rs` — the decisive imported-sphere-cut round trip, the cylinder fuse, the exact empty set, the named refusals, the untouched faceted path, the errored last-good save refusal): **680, none ignored**.
 
 | Crate | Unit | Integration | Doc-tests | Total | Method |
 |---|---:|---:|---:|---:|---|
@@ -104,13 +104,13 @@ cylinder×cylinder pair on top of that (8 more in
 | `fc-app` | 60 (`expression.rs` 54, `recompute.rs` 6) | 38 (`tests/app.rs` 17, `tests/transaction.rs` 21) | 3 | **101** | run |
 | `fc-part` | 109 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8, `intersect.rs` 6, `measure.rs` 1 — the GL-table monomial pin) | 160 (`tests/part.rs` 15, `tests/topology.rs` 17, `tests/intersect.rs` 39, `tests/intersect_differential.rs` 2, `tests/brep_boolean.rs` 40, `tests/measure.rs` 10, `tests/measure_differential.rs` 1, `tests/occt_brp.rs` 22 — the K4-1 reader suite plus K4-2a's bit-exact box, K4-2b's curved suite: cylinder/located/cone/sphere/torus/top-fillet/oblique-cut watertight within deflection, the oblique cut's wavy-band closures the K4-2c landing; worker-b's `tests/shape_brep.rs` 4; K4-2d's `tests/bspline_measure.rs` 10 — the NURBS-measure tents at degrees (2,2)/(3,3)/(4,4)/(5,5), the two-span and ruled-mixed variants, the σ reversal, the three refusals) | 0 | **269** | run |
 | `fc-sketcher` | 74 (`solver.rs` 40, `xml.rs` 11, `constraint.rs` 8, `sketch_object.rs` 9, `geometry.rs` 6) | 0 | 1 | **75** | run |
-| `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 53 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3, worker-b's `occt_shape.rs` 7) | 0 | **73** | run |
+| `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 60 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3, worker-b's `occt_shape.rs` 7, the ADR 0004 slice-1 `exact_boolean.rs` 7 — the exact boolean dispatch through the real Part features) | 0 | **80** | run |
 | `fc-step` | 0 | 6 (`tests/step.rs`) | 0 | **6** | run |
 | `fc-viewer` | 16 (`camera.rs` 12, `scene.rs` 2, `pick.rs` 2) | 9 (`tests/scene_cpu.rs` 7, `tests/gpu_render.rs` 2) | 0 | **25** | run |
 | `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | run |
 | `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 21 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3, `tests/mechanical_cli.rs` 2) | 0 | **32** | run |
 | `fc-wasm` | 13 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths — the two pattern verbs added in v0.2.2 included, worker-c's empty-document stats zero-report) | 0 | 0 | **14** | run |
-| **Total** | | | | **673** | |
+| **Total** | | | | **680** | |
 
 Notes, honestly: `#[ignore]`d tests — none at this writing. The one
 that existed (K4-2b's defect record:

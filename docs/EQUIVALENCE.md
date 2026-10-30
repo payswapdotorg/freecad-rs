@@ -212,6 +212,22 @@ original payloads re-emerge byte-identically on save.)
 
 ## Known differences — the honest list
 
+- **Exact booleans through document features exist now — for the
+  kernel's analytic families, with imported exact operands (ADR 0004
+  slice 1, 2026-10-30).** A `Part::Cut/Fuse/Common` whose operand
+  carries `TopoShape::Brep` (imported OCCT geometry) dispatches to
+  the exact kernel: sphere×sphere, cylinder×cylinder,
+  cylinder×sphere, placements applied analytically, the result
+  measuring the kernel's own exact numbers through save → reopen →
+  recompute (`tests/exact_boolean.rs`). Three boundaries, all named
+  in the refusals themselves: unpairable operand classes (a box-class
+  B-rep, B-spline-faced geometry, a faceted tool beside an exact
+  base) refuse rather than tessellating the imported geometry
+  silently; the exact outcomes' complement-trimmed faces (a sphere
+  minus its cap) refuse *display* until the K4-2d trim-domain
+  classification lands — the exact channels measure them; and
+  primitive pairs without imported geometry keep the faceted path by
+  recorded slice policy (the ADR's slice boundary), not by omission.
 - **Booleans classify exactly; curved operands still tessellate.**
   Vertex sides are decided by exact integer predicates (a certified
   `f64` filter, then a 256-bit fast path, then a wide integer path

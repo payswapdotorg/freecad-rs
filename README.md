@@ -22,7 +22,7 @@ placements, sketches) — lives in
 **Verified baseline** — v0.1.8 (`main` @ 2026-10-24, plus the
 v0.2.0 — the browser workbench; v0.2.1 makes the workbench a durable
 in-repo asset; v0.2.2 — feature patterns, the mechanical workflow):
-ten crates, **673 tests**
+ten crates, **680 tests**
 (counted 2026-10-30; per-crate counts live in
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the authoritative
 green run is CI: `cargo build` / `cargo test --workspace --locked` /
@@ -89,7 +89,8 @@ concrete terms:
   [`docs/adr/0003-geometry-kernel-strategy.md`](docs/adr/0003-geometry-kernel-strategy.md)
   (OCCT bindings stay a gated decision —
   [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md)).
-* **Booleans classify exactly; curved operands stay deflection-bounded.**
+* **Booleans classify exactly; curved operands stay deflection-bounded;
+  exact imported geometry executes exactly — or refuses by name.**
   Every classification decision in `Part::Cut/Fuse/Common` is an exact
   integer computation (v0.1.7: certified `f64` filter → i256 → wide
   integer — a face offset a millionth of a unit is cut exactly where it
@@ -100,8 +101,17 @@ concrete terms:
   crossed/parallel/skew cylinders, tilted cylinder or cone against a
   sphere, crossed and coaxial opposed cones, mirrored near-coincident
   sheets at fine deflections, exact-tangency unions degenerate-free and
-  volume-exact). The approximation that remains is the *tessellation*
-  itself, not the classification — the honest list in
+  volume-exact). And since ADR 0004 (2026-10-30), a document boolean
+  whose operand carries imported exact geometry (`TopoShape::Brep`)
+  dispatches to the exact kernel families — sphere×sphere,
+  cylinder×cylinder, cylinder×sphere, placements applied analytically —
+  the result carrying the exact model, measuring the kernel's own
+  numbers; anything unpairable refuses with the operands and classes
+  named, never a silent tessellation of the imported geometry
+  (`docs/adr/0004-exact-faceted-operation-contract.md`). Without
+  imported exact geometry the faceted path above still runs — the
+  approximation that remains is the *tessellation* itself, not the
+  classification — and the honest list in
   [`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md) is the precise record.
 * **Sketcher v1 solves in the XY plane.** The sketch `Placement` is
   persisted but not yet applied — sketches on arbitrary planes and

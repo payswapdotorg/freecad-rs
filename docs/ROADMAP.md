@@ -824,10 +824,86 @@ behind us.
       refuse (the table's reach). The straight-edge fillet's corner
       strip is now its ONLY refusal (the caps read exactly) — the
       K4-2d/2 slice. Suite: 673, none ignored.
-- [ ] **K4-2d/2** the mixed-strip fillet corner — the
-      straight-edge fillet's corner-strip cylinder face, whose wire
-      mixes arc rims and elliptical-arc rims (the caps around it now
-      read exactly; `fillet_box` refuses here and names it)
+- [x] **ADR 0004 + slice 1 (landing 2026-10-30)** the exact/faceted
+      operation contract, and the exact booleans through the real
+      document features — the central integration the handoff asked
+      for. [`adr/0004-exact-faceted-operation-contract.md`](adr/0004-exact-faceted-operation-contract.md)
+      freezes five rules (one result representation `TopoShape`; shape
+      — not mesh — operand resolution with named refusals; an
+      explicit, total boolean dispatch; persistence follows
+      provenance; honesty channels survive every hop), and slice 1
+      implements them on `Part::Cut/Fuse/Common`: a `Brep` operand
+      (imported exact geometry) signals exact intent — the operands
+      classify to the sphere/cylinder analytic classes (placements
+      applied analytically) and the kernel families run through the
+      feature (`sphere_sphere`, `cylinder_cylinder`,
+      `cylinder_sphere`, operand order respected), the result
+      carrying `TopoShape::Brep`; everything the kernel cannot pair
+      refuses with the operands and classes named (box-class B-rep,
+      B-spline-faced geometry, a faceted tool beside an exact base,
+      sphere-Base × cylinder-Tool cut says the swap) — never a silent
+      tessellation of the imported geometry. Without a `Brep`
+      operand, today's faceted path runs unchanged (primitive pairs
+      keep it until a later slice opts them in — the refused
+      configurations and recompute-on-load need field time first).
+      The loader's mesh bridge for booleans is retired: a readable
+      payload IS the feature's last-good computation and lands as the
+      exact model (`result_from_payload` keeping the `Valid` promise
+      for the bytes that still are the geometry); derived exact
+      results are recomputed, not serialized (the save side already
+      skipped healthy parametric results; the errored last-good
+      refusal stands). Acceptance: `tests/exact_boolean.rs` (7) — the
+      decisive chain (an imported real OCCT sphere cuts exactly, the
+      operand's bytes riding out verbatim through save → reopen →
+      recompute to a bit-identical exact result), the cylinder fuse,
+      the exact empty set, the named refusals, the untouched faceted
+      path, and the errored last-good + save refusal; the retired
+      bridge test became `boolean_payload_lands_as_the_exact_last_good_result`
+      (the boolean now measuring OCCT's own cylinder numbers exactly).
+      The dispatch's first live exercise pulled a REAL defect out of
+      the display tier: the exact boolean outcomes' complement faces
+      (a sphere minus its cap) were silently mis-tiled as their
+      inverse by the band machinery — a plausible-looking wrong mesh;
+      `tessellate_brep` now refuses interior/exterior-ambiguous trims
+      by name (trim-domain classification is the K4-2d slice), the
+      two-channel contract holding: the crescent measures exactly and
+      says why it will not render. Suite: 680, none ignored.
+- [x] **K4-2d/2 (landing 2026-10-30)** the mixed-strip fillet corner
+      — the straight-edge fillet's corner strip reads: a cylinder
+      patch between one circular ARC rim (the constant-v flat-face
+      cut) and one open elliptical ARC rim (the Steinmetz section of
+      two crossing equal-radius fillet cylinders), the u-interval
+      closed by the two tangent generators. The elliptical rim's
+      plane reduces to the oblique section's own sinusoid
+      `v(u) = z0 + A·cos u + B·sin u`; over the PARTIAL interval the
+      full-turn identities do not apply, so both domain integrals
+      carry in closed form (`∫g`, `∫g·cos`, `∫g·sin` — `u`, `sin 2u`,
+      `sin²u` primitives, the flux's `oₓ/o_y` moments included), the
+      full-turn limit reproducing `cylinder_ellipse_strip` exactly.
+      `fillet_box` measures OCCT's own numbers to rounding (V
+      283.5988157907698 vs 283.59881577988904 — 3.8e-11; A
+      300.5486677646161 vs 300.5486677570851 — 2.5e-11), the FCBREP
+      round-trip bit-identically. The tessellation needed two real
+      band-machinery defects fixed: `same_seam`'s interior check
+      matched two-point runs vacuously (the corner's two UNRELATED
+      tangent generators paired as a "seam", minting unshared points
+      interior to shared straight edges — a torn mesh; a real curved
+      seam carries interior samples to verify, n ≥ 3), and
+      `splice_merge`'s stale-stretch cut assumed the post-run
+      frontier was seam samples (hugging the u-extremes) — the
+      widening case (a wavy LOWER chain punching ever-wider runs)
+      leaves genuine untiled chain vertices strictly inside the run's
+      span, and cutting before them left a torn wedge; the merge now
+      reaches interior frontier points. `fillet_box` tessellates
+      watertight at every deflection with monotone convergence
+      (1.40e-2 → 1.34e-2 → 6.92e-3 → 4.33e-3 toward the exact), the
+      wavy-band corpus untouched. Acceptance: the rewritten
+      `fillet_box_loads_validates_measures_and_round_trips`
+      (measure, round-trip, watertightness, convergence). Honest
+      limits, named in the refusals: cone faces carrying open
+      elliptical arcs refuse (the corner is the cylinder's), malformed
+      corner wires (rims not sharing two corner u values, a sinusoid
+      crossing its arc rim) refuse by name. Suite: 680, none ignored.
 - [ ] **K4-2d/3** general booleans with subsurface classification
       and trimming on the loaded operands
 - [ ] **K5** fillets, chamfers, offsets
