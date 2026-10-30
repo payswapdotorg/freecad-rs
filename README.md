@@ -258,6 +258,8 @@ Full walkthrough: [`docs/cli.md`](docs/cli.md) · rendered example:
 [`docs/adr/0001-geometry-kernel.md`](docs/adr/0001-geometry-kernel.md) ·
 kernel strategy (pure-Rust exactness program):
 [`docs/adr/0003-geometry-kernel-strategy.md`](docs/adr/0003-geometry-kernel-strategy.md) ·
+exact/faceted operation contract:
+[`docs/adr/0004-exact-faceted-operation-contract.md`](docs/adr/0004-exact-faceted-operation-contract.md) ·
 application-layer plan:
 [`docs/PLAN-APPLICATION.md`](docs/PLAN-APPLICATION.md).
 
