@@ -38,6 +38,18 @@
 //!   `F = σ 2π (c·(r1²Δ1 + r1 s Δ2 + s²Δ3/3) − s (o·â)(r1Δ1 + sΔ2/2) − s c (r1Δ2/2 + sΔ3/3))`.
 //! * **Torus** faces: the full torus (no wires or the K1
 //!   seam-crossing pattern): `F = σ 6π² R r²`.
+//! * **B-spline** faces (K4-2d): the **natural domain** — a single
+//!   wire whose four edges are the patch's own boundary pole rows
+//!   (bit-exactly — the representation OCCT payloads carry) — read
+//!   through **Gauss–Legendre on the polynomial integrand**: the flux
+//!   `p·(∂u×∂v)` of a non-rational tensor patch is piecewise
+//!   polynomial of degree `3d−1` per direction, and an `n`-node rule
+//!   integrates degree `2n−1` with **zero quadrature error** — the
+//!   residual is evaluation rounding at machine scale, the same
+//!   scale the closed forms carry. Plane faces trimmed by
+//!   non-rational B-spline curves read through the exact **Green
+//!   line integral** `∮ (x dy − y dx)`, a piecewise polynomial per
+//!   span, GL-exact the same way.
 //!
 //! `σ = −1` on a [`TopoFace::reversed`] face (the outward normal is
 //! the natural one negated); wire flags enter only through the
@@ -49,10 +61,15 @@
 //! enforce: `validate()`, and every non-degenerate edge used by
 //! exactly two faces of the shell.
 //!
-//! Honest refusals, by name: B-spline faces (no closed form on
-//! free-form surfaces — K4), untrimmed planes and cylinders
-//! (unbounded regions), and any wire the module cannot read as one
-//! of the trims above. Never an approximation.
+//! Honest refusals, by name: **rational** B-spline faces (the flux
+//! is a ratio of polynomials — GL is exact only on polynomial
+//! integrands), B-spline faces whose wire is **not the natural
+//! boundary** (trimmed patches), the **area** of any B-spline face
+//! (`|∂u×∂v|` lives under a square root — not polynomial, no exact
+//! rule), B-spline degrees beyond the quadrature table's reach
+//! (faces above degree 5, trims above degree 6), untrimmed planes
+//! and cylinders (unbounded regions), and any wire the module cannot
+//! read as one of the trims above. Never an approximation.
 
 use fc_base::Vector3;
 
@@ -64,6 +81,139 @@ const REL_TOL: f64 = 1e-9;
 
 fn v3(x: f64, y: f64, z: f64) -> Vector3 {
     Vector3::new(x, y, z)
+}
+
+// ---------------------------------------------------------------------------
+// Gauss–Legendre quadrature — exact on polynomial integrands
+// ---------------------------------------------------------------------------
+
+/// Gauss–Legendre abscissae and weights on `[−1, 1]`, one row per
+/// rule size this module reaches. An `n`-node rule integrates
+/// polynomials up to degree `2n − 1` **exactly** — that identity is
+/// the whole method, and the inline test at the bottom of this file
+/// pins every row against the monomial closed forms.
+///
+/// Which sizes exist is not arbitrary. The B-spline FACE flux
+/// integrand `p·(∂u×∂v)` has degree `3d − 1` per direction, so the
+/// face path needs `n = ceil(3d/2)` — 2, 3, 5, 6, 8 for the degrees
+/// 1–5 the reader accepts. The plane-trim GREEN integrand
+/// `x·y′ − y·x′` has degree `2d − 1`, needing `n = d` — 1..6. (A
+/// size-7 row serves no degree on either path; it is absent on
+/// purpose, and the lookups refuse what is not in the table — the
+/// honest bound, not a silent fall-back.)
+const GL_RULES: &[(usize, &[f64], &[f64])] = &[
+    (1, &[0.0], &[2.0]),
+    (2, &[-0.5773502691896257, 0.5773502691896257], &[1.0, 1.0]),
+    (
+        3,
+        &[-0.7745966692414834, 0.0, 0.7745966692414834],
+        &[0.5555555555555557, 0.8888888888888888, 0.5555555555555557],
+    ),
+    (
+        4,
+        &[
+            -0.8611363115940526,
+            -0.33998104358485626,
+            0.33998104358485626,
+            0.8611363115940526,
+        ],
+        &[
+            0.3478548451374537,
+            0.6521451548625462,
+            0.6521451548625462,
+            0.3478548451374537,
+        ],
+    ),
+    (
+        5,
+        &[
+            -0.906179845938664,
+            -0.5384693101056831,
+            0.0,
+            0.5384693101056831,
+            0.906179845938664,
+        ],
+        &[
+            0.23692688505618942,
+            0.4786286704993662,
+            0.568888888888889,
+            0.4786286704993662,
+            0.23692688505618942,
+        ],
+    ),
+    (
+        6,
+        &[
+            -0.932469514203152,
+            -0.6612093864662645,
+            -0.23861918608319693,
+            0.23861918608319693,
+            0.6612093864662645,
+            0.932469514203152,
+        ],
+        &[
+            0.17132449237916975,
+            0.36076157304813894,
+            0.46791393457269137,
+            0.46791393457269137,
+            0.36076157304813894,
+            0.17132449237916975,
+        ],
+    ),
+    (
+        8,
+        &[
+            -0.9602898564975362,
+            -0.7966664774136267,
+            -0.525532409916329,
+            -0.18343464249564978,
+            0.18343464249564978,
+            0.525532409916329,
+            0.7966664774136267,
+            0.9602898564975362,
+        ],
+        &[
+            0.10122853629037669,
+            0.22238103445337434,
+            0.31370664587788705,
+            0.36268378337836177,
+            0.36268378337836177,
+            0.31370664587788705,
+            0.22238103445337434,
+            0.10122853629037669,
+        ],
+    ),
+];
+
+/// The rule of `n` nodes, or the honest refusal (nothing outside the
+/// table is ever silently substituted).
+fn gl_rule(n: usize) -> Result<(&'static [f64], &'static [f64]), String> {
+    GL_RULES
+        .iter()
+        .find(|(k, _, _)| *k == n)
+        .map(|(_, xs, ws)| (*xs, *ws))
+        .ok_or_else(|| format!("no Gauss–Legendre rule of {n} nodes in this reader's table"))
+}
+
+/// The face-path node count for a spline degree: the flux integrand
+/// `p·(∂u×∂v)` has degree `3d − 1` per direction, so `n` nodes
+/// (exact to degree `2n − 1`) need `n = ceil(3d/2)`.
+fn face_rule_nodes(degree: usize) -> Result<usize, String> {
+    let n = (3 * degree).div_ceil(2);
+    gl_rule(n).map(|_| n)
+}
+
+/// The distinct knot intervals of a clamped spline domain —
+/// `[t_k, t_{k+1}]` for every `t_k < t_{k+1}` inside
+/// `[knots[degree], knots[n_ctrl]]` — the polynomial pieces.
+fn knot_spans(knots: &[f64], degree: usize, n_ctrl: usize) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    for k in degree..n_ctrl {
+        if knots[k] < knots[k + 1] {
+            spans.push((knots[k], knots[k + 1]));
+        }
+    }
+    spans
 }
 
 /// The scale for tolerance checks.
@@ -114,13 +264,27 @@ pub fn brep_volume(brep: &ExactBRep) -> Result<f64, String> {
 }
 
 /// The exact total boundary area of a closed, validated shell.
+///
+/// B-spline faces refuse here by name: the area integrand
+/// `|∂u×∂v|` lives under a square root — not a polynomial, and this
+/// reader never approximates (the flux channel stays exact).
 pub fn brep_area(brep: &ExactBRep) -> Result<f64, String> {
     brep.validate()
         .map_err(|e| format!("the B-rep does not validate: {e}"))?;
     require_closed_shell(brep)?;
     let mut total = 0.0;
     for (i, face) in brep.faces.iter().enumerate() {
-        total += face_measure(brep, face, i)?.0;
+        let area = face_measure(brep, face, i)?.0;
+        if area.is_nan() {
+            // The one flux-only face kind: the B-spline patch (see
+            // `face_measure`). The refusal is the honest answer.
+            return Err(format!(
+                "face {i}: a B-spline surface — the area integrand |∂u×∂v| is not \
+                 polynomial (a square root of one); no exact rule exists in this model, \
+                 and the area is never approximated"
+            ));
+        }
+        total += area;
     }
     Ok(total)
 }
@@ -128,6 +292,13 @@ pub fn brep_area(brep: &ExactBRep) -> Result<f64, String> {
 /// One face's `(area, flux)` — the flux of `p·n̂` with `n̂` the
 /// OUTWARD unit normal (`F = ∫∫ p·n̂ dA`; the `1/3` is applied once,
 /// by [`brep_volume`]).
+///
+/// The one flux-only face kind is the B-spline patch (K4-2d): the
+/// flux is GL-exact on the polynomial integrand, the AREA is not
+/// computable exactly (square root) — its area slot is `NaN` and
+/// [`brep_area`] turns that into the named refusal (the same
+/// visible-versus-named two-channel discipline the shape API
+/// carries).
 fn face_measure(brep: &ExactBRep, face: &TopoFace, i: usize) -> Result<(f64, f64), String> {
     let ctx = FaceRef {
         brep,
@@ -162,11 +333,10 @@ fn face_measure(brep: &ExactBRep, face: &TopoFace, i: usize) -> Result<(f64, f64
             minor_radius,
             ..
         } => torus_face(ctx, *center, *major_radius, *minor_radius),
-        Surface::Bspline { .. } => Err(format!(
-            "face {}: a B-spline surface — trimmed measure on free-form surfaces has no \
-             closed form in this model (K4 work)",
-            ctx.i
-        )),
+        Surface::Bspline { .. } => {
+            let flux = bspline_face_flux(&ctx)?;
+            Ok((f64::NAN, flux))
+        }
     }
 }
 
@@ -243,6 +413,37 @@ struct PlaneFrame {
     y_dir: Vector3,
 }
 
+/// The closed-form Green term of one native conic arc (a circle or
+/// an ellipse) in a plane wire: `Q·(â·n̂)·Δt` over the stored
+/// parameter direction plus the center's cross with the traversal
+/// displacement — the same term the rational-quadratic arc arm
+/// computes, with `Q = R²` (circle) or `Q = ab` (ellipse). The
+/// center must lie in the plane and the conic's axis be the plane's
+/// normal (either way); anything else is the caller's named
+/// refusal.
+#[allow(clippy::too_many_arguments)] // the frame trio + the conic's own four parameters
+fn conic_green_term(
+    off_c: Vector3,
+    axis: Vector3,
+    q: f64,
+    sweep: f64,
+    forward: bool,
+    x_dir: Vector3,
+    y_dir: Vector3,
+    normal: Vector3,
+    tol: f64,
+    endpoints: ((f64, f64), (f64, f64)),
+) -> Result<f64, ()> {
+    if off_c.dot(&normal).abs() > tol || axis.dot(&normal).abs() < 1.0 - REL_TOL {
+        return Err(());
+    }
+    let (ps, pe) = endpoints;
+    let c2 = (off_c.dot(&x_dir), off_c.dot(&y_dir));
+    let sgn = axis.dot(&normal).signum();
+    let fwd = if forward { 1.0 } else { -1.0 };
+    Ok(fwd * q * sgn * sweep + c2.0 * (pe.1 - ps.1) - c2.1 * (pe.0 - ps.0))
+}
+
 /// One wire's area in the face's `(x_dir, y_dir)` frame: a disk (a
 /// single closed circle lying in the plane) or a polygon (line
 /// edges, shoelace).
@@ -309,11 +510,16 @@ fn wire_area_in_frame(
     // The conic-arc path (the K3d caps): exact line integrals per
     // edge — `∫(x dy − y dx) = R²Δθ + c × Δp` over each arc (closed
     // form), the straight terms `a × b` over each chord/bridge, the
-    // area |Σ|/2 (the shoelace generalized to arcs).
+    // area |Σ|/2 (the shoelace generalized to arcs). The same path
+    // carries the K4-2d GREEN trims: non-rational B-spline boundary
+    // curves read through the exact line integral below, per knot
+    // span, GL-exact on the piecewise-polynomial integrand — so ANY
+    // B-spline edge routes here (a degree-1 two-point spline is the
+    // chord, kept as its own bit-exact arm below).
     let has_arc = wire
         .edges
         .iter()
-        .any(|we| matches!(&brep.edges[we.edge].curve, Curve::Bspline { degree: 2, .. }));
+        .any(|we| matches!(&brep.edges[we.edge].curve, Curve::Bspline { .. }));
     if has_arc {
         let pt2 = |p: Vector3| {
             let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
@@ -343,8 +549,12 @@ fn wire_area_in_frame(
                     ..
                 } if points.len() == 2 => ps.0 * pe.1 - ps.1 * pe.0,
                 Curve::Bspline {
-                    degree: 2, points, ..
+                    degree: 2,
+                    points,
+                    weights: Some(_),
+                    ..
                 } => {
+                    // The rational quadratic conic arc (the K3d caps).
                     // The arc lies in the plane: its control points and
                     // its circle's center are on it.
                     for p in points {
@@ -382,6 +592,108 @@ fn wire_area_in_frame(
                     fwd * arc.radius * arc.radius * sgn * arc.sweep + c2.0 * (pe.1 - ps.1)
                         - c2.1 * (pe.0 - ps.0)
                 }
+                Curve::Circle {
+                    center,
+                    axis,
+                    radius,
+                    ..
+                } => {
+                    // A native circular arc (the OCCT spelling the
+                    // fillet caps carry): the closed-form Green term
+                    // — `R²·(â·n̂)·Δt` over the stored direction plus
+                    // the center's cross with the displacement (the
+                    // same term the rational-quadratic arc computes;
+                    // here the parameter IS the angle).
+                    conic_green_term(
+                        v3(center.x - o.x, center.y - o.y, center.z - o.z),
+                        *axis,
+                        *radius * *radius,
+                        edge.range.1 - edge.range.0,
+                        we.forward,
+                        x_dir,
+                        y_dir,
+                        normal,
+                        tol,
+                        (ps, pe),
+                    )
+                    .map_err(|_| {
+                        format!("face {i} wire {wi}: an arc trim not lying in the plane")
+                    })?
+                }
+                Curve::Ellipse {
+                    center,
+                    axis,
+                    major_radius,
+                    minor_radius,
+                    ..
+                } => {
+                    // A native elliptical arc: the same closed form
+                    // with `Q = ab` — `x dy − y dx` reduces to
+                    // `ab·(â·n̂)·dt` plus the center's cross terms
+                    // (the eccentric-anomaly parameterization).
+                    conic_green_term(
+                        v3(center.x - o.x, center.y - o.y, center.z - o.z),
+                        *axis,
+                        *major_radius * *minor_radius,
+                        edge.range.1 - edge.range.0,
+                        we.forward,
+                        x_dir,
+                        y_dir,
+                        normal,
+                        tol,
+                        (ps, pe),
+                    )
+                    .map_err(|_| {
+                        format!("face {i} wire {wi}: an ellipse trim not lying in the plane")
+                    })?
+                }
+                Curve::Bspline {
+                    degree,
+                    knots,
+                    points,
+                    weights: None,
+                    ..
+                } => {
+                    // K4-2d — the GREEN trim: a non-rational B-spline
+                    // boundary curve, read through the exact line
+                    // integral ∫ (x dy − y dx) = ∫ (x·y′ − y·x′) dt,
+                    // a piecewise polynomial of degree 2d−1 per knot
+                    // span — GL-exact, the same discipline as the
+                    // B-spline face flux. (A degree-1 spline of two
+                    // points is the chord arm above, bit-exact.)
+                    for p in points {
+                        let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+                        if off.dot(&normal).abs() > tol {
+                            return Err(format!(
+                                "face {i} wire {wi}: a B-spline trim not lying in the \
+                                 plane (its poles are off it — the conservative check)"
+                            ));
+                        }
+                    }
+                    let n = (*degree).max(1);
+                    let (xs, ws) = gl_rule(n)?;
+                    let fwd = if we.forward { 1.0 } else { -1.0 };
+                    let mut integral = 0.0;
+                    for (t0, t1) in knot_spans(knots, *degree, points.len()) {
+                        let lo = t0.max(edge.range.0);
+                        let hi = t1.min(edge.range.1);
+                        if lo >= hi {
+                            continue;
+                        }
+                        for (&xi, &wi) in xs.iter().zip(ws) {
+                            let t = lo + (hi - lo) * (xi + 1.0) / 2.0;
+                            let p = edge.curve.point(t);
+                            let d = edge.curve.derivative(t);
+                            let off = v3(p.x - o.x, p.y - o.y, p.z - o.z);
+                            let x = off.dot(&x_dir);
+                            let y = off.dot(&y_dir);
+                            let xp = d.dot(&x_dir);
+                            let yp = d.dot(&y_dir);
+                            integral += wi * (hi - lo) / 2.0 * (x * yp - y * xp);
+                        }
+                    }
+                    fwd * integral
+                }
                 _ => {
                     return Err(format!(
                         "face {i} wire {wi}: an edge the arc reader does not know ({})",
@@ -416,6 +728,131 @@ fn wire_area_in_frame(
         twice += uk * v2 - u2 * vk;
     }
     Ok(twice.abs() / 2.0)
+}
+
+// ---------------------------------------------------------------------------
+// B-spline faces (K4-2d) — the natural-domain flux, Gauss–Legendre
+// exact on the polynomial integrand
+// ---------------------------------------------------------------------------
+
+/// The flux of a non-rational B-spline face over its **natural
+/// domain** — recognized structurally: one wire, four edge uses, each
+/// edge bit-exactly one of the patch's four boundary pole rows (the
+/// representation OCCT payloads carry: the boundary curves of a
+/// clamped patch ARE its boundary rows), each over its full knot
+/// domain. The integrand `p·(∂u×∂v)` is then a piecewise polynomial
+/// of degree `3d−1` per direction, and Gauss–Legendre with
+/// `ceil(3d/2)` nodes per span integrates it with **zero quadrature
+/// error** — the residual is evaluation rounding at machine scale.
+///
+/// Everything else refuses by name: rational weights (the integrand
+/// is a ratio of polynomials), any other wire (a trimmed patch), and
+/// degrees beyond the table's reach (faces above degree 5).
+fn bspline_face_flux(ctx: &FaceRef<'_>) -> Result<f64, String> {
+    let FaceRef {
+        brep,
+        face,
+        i,
+        sigma,
+        ..
+    } = *ctx;
+    let Surface::Bspline {
+        u_degree,
+        v_degree,
+        u_knots,
+        v_knots,
+        points,
+        weights,
+    } = &face.surface
+    else {
+        unreachable!("the caller matched the surface kind")
+    };
+    if let Some(w) = weights {
+        let _ = w;
+        return Err(format!(
+            "face {i}: a rational B-spline surface (weights are present) — the flux \
+             integrand p·(∂u×∂v) is a ratio of polynomials, and Gauss–Legendre is exact \
+             only on polynomial integrands"
+        ));
+    }
+    let nu = points.len();
+    let nv = points[0].len();
+    // The four boundary pole rows, as curves.
+    let rows: [(usize, &[f64], Vec<Vector3>); 4] = [
+        (*u_degree, u_knots, (0..nu).map(|a| points[a][0]).collect()),
+        (
+            *u_degree,
+            u_knots,
+            (0..nu).map(|a| points[a][nv - 1]).collect(),
+        ),
+        (*v_degree, v_knots, points[0].clone()),
+        (*v_degree, v_knots, points[nu - 1].clone()),
+    ];
+    // The natural-domain recognition: ONE wire of FOUR edge uses,
+    // each matching one distinct row over its full domain.
+    let refuse = |why: &str| {
+        Err(format!(
+            "face {i}: a B-spline face whose wire is not its natural boundary ({why}) — \
+             only the full-domain patch reads exactly; trimmed B-spline regions are not a \
+             trim this reader knows"
+        ))
+    };
+    if face.wires.len() != 1 || face.wires[0].edges.len() != 4 {
+        return refuse("the wire is not four boundary edges");
+    }
+    let mut matched = [false; 4];
+    for we in &face.wires[0].edges {
+        let edge = &brep.edges[we.edge];
+        let Curve::Bspline {
+            degree,
+            knots,
+            points: pts,
+            weights: None,
+        } = &edge.curve
+        else {
+            return refuse("an edge that is not a non-rational boundary-row spline");
+        };
+        let lo = knots[*degree];
+        let hi = knots[pts.len()];
+        if edge.range.0 != lo || edge.range.1 != hi {
+            return refuse("an edge whose range is not its full knot domain");
+        }
+        match rows
+            .iter()
+            .position(|r| r.0 == *degree && r.1 == knots.as_slice() && r.2 == *pts)
+        {
+            Some(h) if !matched[h] => matched[h] = true,
+            Some(_) | None => {
+                return refuse("an edge that is not one of the patch's boundary pole rows")
+            }
+        }
+    }
+    if !matched.iter().all(|&m| m) {
+        return refuse("the four boundary rows are not all present");
+    }
+    // The node counts from the degrees — or the honest table bound.
+    let n_u = face_rule_nodes(*u_degree)?;
+    let n_v = face_rule_nodes(*v_degree)?;
+    let (xu, wu) = gl_rule(n_u)?;
+    let (xv, wv) = gl_rule(n_v)?;
+    // Per-span double Gauss–Legendre over the polynomial pieces.
+    let mut flux = 0.0;
+    for (a0, a1) in knot_spans(u_knots, *u_degree, nu) {
+        for (b0, b1) in knot_spans(v_knots, *v_degree, nv) {
+            let ju = (a1 - a0) / 2.0;
+            let jv = (b1 - b0) / 2.0;
+            for (&uki, &uwi) in xu.iter().zip(wu) {
+                let u = a0 + ju * (uki + 1.0);
+                for (&vki, &vwi) in xv.iter().zip(wv) {
+                    let v = b0 + jv * (vki + 1.0);
+                    let p = face.surface.point(u, v);
+                    let (du, dv) = face.surface.derivatives(u, v);
+                    flux += ju * jv * uwi * vwi * p.dot(&du.cross(&dv));
+                }
+            }
+        }
+    }
+    Ok(sigma * flux)
 }
 
 // ---------------------------------------------------------------------------
@@ -1882,4 +2319,36 @@ fn torus_band(
             + r * r * dsin
             + c_axis * (big_r * (v0.cos() - v1.cos()) + r * dsin_sq / 2.0));
     Ok((area, flux))
+}
+
+// ---------------------------------------------------------------------------
+// inline tests — the quadrature table itself
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod quadrature_tests {
+    use super::GL_RULES;
+
+    /// Every table row integrates every monomial `x^k` up to its
+    /// exactness degree `2n−1` against the closed form (`2/(k+1)` for
+    /// even `k`, `0` for odd — the odd powers are antisymmetric on
+    /// `[−1, 1]`) to machine scale — the identity the module's
+    /// exactness claims stand on, pinned row by row.
+    #[test]
+    fn gauss_legendre_rows_are_exact_on_monomials() {
+        for &(n, xs, ws) in GL_RULES {
+            for k in 0..(2 * n) {
+                let got: f64 = xs.iter().zip(ws).map(|(&x, &w)| w * x.powi(k as i32)).sum();
+                let exact = if k % 2 == 0 {
+                    2.0 / (k as f64 + 1.0)
+                } else {
+                    0.0
+                };
+                assert!(
+                    (got - exact).abs() <= 1e-14 * exact.abs().max(1.0),
+                    "the rule of {n} nodes misses x^{k}: {got:.17} vs {exact:.17}"
+                );
+            }
+        }
+    }
 }

@@ -774,10 +774,62 @@ behind us.
       cycles unchanged. Two studio defects fixed with it (stats on an
       empty document reported as zero, the OBJ text download). Suite:
       662, none ignored.
-- [ ] **K4-2d** NURBS measure (Gauss–Legendre on polynomial
-      integrands), the mixed-strip fillet corner, and general
-      booleans with subsurface classification and trimming on the
-      loaded operands
+- [x] **K4-2d/1 (landing 2026-10-30)** the NURBS measure —
+      Gauss–Legendre on polynomial integrands, exact, never an
+      approximation. A non-rational B-spline face over its
+      **natural domain** (one wire whose four edges are the patch's
+      own boundary pole rows, bit-exactly — the representation OCCT
+      payloads carry; each edge over its full knot domain) reads
+      through the quadrature: the flux integrand
+      `p·(∂u×∂v)` is piecewise polynomial of degree `3d−1` per
+      direction per knot span, and an `n`-node rule integrates
+      degree `2n−1` with **zero quadrature error** — the residual is
+      evaluation rounding at machine scale, the same scale the
+      closed forms carry. The node count is arithmetic, not tuning:
+      `n = ceil(3d/2)` per direction (2, 3, 5, 6, 8 for degrees
+      1–5). The trims those faces force on their plane neighbors —
+      B-spline boundary curves, the only way a closed shell can
+      carry a B-spline face — read through the exact **Green line
+      integral** `∮ (x dy − y dx)`, itself piecewise polynomial
+      (degree `2d−1`) per span, GL-exact with `n = d` nodes. The
+      table rows {1,2,3,4,5,6,8} each exist because a degree path
+      reaches them (a size-7 row serves no degree on either path —
+      absent on purpose; lookups refuse what is not in the table),
+      and the inline `quadrature_tests` pin every row against the
+      monomial closed forms. With the Green path open, the plane
+      reader also gained the **native conic arcs** (`Circle`/`Ellipse`
+      edges with partial ranges — the fillet caps' rims): the
+      closed-form Green term `Q·(â·n̂)·Δt` + the center's cross with
+      the displacement, `Q = R²` or `ab` — previously such wires
+      fell to the polygon path, which silently chord-read the arcs
+      (never exercised by a measuring test, but dishonest by
+      construction; the `has_arc` routing now takes any B-spline
+      edge, closing that class). Acceptance: `tests/bspline_measure.rs`
+      (10) — hand-built graph "tents" over rectangle footprints with
+      hand-derived closed forms (the spline-moment integrals of the
+      chosen pole rows): degree (2,2) single-span and two-u-span,
+      (3,3) the 5-node rule, (4,4) the 6-node, (5,5) the 8-node,
+      the mixed (1,2) ruled tent whose side wall is a plane face
+      genuinely trimmed by a curved B-spline column, the bit-exact
+      σ reversal, and the three refusals (rational, non-natural
+      wire, area); the FCBREP v2 round-trip measures bit-identically.
+      Honest limits, named in the module doc and the refusals
+      themselves: **rational** B-spline faces refuse (the flux is a
+      ratio of polynomials — GL is exact only on polynomial
+      integrands), trimmed patches refuse (only the full domain
+      reads), the **area** of a B-spline face refuses
+      (`|∂u×∂v|` lives under a square root — the flux-only face kind
+      returns `NaN` in the area channel, the named refusal in
+      `brep_area`), faces above degree 5 and trims above degree 6
+      refuse (the table's reach). The straight-edge fillet's corner
+      strip is now its ONLY refusal (the caps read exactly) — the
+      K4-2d/2 slice. Suite: 673, none ignored.
+- [ ] **K4-2d/2** the mixed-strip fillet corner — the
+      straight-edge fillet's corner-strip cylinder face, whose wire
+      mixes arc rims and elliptical-arc rims (the caps around it now
+      read exactly; `fillet_box` refuses here and names it)
+- [ ] **K4-2d/3** general booleans with subsurface classification
+      and trimming on the loaded operands
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

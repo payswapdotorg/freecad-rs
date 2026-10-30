@@ -9,18 +9,27 @@ because an external assessment (2026-10-24) demanded exactly that
 distinction; it is maintained by the same discipline as the honest
 list: a claim with no evidence gets marked, not made.
 
-- **As of:** 2026-10-29, `main` = the K4-2c landing (the wavy-band
-  closures; after K4-2b's curved-face tessellation, K4-1's OCCT BRep
-  reader and K4-2a's planar tessellator, and the K3 series before
-  those) **plus the worker pair the same day**: the OCCT payloads
-  live (a `.FCStd`'s real OCCT BRep geometry loads as
+- **As of:** 2026-10-30, `main` = the K4-2d/1 landing (the NURBS
+  measure — Gauss–Legendre on polynomial integrands: a closed shell
+  carrying non-rational B-spline faces measures its volume exactly,
+  the natural-domain patch through per-span quadrature with zero
+  quadrature error, its plane neighbors' B-spline trims through the
+  exact Green line integral, the native conic arcs through the
+  closed-form conic Green term; the area of a B-spline face refuses
+  by name — a square root is not a polynomial, and nothing is ever
+  approximated). Before it: 2026-10-29, the K4-2c landing (the
+  wavy-band closures; after K4-2b's curved-face tessellation, K4-1's
+  OCCT BRep reader and K4-2a's planar tessellator, and the K3
+  series before those) **plus the worker pair the same day**: the
+  OCCT payloads live (a `.FCStd`'s real OCCT BRep geometry loads as
   `TopoShape::Brep` — measured and tessellated exactly where the
-  exact tiers support it, refusing by name where they do not — while
-  the file's own bytes ride back out verbatim on re-save), and the
-  studio's golden path (the browser workbench driving the real wasm
-  engine, verified end-to-end in a real browser — which pulled the
-  same-object expression binding defect out of `fc-app`'s recompute
-  and fixed it). The K4-2c milestone: `crates/fc-part/src/tessellate.rs`'s
+  exact tiers support it, refusing by name where they do not —
+  while the file's own bytes ride back out verbatim on re-save),
+  and the studio's golden path (the browser workbench driving the
+  real wasm engine, verified end-to-end in a real browser — which
+  pulled the same-object expression binding defect out of
+  `fc-app`'s recompute and fixed it). The K4-2c
+  milestone: `crates/fc-part/src/tessellate.rs`'s
   band stack gained the pinch-out closure triangle (a run whose
   window shuts before the frontier does), the lone seam point's
   seam-column carrier, and the per-level seam registry (runs of one
@@ -71,11 +80,10 @@ list: a claim with no evidence gets marked, not made.
 | ◐ | verified against the real FreeCAD 1.0 binary (AppImage r39109) per [`EQUIVALENCE.md`](EQUIVALENCE.md) — manual/local today, the target of the `parity` gate |
 | ✗ | documented, no committed test |
 
-## Test counts (measured 2026-10-29)
+## Test counts (measured 2026-10-30)
 
-**649 tests** across ten crates (649 passed, 0 `#[ignore]`d — the
-K4-2b defect record for the oblique cut's wavy-band seam corners ran
-green the moment K4-2c's closures landed), all built and run locally on this
+**673 tests** across ten crates (673 passed, 0 `#[ignore]`d), all
+built and run locally on this
 station (`fc-wasm`'s suite — 13 tests — now builds natively as well
 as on `wasm32-unknown-unknown` in CI; method: a full
 `cargo test --workspace --locked` run, per-binary `test result` lines
@@ -88,13 +96,13 @@ now 9 tests) on top of that: 583; the K3c-2 measure pair
 pair on top of that (9 more in `tests/brep_boolean.rs`, 2 more in
 `tests/measure.rs`, 1 in the new `tests/measure_differential.rs`): 605; the K3d
 cylinder×cylinder pair on top of that (8 more in
-`tests/brep_boolean.rs`) the blind drill (2 more), and the coincident-staggered pieces (1 more), and the K3e cylinder×sphere family (9 more, the capsule cuts), and the K3f nested staggered pieces (2 more, the partial bore and the chimney): 627; K4-1's reader suite (15 in `tests/occt_brp.rs`) and K4-2a's bit-exact box: 642; K4-2b's curved suite (8 more, one `#[ignore]`d): 649; K4-2c un-`#[ignore]`d it and added the quartering-convergence assertion: 649, none ignored; the worker pair the same day: worker-b's payload wiring (+4 `tests/shape_brep.rs`, +7 `tests/occt_shape.rs`) and worker-c's engine fix and stats zero-report (+1 `fc-app`, +1 `fc-wasm`): **662, none ignored**.
+`tests/brep_boolean.rs`) the blind drill (2 more), and the coincident-staggered pieces (1 more), and the K3e cylinder×sphere family (9 more, the capsule cuts), and the K3f nested staggered pieces (2 more, the partial bore and the chimney): 627; K4-1's reader suite (15 in `tests/occt_brp.rs`) and K4-2a's bit-exact box: 642; K4-2b's curved suite (8 more, one `#[ignore]`d): 649; K4-2c un-`#[ignore]`d it and added the quartering-convergence assertion: 649, none ignored; the worker pair the same day: worker-b's payload wiring (+4 `tests/shape_brep.rs`, +7 `tests/occt_shape.rs`) and worker-c's engine fix and stats zero-report (+1 `fc-app`, +1 `fc-wasm`): 662, none ignored; K4-2d/1 the next day: the NURBS-measure suite (+10 `tests/bspline_measure.rs`) and the inline GL-table row test (+1 `measure.rs` unit): **673, none ignored**.
 
 | Crate | Unit | Integration | Doc-tests | Total | Method |
 |---|---:|---:|---:|---:|---|
 | `fc-base` | 0 | 58 (`tests/base.rs` 19, `tests/quantity.rs` 39) | 2 | **60** | run |
 | `fc-app` | 60 (`expression.rs` 54, `recompute.rs` 6) | 38 (`tests/app.rs` 17, `tests/transaction.rs` 21) | 3 | **101** | run |
-| `fc-part` | 108 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8, `intersect.rs` 6) | 146 (`tests/part.rs` 15, `tests/topology.rs` 17, `tests/intersect.rs` 39, `tests/intersect_differential.rs` 2, `tests/brep_boolean.rs` 40, `tests/measure.rs` 10, `tests/measure_differential.rs` 1, `tests/occt_brp.rs` 22 — the K4-1 reader suite plus K4-2a's bit-exact box, K4-2b's curved suite: cylinder/located/cone/sphere/torus/top-fillet/oblique-cut watertight within deflection, the oblique cut's wavy-band closures the K4-2c landing, worker-b's `tests/shape_brep.rs` 4) | 0 | **258** | run |
+| `fc-part` | 109 (`boolean.rs` 39, `profile.rs` 32, `partdesign.rs` 23, `exact.rs` 8, `intersect.rs` 6, `measure.rs` 1 — the GL-table monomial pin) | 160 (`tests/part.rs` 15, `tests/topology.rs` 17, `tests/intersect.rs` 39, `tests/intersect_differential.rs` 2, `tests/brep_boolean.rs` 40, `tests/measure.rs` 10, `tests/measure_differential.rs` 1, `tests/occt_brp.rs` 22 — the K4-1 reader suite plus K4-2a's bit-exact box, K4-2b's curved suite: cylinder/located/cone/sphere/torus/top-fillet/oblique-cut watertight within deflection, the oblique cut's wavy-band closures the K4-2c landing; worker-b's `tests/shape_brep.rs` 4; K4-2d's `tests/bspline_measure.rs` 10 — the NURBS-measure tents at degrees (2,2)/(3,3)/(4,4)/(5,5), the two-span and ruled-mixed variants, the σ reversal, the three refusals) | 0 | **269** | run |
 | `fc-sketcher` | 74 (`solver.rs` 40, `xml.rs` 11, `constraint.rs` 8, `sketch_object.rs` 9, `geometry.rs` 6) | 0 | 1 | **75** | run |
 | `fc-io` | 20 (`fcstd.rs` 9, `mesh_export.rs` 11) | 53 (`io.rs` 12, `fixtures_corpus.rs` 11, `expressions_booleans.rs` 10, `linksub_mirroring.rs` 3, `lossless_roundtrip.rs` 3, `partdesign.rs` 2, `property_status.rs` 2, `parity_gate.rs` 3, worker-b's `occt_shape.rs` 7) | 0 | **73** | run |
 | `fc-step` | 0 | 6 (`tests/step.rs`) | 0 | **6** | run |
@@ -102,7 +110,7 @@ cylinder×cylinder pair on top of that (8 more in
 | `fc-script` | 0 | 18 (`tests/api.rs`) | 0 | **18** | run |
 | `freecad-rs` (CLI) | 11 (`src/calc.rs`) | 21 (`tests/partdesign_cli.rs` 6, `tests/script_cli.rs` 5, `tests/sketch_cli.rs` 5, `tests/mirroring_cli.rs` 3, `tests/mechanical_cli.rs` 2) | 0 | **32** | run |
 | `fc-wasm` | 13 (`src/lib.rs` command-protocol suite: add/set/expressions/undo-redo/save-load round-trip/exports, the sketch→pad workflow with the π-hole volume check, error paths — the two pattern verbs added in v0.2.2 included, worker-c's empty-document stats zero-report) | 0 | 0 | **14** | run |
-| **Total** | | | | **662** | |
+| **Total** | | | | **673** | |
 
 Notes, honestly: `#[ignore]`d tests — none at this writing. The one
 that existed (K4-2b's defect record:
@@ -153,6 +161,7 @@ without it they self-skip with a message and pass trivially.
 | 27 | Exact measure on composed B-reps + sphere×halfspace cuts + the face-orientation model (K3c-2) — `brep_volume`/`brep_area` by the divergence theorem in closed form per face kind; `sphere_plane_boolean` (cap + disk on the K3a circle); `TopoFace::reversed` (the OCCT REVERSED-face flag) with FCBREP v3 | ✔ `fc-part` `tests/measure.rs` (8, acceptance-first): `primitive_breps_measure_what_the_shape_module_reports`, `primitive_volumes_match_the_classical_closed_forms`, `sphere_sphere_outcomes_measure_their_cap_compositions` (the crescent≠peanut identity that forced the orientation fix), `sphere_plane_common_and_cut_partition_the_sphere`, `sphere_plane_hemispheres_when_the_plane_cuts_the_center`, `sphere_plane_classifications_are_exact`, `measure_refuses_what_it_cannot_close_by_name`, `fcbrep_v3_round_trips_the_orientation_flag` | CI build job | ◐ the measure is the comparison side for the planned boolean-results corpus (FreeCAD's `cut`/`common`/`fuse` volumes vs ours — K3 remaining); today the evidence is the double-computation agreement with `TopoShape::volume()` and the classical closed forms | — |
 | 28 | Curved-face tessellation of the exact model (K4-2b + K4-2c) — `tessellate_brep` triangulates cylinder, cone, sphere, torus and torus/cylinder bands in their parameter domains: monotone-band chains + curvature-respecting grid rows + the two-pointer band merge + the deflection referee (interior edge chords and panel centers within the deflection); periodic seams close through shared-point columns, pole runs collapse onto the one 3D pole with the fan emerging from the merges; the wavy-band closures (K4-2c): the pinch-out closure triangle, the lone seam point's seam-column carrier, and the per-level seam registry (runs of one row share one pair of seam points) | ✔ `fc-part` `tests/occt_brp.rs` (8, acceptance-first): `cylinder_tessellates_watertight_within_deflection`, `located_cylinder_tessellates_watertight_within_deflection`, `cone_tessellates_watertight_within_deflection`, `sphere_tessellates_watertight_within_deflection`, `torus_tessellates_watertight_within_deflection`, `top_fillet_tessellates_watertight_within_deflection` (each: closed 2-manifold — every directed edge once each way; chord midpoints within deflection, sphere/cylinder via nearest-point closed forms; inscribed volume/area inside the measured polygonal tolerances — cylinder r=2 d=0.05 deficit 2.712e-2 against 3.0e-2 — quartering with the deflection), `oblique_cut_tessellates_watertight_within_deflection` (the wavy band — the elliptical rim's window pinching to single cells, both seam sides — watertight and deflection-true at d=0.05 AND d=0.0125, deficit quartering; formerly the `#[ignore]`d K4-2b defect record, running since K4-2c), `bspline_face_tessellation_refuses_by_name`; the box stays bit-exact (`box_tessellates_exactly_watertight`) | CI build job | ◐ the fixtures are OCCT-authored (`BRepTools.Write_s`, `ocp` 0.1.9 / OCCT 7.8.x — the family FreeCAD 1.0 ships) and the exact side (`brep_volume`/`brep_area`) is the K3/K4-1 measure already differentially verified | — |
 | 29 | The OCCT payloads live (K4-1-integration, worker-b) — a `.FCStd`'s `BrpFormat::OcctBrep` payload loads as `TopoShape::Brep`: measured/tessellated exactly where the exact tiers support the geometry, refusing by name where they do not (the two-channel contract: `volume`/`tessellate` exact-or-visible — NaN, the empty mesh — `try_*` carrying the refusing face's name); the payload rides back out verbatim on re-save (the file's own bytes stay the only truthful serialization — this kernel writes no OCCT dialect), the object keeps the file's `Valid` verdict; a rejected payload keeps the honest skip with the reader's reason; a Brep without a preserved payload refuses the save loudly | ✔ `fc-part` `tests/shape_brep.rs` (4): `cylinder_brep_shape_measures_and_tessellates_exactly` (OCCT's own numbers, the watertight deflection-true mesh, the outer-bound bbox), `bspline_brep_refuses_by_name_through_every_channel`, `brep_shape_is_its_own_exact_topology`, `write_shape_refuses_the_brep_variant_by_name`; `fc-io` `tests/occt_shape.rs` (7): readable payload → exact shape + `Valid` + byte-identical round-trip, corrupted/non-UTF-8 → the honest skip, the provenance-free save refusal, the mesh-result bridge, both refusing-B-rep paths; the corpus: `group_links`' boxes read (payload measure reconciling with the parameters to 1e-9), `partdesign_body`'s payloads reject by name | CI build job | ◐ the K4-1 corpus fixtures are OCCT-authored and the exact measure behind the reconciliation is the K3/K4-1 differentially-verified tier | — |
+| 30 | The NURBS measure (K4-2d/1) — B-spline faces measure (volume) exactly: the natural-domain patch's flux `p·(∂u×∂v)` integrated per knot span by Gauss–Legendre with `ceil(3d/2)` nodes (zero quadrature error on the polynomial integrand — degrees 1–5, the table's reach); plane trims read through the exact Green line integral `∮(x dy − y dx)` (non-rational B-spline edges of any degree ≤ 6, GL with `n = d` nodes) and the closed-form conic Green term (native partial-range `Circle`/`Ellipse` arcs — the fillet caps); the area of a B-spline face refuses by name (a square root is not polynomial), rational faces refuse (a ratio of polynomials), trimmed patches refuse, the σ reversal is bit-exact | ✔ `fc-part` `tests/bspline_measure.rs` (10): `tent_quadratic_single_span_measures_exactly` (the closed form to 1e-12 AND the FCBREP round-trip measuring bit-identically), `tent_quadratic_two_u_spans_measures_exactly`, `tent_cubic_measures_exactly` (the 5-node rule), `tent_quartic_measures_exactly` (the 6-node), `tent_quintic_measures_exactly` (the 8-node), `ruled_tent_mixed_degrees_and_curved_plane_trim_measure_exactly` (a plane wall genuinely trimmed by a curved B-spline column), `reversed_dome_negates_the_volume_bit_exactly`, `rational_bspline_face_refuses_by_name`, `non_natural_wire_refuses_by_name`, `bspline_face_area_refuses_by_name`; unit `measure.rs`: `gauss_legendre_rows_are_exact_on_monomials` (every table row against the monomial closed forms to its exactness degree) | CI build job | ◐ the hand-derived closed forms are the spline-moment integrals of the pinned pole rows (the same mathematics OCCT's `BRepGProp` applies); no OCCT-authored closed B-spline shell exists in the corpus yet — the lone patch fixture is not a closed shell, and its refusal is unchanged | — |
 
 ## What is only manual today
 
