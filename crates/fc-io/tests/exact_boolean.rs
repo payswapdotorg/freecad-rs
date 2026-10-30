@@ -10,8 +10,11 @@
 //! operand's OCCT bytes riding out verbatim the whole way.
 //!
 //! The refusals are as load-bearing as the successes (ADR 0004 rule
-//! 3): a multi-surface B-rep operand, a B-spline B-rep operand, an
-//! unpaired box × cylinder combination, a faceted operand beside an
+//! 3): a multi-surface B-rep operand, a B-spline B-rep operand, a
+//! box × cylinder configuration past the family's honest boundary
+//! (the pairing table itself is CLOSED over the three analytic
+//! classes since slice 4 — the crossing disk, not the pairing, is
+//! what refuses now), a faceted operand beside an
 //! exact one, and the sphere-Base cuts (cylinder or box Tool) each
 //! refuse with the operands and classes named — never a silent
 //! tessellation of the imported geometry.
@@ -22,6 +25,15 @@
 //! through the real features — the same decisive chain, the
 //! hand-derived closed forms (== real OCCT's own `BRepAlgoAPI`
 //! numbers, `expected_box_sphere.json`) as the reference.
+//!
+//! K4-2d/3 slice 4 adds the box × cylinder family: the imported box
+//! meets a placed cylinder primitive at the interior-cross-section
+//! stations — the decisive through-hole round trip, the axle and
+//! boss fuses, the blind and antiparallel-axis bites (the
+//! 180°-placement's exact matrix), and the family's own named
+//! refusals (the rotated placement, the void, the flush landing, the
+//! cylinder-Base swap), the closed forms (== real OCCT's own numbers,
+//! `expected_box_cylinder.json`) as the reference.
 //!
 //! The fixtures are the K4-1 corpus (`fc-part/tests/fixtures/brp/`,
 //! authored by real Open CASCADE via `BRepTools::Write`): the sphere
@@ -455,9 +467,12 @@ fn unsupported_exact_combinations_refuse_by_name() {
     );
     std::fs::remove_file(&path).ok();
 
-    // An unpaired combination: the imported box-class B-rep (which
-    // now pairs with a sphere — K4-2d/3) against a cylinder
-    // primitive — outside the pairing table, by name.
+    // The box×cylinder pairing now EXISTS (K4-2d/3 slice 4) — but the
+    // imported box against a cylinder whose section disk CROSSES the
+    // cross-section (center on the face plane y=0, radius 1) is the
+    // trim-domain boundary, refused by name: the pairing table's
+    // three analytic classes are closed, and the family's own honest
+    // boundary is what refuses now.
     let path = temp_path("box-cylinder-refuses");
     let boxbrp = brp_fixture("box");
     craft_fcstd(
@@ -471,12 +486,12 @@ fn unsupported_exact_combinations_refuse_by_name() {
         RecomputeError::ExecuteFailed { object, reason } => {
             assert_eq!(object, "Op");
             assert!(
-                reason.contains("outside the pairing table"),
+                reason.contains("crosses the box's cross-section"),
                 "the refusal names the boundary: {reason}"
             );
             assert!(
-                reason.contains("box×sphere"),
-                "the refusal says what DOES pair: {reason}"
+                reason.contains("trim-domain"),
+                "the refusal names the family's named next slice: {reason}"
             );
         }
         other => panic!("expected ExecuteFailed, got {other:?}"),
@@ -1500,6 +1515,416 @@ fn box_box_refusals_name_their_reasons_through_the_features() {
             assert!(
                 reason.contains("internal void"),
                 "the void refusal names the shell: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+}
+
+/// The cylinder-Base × box-Tool cut: no kernel path in that order —
+/// the refusal says the swap, never a silent one (the box×cylinder
+/// mirror of the sphere-Base case).
+#[test]
+fn cylinder_base_box_tool_cut_refuses_with_the_swap() {
+    let path = temp_path("cylinder-box-swap");
+    let cylinder = brp_fixture("cylinder");
+    let xml = "\
+<Document SchemaVersion=\"4\" ProgramVersion=\"test\" FileVersion=\"1\">
+ <Objects Count=\"3\" Dependencies=\"1\">
+  <Object type=\"Part::Feature\" name=\"Import\" id=\"1\"/>
+  <Object type=\"Part::Box\" name=\"Block\" id=\"2\"/>
+  <Object type=\"Part::Cut\" name=\"Op\" id=\"3\"/>
+ </Objects>
+ <ObjectData Count=\"3\">
+  <Object name=\"Import\">
+   <Properties Count=\"1\">
+    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">
+     <Part file=\"ImportShape.brp\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Block\">
+   <Properties Count=\"4\">
+    <Property name=\"Length\" type=\"App::PropertyFloat\">
+     <Float value=\"30\"/>
+    </Property>
+    <Property name=\"Width\" type=\"App::PropertyFloat\">
+     <Float value=\"20\"/>
+    </Property>
+    <Property name=\"Height\" type=\"App::PropertyFloat\">
+     <Float value=\"5\"/>
+    </Property>
+    <Property name=\"Placement\" type=\"App::PropertyPlacement\">
+     <PropertyPlacement Px=\"0\" Py=\"0\" Pz=\"0\" Q0=\"0\" Q1=\"0\" Q2=\"0\" Q3=\"1\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Op\">
+   <Properties Count=\"2\">
+    <Property name=\"Base\" type=\"App::PropertyLink\">
+     <Link value=\"Import\"/>
+    </Property>
+    <Property name=\"Tool\" type=\"App::PropertyLink\">
+     <Link value=\"Block\"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>
+";
+    craft_fcstd(&path, xml, &[("ImportShape.brp", &cylinder)]);
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc
+        .recompute_all()
+        .expect_err("the cylinder-Base box-Tool cut refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("swap Base and Tool"),
+                "the refusal names the workaround: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+}
+
+/// An imported-box document with a `Part::Cylinder` primitive tool:
+/// the corpus box (30×20×5) as Base, the placed primitive as Tool —
+/// the K4-2d/3 slice-4 chain's own vocabulary (the placement's
+/// quaternion carried verbatim; the identity and the 180°-about-X
+/// rotations are the bit-exact frames this family demands).
+#[allow(clippy::too_many_arguments)] // the placement's own eight numbers
+fn import_cyl_tool_xml(
+    kind: &str,
+    radius: f64,
+    height: f64,
+    px: f64,
+    py: f64,
+    pz: f64,
+    q0: f64,
+    q1: f64,
+    q2: f64,
+    q3: f64,
+) -> String {
+    format!(
+        "\
+<Document SchemaVersion=\"4\" ProgramVersion=\"test\" FileVersion=\"1\">
+ <Objects Count=\"3\" Dependencies=\"1\">
+  <Object type=\"Part::Feature\" name=\"Import\" id=\"1\"/>
+  <Object type=\"Part::Cylinder\" name=\"Stem\" id=\"2\"/>
+  <Object type=\"{kind}\" name=\"Op\" id=\"3\"/>
+ </Objects>
+ <ObjectData Count=\"3\">
+  <Object name=\"Import\">
+   <Properties Count=\"1\">
+    <Property name=\"Shape\" type=\"Part::PropertyPartShape\">
+     <Part file=\"ImportShape.brp\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Stem\">
+   <Properties Count=\"3\">
+    <Property name=\"Radius\" type=\"App::PropertyFloat\">
+     <Float value=\"{radius}\"/>
+    </Property>
+    <Property name=\"Height\" type=\"App::PropertyFloat\">
+     <Float value=\"{height}\"/>
+    </Property>
+    <Property name=\"Placement\" type=\"App::PropertyPlacement\">
+     <PropertyPlacement Px=\"{px}\" Py=\"{py}\" Pz=\"{pz}\" Q0=\"{q0}\" Q1=\"{q1}\" Q2=\"{q2}\" Q3=\"{q3}\"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name=\"Op\">
+   <Properties Count=\"2\">
+    <Property name=\"Base\" type=\"App::PropertyLink\">
+     <Link value=\"Import\"/>
+    </Property>
+    <Property name=\"Tool\" type=\"App::PropertyLink\">
+     <Link value=\"Stem\"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>
+"
+    )
+}
+
+/// THE decisive box×cylinder chain (K4-2d/3 slice 4): the imported
+/// real OCCT box (30×20×5), an exact `Part::Cut` by a placed
+/// cylinder primitive (r=3, h=10 at (15, 10, −2) — the through
+/// hole), the exact result measuring the closed form
+/// `3000 − 45π` (== real OCCT's own `BRepAlgoAPI` number in
+/// `expected_box_cylinder.json`), the display channel refusing the
+/// annulus faces by name, and the full save → reopen → recompute
+/// cycle re-deriving the bit-identical exact geometry with the
+/// operand's bytes untouched.
+#[test]
+fn cut_of_imported_box_by_cylinder_primitive_runs_exact_through_the_round_trip() {
+    let path = temp_path("boxcyl-cut");
+    let boxbrp = brp_fixture("box");
+    craft_fcstd(
+        &path,
+        &import_cyl_tool_xml("Part::Cut", 3.0, 10.0, 15.0, 10.0, -2.0, 0.0, 0.0, 0.0, 1.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+
+    let (mut doc, report) = load_document(&path).expect("the crafted document loads");
+    assert!(
+        report.warnings.is_empty(),
+        "a readable payload and a clean primitive warn about nothing: {:?}",
+        report.warnings
+    );
+    doc.recompute_all().expect("recompute executes the cut");
+
+    let op = doc.get_by_name("Op").unwrap();
+    let result = shape_of(op).expect("the cut computed");
+    assert_eq!(
+        result.kind_name(),
+        "Brep",
+        "the box×cylinder cut carries the exact model (ADR 0004 rule 3)"
+    );
+    let got = result
+        .try_volume()
+        .expect("the through hole measures exactly");
+    let want = 3000.0 - 45.0 * std::f64::consts::PI;
+    assert!(
+        (got - want).abs() <= 1e-9 * want,
+        "the feature's exact volume {got} is the closed form {want}"
+    );
+    // The differential anchor: the kernel API with the same placed
+    // parameters the dispatch derived.
+    let reference = outcome_volume(
+        fc_part::brep_boolean::box_cylinder_boolean(
+            BooleanOp::Cut,
+            v3(0.0, 0.0, 0.0),
+            v3(1.0, 0.0, 0.0),
+            v3(0.0, 1.0, 0.0),
+            v3(0.0, 0.0, 1.0),
+            30.0,
+            20.0,
+            5.0,
+            v3(15.0, 10.0, -2.0),
+            v3(0.0, 0.0, 1.0),
+            3.0,
+            10.0,
+        )
+        .expect("the through station is supported"),
+    );
+    assert!(
+        (got - reference).abs() <= 1e-9 * reference,
+        "the feature's exact volume {got} is the kernel's own {reference}"
+    );
+    // The display channel refuses by name — the annulus faces (the
+    // two hole-trimmed caps), the two-channel contract.
+    let tess_err = result
+        .try_tessellate(0.05)
+        .expect_err("the annulus class refuses");
+    assert!(
+        tess_err.contains("holes"),
+        "the display refusal names its reason: {tess_err}"
+    );
+
+    // The save: the operand's OCCT bytes ride out verbatim; the
+    // derived exact result is recomputed, not serialized (rule 4).
+    let temp = temp_path("boxcyl-cut-roundtrip");
+    save_document(&doc, &temp).expect("the exact-result document saves");
+    assert_eq!(
+        zip_entries(&temp).get("ImportShape.brp"),
+        Some(&boxbrp),
+        "the operand's OCCT payload rides out byte-identically"
+    );
+
+    // The reopen + recompute: the identical exact result.
+    let (mut reloaded, report2) = load_document(&temp).expect("the saved file loads");
+    assert!(
+        report2.warnings.is_empty(),
+        "the round trip is clean: {:?}",
+        report2.warnings
+    );
+    reloaded
+        .recompute_all()
+        .expect("the reload recompute re-derives");
+    let reloaded_result =
+        shape_of(reloaded.get_by_name("Op").unwrap()).expect("the recompute restored the cut");
+    assert_eq!(
+        reloaded_result.kind_name(),
+        "Brep",
+        "the recomputed result is the exact model again"
+    );
+    let got2 = reloaded_result
+        .try_volume()
+        .expect("still measures exactly");
+    assert_eq!(
+        got2, got,
+        "the re-derived exact volume is bit-identical to the first computation"
+    );
+
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&temp).ok();
+}
+
+/// The fuse and the common of the same imported box and cylinder —
+/// the axle union (`3000 + 45π`) and the clipped cylinder (`45π`),
+/// the closed forms, through the real features.
+#[test]
+fn fuse_and_common_of_imported_box_with_cylinder_run_exact() {
+    for (kind, want) in [
+        ("Part::Fuse", 3000.0 + 45.0 * std::f64::consts::PI),
+        ("Part::Common", 45.0 * std::f64::consts::PI),
+    ] {
+        let path = temp_path("boxcyl-bite");
+        let boxbrp = brp_fixture("box");
+        craft_fcstd(
+            &path,
+            &import_cyl_tool_xml(kind, 3.0, 10.0, 15.0, 10.0, -2.0, 0.0, 0.0, 0.0, 1.0),
+            &[("ImportShape.brp", &boxbrp)],
+        );
+        let (mut doc, _) = load_document(&path).expect("loads");
+        doc.recompute_all().expect("recompute executes");
+        let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+        assert_eq!(result.kind_name(), "Brep", "{kind}: the result is exact");
+        let got = result.try_volume().expect("measures exactly");
+        assert!(
+            (got - want).abs() <= 1e-9 * want,
+            "{kind}: the volume {got} is the closed form {want}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+/// The blind bore and the ANTIPARALLEL axis through the features:
+/// the cylinder entered from below (r=2, h=4 at (15, 10, −1) — the
+/// blind hole `3000 − 12π`), and the same through hole as the
+/// decisive chain but with the cylinder's axis pointing DOWN (the
+/// 180°-about-X placement — the quaternion's matrix exactly
+/// diag(1, −1, −1), the span read in the flipped direction).
+#[test]
+fn blind_and_flipped_bites_of_imported_box_run_exact() {
+    // The blind bore from below: the floor at z=3.
+    let path = temp_path("boxcyl-blind");
+    let boxbrp = brp_fixture("box");
+    craft_fcstd(
+        &path,
+        &import_cyl_tool_xml("Part::Cut", 2.0, 4.0, 15.0, 10.0, -1.0, 0.0, 0.0, 0.0, 1.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    doc.recompute_all().expect("recompute executes");
+    let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+    assert_eq!(result.kind_name(), "Brep", "the blind bore is exact");
+    let got = result.try_volume().expect("measures exactly");
+    let want = 3000.0 - 12.0 * std::f64::consts::PI;
+    assert!(
+        (got - want).abs() <= 1e-9 * want,
+        "the blind-bore volume {got} is the closed form {want}"
+    );
+    std::fs::remove_file(&path).ok();
+
+    // The flipped through hole: the cylinder at (15, 10, 8) with the
+    // axis −Z (h=10) — the span z ∈ [−2, 8], the SAME hole.
+    let path = temp_path("boxcyl-flipped");
+    craft_fcstd(
+        &path,
+        &import_cyl_tool_xml("Part::Cut", 3.0, 10.0, 15.0, 10.0, 8.0, 1.0, 0.0, 0.0, 0.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    doc.recompute_all().expect("recompute executes");
+    let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+    assert_eq!(
+        result.kind_name(),
+        "Brep",
+        "the flipped-axis through hole is exact (the frame contract's own sign flip)"
+    );
+    let got = result.try_volume().expect("measures exactly");
+    let want = 3000.0 - 45.0 * std::f64::consts::PI;
+    assert!(
+        (got - want).abs() <= 1e-9 * want,
+        "the flipped through-hole volume {got} is the closed form {want}"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// The box×cylinder refusals through the features: the rotated
+/// placement (the 90°-about-X quaternion — its matrix entries carry
+/// the trig rounding, so no box axis claims the axis with a
+/// bit-exact ±1 — never a silent snap), the strictly-interior cut
+/// (the internal void), the flush landing (the coplanar-merge
+/// boundary), and the cylinder-Base cut (the operand-order swap).
+#[test]
+fn box_cylinder_refusals_name_their_reasons_through_the_features() {
+    let boxbrp = brp_fixture("box");
+    // The rotated placement: 90° about X — the axis lands on −Y but
+    // the dots are a hair off the exact ±1 claim.
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let path = temp_path("boxcyl-rotated");
+    craft_fcstd(
+        &path,
+        &import_cyl_tool_xml("Part::Cut", 3.0, 10.0, 15.0, 10.0, -2.0, s, 0.0, 0.0, s),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the rotated frame refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("not bit-exactly parallel"),
+                "the rotated refusal names the frame: {reason}"
+            );
+            assert!(
+                reason.contains("never silently snaps"),
+                "the rotated refusal says the discipline: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+
+    // The internal void: the cylinder strictly inside (r=2, h=3 at
+    // (15, 10, 1)).
+    let path = temp_path("boxcyl-void");
+    craft_fcstd(
+        &path,
+        &import_cyl_tool_xml("Part::Cut", 2.0, 3.0, 15.0, 10.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the void refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("void"),
+                "the void refusal names the shell problem: {reason}"
+            );
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    std::fs::remove_file(&path).ok();
+
+    // The flush landing: the cylinder's top cap exactly on the box's
+    // bottom face plane (r=2, h=2 at (15, 10, −2)) — the fuse is the
+    // coplanar-merge family.
+    let path = temp_path("boxcyl-landing");
+    craft_fcstd(
+        &path,
+        &import_cyl_tool_xml("Part::Fuse", 2.0, 2.0, 15.0, 10.0, -2.0, 0.0, 0.0, 0.0, 1.0),
+        &[("ImportShape.brp", &boxbrp)],
+    );
+    let (mut doc, _) = load_document(&path).expect("loads");
+    let err = doc.recompute_all().expect_err("the flush landing refuses");
+    match err {
+        RecomputeError::ExecuteFailed { object, reason } => {
+            assert_eq!(object, "Op");
+            assert!(
+                reason.contains("flush landing"),
+                "the landing refusal names the merge family: {reason}"
             );
         }
         other => panic!("expected ExecuteFailed, got {other:?}"),

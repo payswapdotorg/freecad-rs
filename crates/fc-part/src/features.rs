@@ -16,8 +16,8 @@ use fc_app::{impl_document_object, Document, DocumentObject, Property, PropertyC
 use fc_base::{Matrix4, Placement, Vector3};
 
 use crate::brep_boolean::{
-    box_box_boolean, box_sphere_boolean, cylinder_cylinder_boolean, cylinder_sphere_boolean,
-    sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
+    box_box_boolean, box_cylinder_boolean, box_sphere_boolean, cylinder_cylinder_boolean,
+    cylinder_sphere_boolean, sphere_sphere_boolean, BooleanOp, BooleanOutcome, BooleanOutcomeKind,
 };
 use crate::shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
 use crate::topology::{ExactBRep, Surface};
@@ -950,14 +950,76 @@ fn exact_pair(
             *axes_b,
             *dims_b,
         )),
-        // The rest of the table is empty by name — K4-2d lands the
-        // families per-pair, and this refusal is the honest boundary.
-        _ => Err(
-            "the exact kernel pairs sphere×sphere, cylinder×cylinder, cylinder×sphere, \
-             box×sphere, and box×box — this combination is outside the pairing table (more \
-             K4-2d families land per-pair)"
-                .to_string(),
-        ),
+        // K4-2d/3 slice 4: the box × cylinder family — the
+        // interior-cross-section stations (Cut is `Base − Tool`; the
+        // operands are NOT swapped).
+        (
+            ExactSolid::Box { origin, axes, dims },
+            ExactSolid::Cylinder {
+                origin: oc,
+                axis: ac,
+                radius: rc,
+                height: hc,
+            },
+        ) => boolean_op(box_cylinder_boolean(
+            op.as_boolean_op(),
+            *origin,
+            axes[0],
+            axes[1],
+            axes[2],
+            dims[0],
+            dims[1],
+            dims[2],
+            *oc,
+            *ac,
+            *rc,
+            *hc,
+        )),
+        (ExactSolid::Cylinder { .. }, ExactSolid::Box { .. }) => match op {
+            // Fuse/Common are commutative: the box-first kernel API
+            // answers them with the operands swapped.
+            BooleanKind::Fuse | BooleanKind::Common => {
+                let (
+                    ExactSolid::Box { origin, axes, dims },
+                    ExactSolid::Cylinder {
+                        origin: oc,
+                        axis: ac,
+                        radius: rc,
+                        height: hc,
+                    },
+                ) = (tool, base)
+                else {
+                    unreachable!("the match arm pinned the classes")
+                };
+                boolean_op(box_cylinder_boolean(
+                    op.as_boolean_op(),
+                    *origin,
+                    axes[0],
+                    axes[1],
+                    axes[2],
+                    dims[0],
+                    dims[1],
+                    dims[2],
+                    *oc,
+                    *ac,
+                    *rc,
+                    *hc,
+                ))
+            }
+            // Cylinder − box has no kernel path in that order: say
+            // so, and say the workaround — never a silent swap that
+            // changes the answer.
+            BooleanKind::Cut => Err(
+                "cylinder − box with the cylinder as Base has no exact path — swap Base and \
+                 Tool for the exact cut"
+                    .to_string(),
+            ),
+        },
+        // No `_` arm: the three analytic classes pair exhaustively
+        // (nine combinations, every one landing above or refusing
+        // through its own arm) — the compiler's exhaustiveness check
+        // is the proof, and a fourth class joining `ExactSolid`
+        // must grow this table by amendment, not compile past it.
     }
 }
 

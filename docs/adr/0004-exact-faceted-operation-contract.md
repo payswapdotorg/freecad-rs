@@ -5,7 +5,12 @@
   box×sphere family — the revisit trigger this ADR itself defined,
   exercised for the first time) **and again 2026-10-30 by the
   K4-2d/3 slice 3 landing** (box×box joins the pairing table — the
-  rectilinear composition, the second amendment). Extends
+  rectilinear composition, the second amendment) **and a third time
+  2026-10-30 by the K4-2d/3 slice 4 landing** (box×cylinder joins —
+  the cylindrical bore taxonomy, and the pairing table CLOSES over
+  the three analytic classes: the catch-all refusal arm retires, the
+  compiler's match exhaustiveness the proof that every pairing lands
+  somewhere). Extends
   [`0003-geometry-kernel-strategy.md`](0003-geometry-kernel-strategy.md)
   from the kernel program into the application's operation layer; does
   not revisit the kernel decision.
@@ -102,11 +107,23 @@ For `Part::Cut` / `Part::Fuse` / `Part::Common`, in priority order
     cut reading the overlap only, the flush fuse refusing the
     coplanar merge by name, the split refusing by shell count; the
     hole-free results rendering watertight with the mesh volume
-    exactly the exact volume).
+    exactly the exact volume) — and **box×cylinder** (slice 4: the
+    cylindrical bore taxonomy of the interior-cross-section stations
+    — the through hole and the blind bores, the axle and boss
+    fuses, the clipped-cylinder common; the frame contract demanding
+    the bit-exact ±1 axis dot; the crossing disk the trim-domain
+    refusal, the tangent disk the pinch refusal, the flush landing
+    the coplanar-merge refusal). **The table is closed over the
+    three analytic classes** — there is no unpaired combination of
+    sphere/cylinder/box operands left; a fourth class joining
+    `ExactSolid` grows the table by amendment, not by compiling past
+    it.
   - The other operand is faceted, or either operand is an exact class
     the kernel cannot pair (a multi-surface B-rep, a B-spline face,
-    cone or torus classes, or an unpaired combination such as
-    box×cylinder) → **a named refusal**: the error names
+    cone or torus classes — the three analytic classes pair
+    exhaustively since slice 4, so an unpaired OPERAND is a class
+    outside the table, not a combination inside it) → **a named
+    refusal**: the error names
     the operands, their classes, and the reason, and says how to get
     the faceted workflow explicitly (tessellate first or use mesh
     operands). Never a silent tessellation downgrade of the imported
@@ -188,25 +205,48 @@ This architecture lands in slices; each stays green on its own.
   watertight with the mesh volume exactly the exact volume, while the
   ring faces keep the named refusal. The box×box entry retires from
   the pairing-table refusal message; box×cylinder remains outside by
-  name.
+  name (one more slice).
+- **Slice 4 (landed 2026-10-30, K4-2d/3):** the dispatch table
+  closes — box×cylinder, the cylindrical bore. The frame contract
+  (the axis dot bit-exactly ±1 against exactly one box axis) and the
+  interior-cross-section contract (the disk strictly inside the
+  cross-section rectangle — every annular face a regular region) are
+  part of the pairing, their honest boundaries refusing by name: the
+  crossing disk the trim-domain slice, the tangent disk the pinch,
+  the near-parallel axis the never-snap discipline, the flush
+  landing the coplanar-merge family. The render channel stays honest
+  both ways: the annulus-carrying results refuse by name (the
+  hole-trimmed faces are not tessellated by this reader), the
+  clipped-cylinder commons and whole-shape outcomes mesh watertight.
+  The pairing table now covers every combination of the three
+  analytic classes — the catch-all refusal arm retires, and the
+  compiler's match exhaustiveness is the proof; the
+  outside-the-pairing-table refusal message retires with it (the
+  crossing-disk boundary inherits the honest role for the
+  configuration the old test pinned).
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
-  results; widening the supported-combination table as K4-2d/3 lands
-  more exact-boolean families (box×cylinder is the named next);
+  results; the trim-domain classification (the crossing disk's
+  side-clipped sections), the coplanar-face merge, and the
+  OCCT-authored-result reader widening;
   PartDesign exact dispatch.
 
 ## What we do NOT claim
 
-- **General BRep booleans through features.** Five families
+- **General BRep booleans through features.** Six families
   (sphere×sphere, cylinder×cylinder, cylinder×sphere, box×sphere at
-  the boundary-skeleton and offset stations, and box×box among
-  frame-parallel boxes) are wired; the rest
+  the boundary-skeleton and offset stations, box×box among
+  frame-parallel boxes, and box×cylinder at the
+  interior-cross-section stations) are wired — the pairing table
+  closed over the three analytic classes; the rest
   refuse by name — including the families' own honest boundaries
   (the off-skeleton general overlaps, the interior center crossing
   two or more faces, the oversized bite, the near-but-not-bit-exact
   station, the rotated box×box frame, the box×box coplanar fuse and
-  split cut, box×cylinder). K4-2d/3's later slices widen
-  further.
+  split cut, the box×cylinder crossing and tangent disks, the
+  box×cylinder flush landing and internal void). The trim-domain
+  classification (the crossing disk's side-clipped sections) is the
+  named widening path.
 - **That the mesh fallback for unsupported primitive combinations is
   exactness.** It is faceted, the representation says so, and the
   narrowing path is more exact families, not relabeling.
@@ -223,8 +263,11 @@ This architecture lands in slices; each stays green on its own.
   this ADR, not silently. *(Exercised 2026-10-30: the K4-2d/3
   landings — slice 1 and the offset-station slice 2 the same day —
   amended rules 3 and this section's lists: the box×sphere family
-  above; and slice 3 the same day: the box×box family, the second
-  amendment.)*
+  above; slice 3 the same day: the box×box family, the second
+  amendment; and slice 4 the same day: the box×cylinder family, the
+  third amendment — and the table's closure over the three analytic
+  classes, the catch-all arm retiring with the compiler's
+  exhaustiveness as the witness.)*
 - If a real downstream workflow requires saved derived-exact payloads
   (consumers that cannot recompute), revisit rule 4 with an explicit
   serialization ADR — an FCBREP exact form is the candidate, and it

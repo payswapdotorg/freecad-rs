@@ -1085,6 +1085,85 @@ behind us.
       polygon-domain and cap tessellations (the trim-domain
       classification), the coplanar-face merge, and the
       OCCT-authored-result reader widening.
+- [x] **K4-2d/3 slice 4 (landing 2026-10-30)** the box×cylinder
+      family — the cylindrical bore. A box (imported box-class B-rep
+      or `Box` primitive, placements applied analytically) meets a
+      cylinder whose axis is BIT-EXACTLY parallel to one box axis —
+      **the pairing table's third amendment, and its closure: the
+      three analytic classes (sphere, cylinder, box) pair
+      exhaustively, the compiler's match exhaustiveness the proof —
+      the catch-all refusal arm retired.** **The frame contract**: the
+      axis dot with exactly one box axis is exactly ±1 (an oblique,
+      rotated, or near-parallel axis refuses by name — the section
+      circles would not lie in the face planes, and their extents
+      would be a snap's); the cylinder is then read in the box's own
+      frame — the cross-section disk against the rectangle, the
+      axial span against the slab — the antiparallel axis (the
+      180°-placement's exact matrix) the same solid read in the
+      flipped direction. **The interior-cross-section contract**: the
+      disk strictly inside the rectangle, so every annular face is a
+      rectangle with a strictly-interior circular hole — a regular
+      region; a CROSSING disk (the hole breaking the box's side
+      faces) is the trim-domain slice, refused by name; a TANGENT
+      disk would pinch the annulus at a point that is no vertex of
+      either wire — refused, never silently degenerate (Common
+      alone unaffected: the clipped cylinder is the full-disk column
+      either way). **The stations** (the overlap against the slab):
+      the **through** (the cylinder straddling both faces — the
+      genus-1 through-hole cut: four plain faces, two annuli, the
+      REVERSED wall band, the hole-adjusted Euler characteristic 0;
+      the fuse the box with the axle: the sticking-out bands with
+      their caps; the common the clipped cylinder — a plain
+      three-face piece), the **blind bores** (crossing exactly one
+      face — the cut's annulus + wall + floor disk with the floor's
+      outward normal INTO the hole; the fuse the boss: the band and
+      cap beyond the crossed face), and **the flush far ends** (the
+      cap coplanar with a face plane contributing NOTHING — the cut
+      reading the overlap only, the fuse composing the MINIMAL
+      eight-face shell where OCCT keeps the coplanar disk as its own
+      redundant ninth face: the volumes and areas agree, the face
+      counts do not, and the minimal shell is ours). Exactly TWO rim
+      circles authored per wall, every edge shared by exactly two
+      faces — the closed-shell contract by construction, the
+      K1-cylinder mantle pattern (seam + rims) and the nested-tube
+      wall precedent (`reversed` carrying which side the solid lies
+      on) composed, no new measure needed: the annulus is the plane
+      reader's own (shoelace outer, πr² hole), the wall the
+      two-rim band, the disk πr². Both sides measured, every station:
+      the hand closed forms (`V_box ∓ πr²·depth`, `V_box +
+      πr²·overhang`, the per-face area sums) AND real OCCT's own
+      numbers (`expected_box_cylinder.json`, authored by
+      `scripts/parity/regen_box_cylinder_corpus.py` via the `ocp`
+      7.8.1 wheels — 25 result payloads committed as the reader
+      differential corpus), the face counts against OCCT's own
+      topology, the FCBREP round-trip byte-identical. **The render
+      channel is honest both ways**: every annulus-carrying result
+      refuses by name (hole-trimmed faces are not tessellated by
+      this reader), while the clipped-cylinder commons and the
+      whole-shape outcomes (the engulfed cylinder, the untouched
+      box) tessellate WATERTIGHT. **The classification tier** answers
+      the whole shapes: engulf (the box inside the cylinder — the
+      corner-distance test's own convexity argument), lateral
+      disjoint (external tangency included), axial disjoint (a
+      two-shell fuse refusal), the exactly-flush LANDING (the
+      coplanar-merge boundary — a strict overhang composes, a
+      landing merges), contained (the common the cylinder, the fuse
+      the box, the strictly-interior cut the refused internal void —
+      a flush containment the legitimate bore through the
+      construction). Acceptance: `tests/box_cylinder_boolean.rs`
+      (8) + `tests/exact_boolean.rs` (+5 — the decisive
+      imported-box × placed-cylinder cut round trip with the annulus
+      display refusal, the fuse/common, the blind and
+      antiparallel-axis bites, the four named refusals through the
+      features: the rotated placement, the void, the flush landing,
+      the cylinder-Base swap — and the retired
+      outside-the-pairing-table refusal re-pinned to the
+      trim-domain boundary it now is). Suite: 723, none ignored. The
+      remaining K4-2d/3 surface: the polygon-domain and cap
+      tessellations (the trim-domain classification — the crossing
+      disk's side-clipped sections), the coplanar-face merge (the
+      flush landing's union), and the OCCT-authored-result reader
+      widening (multi-segment NURBS arcs).
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

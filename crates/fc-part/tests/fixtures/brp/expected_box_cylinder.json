@@ -1,0 +1,187 @@
+{
+ "generator": "ocp 7.8.1 (cadquery-ocp) via BRepAlgoAPI + BRepTools.Write_s",
+ "box": {
+  "dims": [
+   30.0,
+   20.0,
+   5.0
+  ]
+ },
+ "cases": {
+  "box_cylinder_cut_through": {
+   "volume": 2858.6283305884594,
+   "area": 1737.6991118430774,
+   "faces": 7,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_fuse_through": {
+   "volume": 3141.37166941154,
+   "area": 1794.247779607694,
+   "faces": 10,
+   "edges": 36,
+   "vertices": 72
+  },
+  "box_cylinder_common_through": {
+   "volume": 141.37166941154072,
+   "area": 150.79644737231007,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_cut_blind_low": {
+   "volume": 2962.3008881569217,
+   "area": 1737.6991118430776,
+   "faces": 8,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_fuse_blind_low": {
+   "volume": 3012.5663706143587,
+   "area": 1712.5663706143591,
+   "faces": 8,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_common_blind_low": {
+   "volume": 37.6991118430775,
+   "area": 62.83185307179585,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_cut_blind_high": {
+   "volume": 2962.300888156922,
+   "area": 1737.6991118430776,
+   "faces": 8,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_fuse_blind_high": {
+   "volume": 3025.1327412287183,
+   "area": 1725.1327412287183,
+   "faces": 8,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_common_blind_high": {
+   "volume": 37.6991118430775,
+   "area": 62.83185307179585,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_cut_through_y": {
+   "volume": 2748.6725877128165,
+   "area": 1926.1946710584652,
+   "faces": 7,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_fuse_through_y": {
+   "volume": 3087.9645943005144,
+   "area": 1787.9645943005141,
+   "faces": 10,
+   "edges": 36,
+   "vertices": 72
+  },
+  "box_cylinder_common_through_y": {
+   "volume": 251.3274122871834,
+   "area": 276.4601535159018,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_cut_blind_flip": {
+   "volume": 2962.300888156922,
+   "area": 1737.6991118430776,
+   "faces": 8,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_fuse_blind_flip": {
+   "volume": 3012.566370614359,
+   "area": 1712.5663706143591,
+   "faces": 8,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_common_blind_flip": {
+   "volume": 37.69911184307751,
+   "area": 62.831853071795855,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_cut_contained": {
+   "volume": 2962.3008881569217,
+   "area": 1762.8318530717959,
+   "faces": 9,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_fuse_contained": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48
+  },
+  "box_cylinder_common_contained": {
+   "volume": 37.69911184307751,
+   "area": 62.83185307179585,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_cut_engulf": {
+   "volume": 0.0,
+   "area": 0.0,
+   "faces": 0,
+   "edges": 0,
+   "vertices": 0
+  },
+  "box_cylinder_fuse_engulf": {
+   "volume": 13744.467859455344,
+   "area": 5026.548245743669,
+   "faces": 3,
+   "edges": 6,
+   "vertices": 12
+  },
+  "box_cylinder_common_engulf": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48
+  },
+  "box_cylinder_cut_disjoint": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48
+  },
+  "box_cylinder_fuse_disjoint": {
+   "volume": 3025.1327412287183,
+   "area": 1750.2654824574365,
+   "faces": 9,
+   "edges": 30,
+   "vertices": 60
+  },
+  "box_cylinder_common_disjoint": {
+   "volume": 0.0,
+   "area": 0.0,
+   "faces": 0,
+   "edges": 0,
+   "vertices": 0
+  },
+  "box_cylinder_cut_flush_through": {
+   "volume": 2858.6283305884594,
+   "area": 1737.6991118430774,
+   "faces": 7,
+   "edges": 30,
+   "vertices": 60
+  }
+ }
+}

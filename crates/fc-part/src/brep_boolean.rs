@@ -7139,3 +7139,672 @@ pub fn box_box_boolean(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// K4-2d/3 slice 4 — the box×cylinder family
+// ---------------------------------------------------------------------------
+
+/// The exact B-rep boolean of a box and an axis-parallel cylinder
+/// (K4-2d/3 slice 4 — the pairing table's third amendment).
+///
+/// **The frame contract**: the cylinder's axis dot with exactly one
+/// box axis is bit-exactly `±1` — never a snapped parallel. A
+/// rotated, oblique, or near-parallel axis refuses by name: the
+/// section circles would not lie in the box's face planes, and their
+/// extents would be a snap's, not the input's. The cylinder is then
+/// read in the box's own frame: the cross-section disk
+/// `D = {(u,v) : (u−ci)² + (v−cj)² ≤ rc²}` against the rectangle
+/// `R = [0,li]×[0,lj]`, and the axial span `[t_lo, t_hi]` against
+/// the slab `[0, ln]` — the span covering the slab exactly when the
+/// axis points along `+an` (`[dn, dn+hc]`) or `−an` (`[dn−hc, dn]`).
+///
+/// **The interior-cross-section contract** (the constructive
+/// stations): `D` strictly inside `R`, so every annular face the
+/// stations author is a rectangle with a strictly-interior circular
+/// hole — a regular region. A disk that CROSSES `R` (the hole
+/// breaking the box's side faces) is the trim-domain slice, refused
+/// by name; a TANGENT disk (the hole touching a side face) would
+/// pinch the annulus at a point that is no vertex of either wire —
+/// refused by name, never a silently degenerate face. Common alone
+/// is unaffected by a tangency (the clipped cylinder is the full-disk
+/// column either way) and answers for the whole closed disk.
+///
+/// **The stations** (the overlap `[ta, tb] = [max(t_lo,0),
+/// min(t_hi,ln)]` against the slab):
+///
+/// * **Through** (`t_lo ≤ 0 ∧ t_hi ≥ ln`): the cut is the box with
+///   the cylindrical hole through it — four plain faces, two annuli
+///   (the hole's openings), the REVERSED wall band `[0, ln]` (the
+///   solid outside the cylinder — the nested-tube wall precedent),
+///   the hole-adjusted Euler characteristic 0; the fuse is the box
+///   with the axle — the sticking-out wall bands with their caps,
+///   both crossed faces annular.
+/// * **Blind** (one end inside the slab, one out): the cut is the
+///   blind bore — one annulus (the entry face), the wall band to the
+///   floor, the floor disk (outward INTO the hole); the fuse is the
+///   boss — the wall band beyond the crossed face with its cap. A
+///   flush far end (the cap coplanar with the entry plane) is the
+///   SAME construction: the cap lies interior to the union, covered
+///   by the box's own full face — the honest minimal shell, where
+///   OCCT keeps the coplanar disk as its own redundant ninth face.
+/// * **Common** is always the clipped cylinder `D × [ta, tb]` — a
+///   plain cylinder piece (three faces).
+///
+/// **The classification tier** answers the whole shapes first:
+/// engulf (the box inside the cylinder — every cross-section corner
+/// within `rc` AND the span covering the slab: the cut empty, the
+/// fuse the cylinder, the common the box; tangency included, the
+/// touched generators measure-zero), lateral disjoint (the disk not
+/// reaching the rectangle, external tangency included), axial
+/// disjoint (the span missing the slab — a strictly separate
+/// two-shell fuse refusal, and an exactly-flush LANDING refused by
+/// name as the coplanar-merge boundary: a strict overhang composes,
+/// a landing merges), contained (the cylinder inside the box: the
+/// common the cylinder, the fuse the box, and a strictly-interior
+/// cut the refused internal void — a flush containment is the
+/// legitimate blind/through bore through the construction).
+#[allow(clippy::too_many_arguments)] // the box and cylinder frames are the vocabulary
+pub fn box_cylinder_boolean(
+    op: BooleanOp,
+    o: Vector3,
+    a1: Vector3,
+    a2: Vector3,
+    a3: Vector3,
+    l1: f64,
+    l2: f64,
+    l3: f64,
+    oc: Vector3,
+    ac: Vector3,
+    rc: f64,
+    hc: f64,
+) -> Result<BooleanOutcome, String> {
+    require_unit(a1, "box axis a1")?;
+    require_unit(a2, "box axis a2")?;
+    require_unit(a3, "box axis a3")?;
+    if (a1.dot(&a2)).abs() > 1e-9 || (a1.dot(&a3)).abs() > 1e-9 || (a2.dot(&a3)).abs() > 1e-9 {
+        return Err("the box axes must be mutually perpendicular".into());
+    }
+    if !(l1 > 0.0 && l2 > 0.0 && l3 > 0.0) {
+        return Err("the box extents must be positive".into());
+    }
+    require_unit(ac, "cylinder axis")?;
+    if rc <= 0.0 {
+        return Err("the cylinder radius must be positive".into());
+    }
+    if hc <= 0.0 {
+        return Err("the cylinder height must be positive".into());
+    }
+    let axes = [a1, a2, a3];
+    let dims = [l1, l2, l3];
+    // The frame contract: exactly one box axis claims the cylinder
+    // with a bit-exact ±1 dot — the uniqueness is orthogonality's
+    // own guarantee, asserted anyway.
+    let mut frame: Option<(usize, f64)> = None;
+    for (k, a) in axes.iter().enumerate() {
+        let d = ac.dot(a);
+        if d == 1.0 || d == -1.0 {
+            if frame.is_some() {
+                return Err(
+                    "the cylinder's axis is parallel to two box axes at once — not a frame".into(),
+                );
+            }
+            frame = Some((k, d));
+        }
+    }
+    let Some((n, s)) = frame else {
+        return Ok(refused(
+            "the cylinder's axis is not bit-exactly parallel to a box axis — the rotated, \
+             oblique, or near-parallel box×cylinder is outside this family (the section \
+             circles would not lie in the box's face planes, and their extents would be a \
+             snap's, not the input's); align the axis exactly, or tessellate for the faceted \
+             workflow — this kernel never silently snaps",
+        ));
+    };
+    let others: Vec<usize> = (0..3).filter(|&m| m != n).collect();
+    let (i, j) = (others[0], others[1]);
+    let off = v3(oc.x - o.x, oc.y - o.y, oc.z - o.z);
+    let dn = off.dot(&axes[n]);
+    let ci = off.dot(&axes[i]);
+    let cj = off.dot(&axes[j]);
+    let (li, lj, ln) = (dims[i], dims[j], dims[n]);
+    // The cylinder's axial span in the box's n-coordinate.
+    let (t_lo, t_hi) = if s > 0.0 {
+        (dn, dn + hc)
+    } else {
+        (dn - hc, dn)
+    };
+    let solid = |brep: ExactBRep| BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    };
+    // ---- engulf: the box inside the cylinder -------------------------
+    // Convexity: all four cross-section corners within rc of the
+    // axis point puts the rectangle inside the disk; the span
+    // covering the slab closes the containment.
+    let mut max_corner_d2 = 0.0f64;
+    for (u, v) in [(0.0, 0.0), (li, 0.0), (0.0, lj), (li, lj)] {
+        let du = u - ci;
+        let dv = v - cj;
+        max_corner_d2 = max_corner_d2.max(du * du + dv * dv);
+    }
+    if max_corner_d2 <= rc * rc && t_lo <= 0.0 && t_hi >= ln {
+        return Ok(match op {
+            BooleanOp::Cut => empty(),
+            BooleanOp::Fuse => solid(cylinder_piece(oc, ac, rc, 0.0, hc)),
+            BooleanOp::Common => solid(whole_box_brep(o, axes, dims)),
+        });
+    }
+    // ---- lateral disjoint (external tangency included) ---------------
+    let ex_i = if ci < 0.0 {
+        -ci
+    } else if ci > li {
+        ci - li
+    } else {
+        0.0
+    };
+    let ex_j = if cj < 0.0 {
+        -cj
+    } else if cj > lj {
+        cj - lj
+    } else {
+        0.0
+    };
+    if ex_i * ex_i + ex_j * ex_j >= rc * rc {
+        return Ok(match op {
+            BooleanOp::Cut => solid(whole_box_brep(o, axes, dims)),
+            BooleanOp::Fuse => refused(
+                "disjoint fuse — the result is a two-shell compound, not a single closed shell",
+            ),
+            BooleanOp::Common => empty(),
+        });
+    }
+    // ---- axial disjoint, and the flush landing ------------------------
+    if t_hi <= 0.0 || t_lo >= ln {
+        let flush = t_hi == 0.0 || t_lo == ln;
+        return Ok(match op {
+            BooleanOp::Cut => solid(whole_box_brep(o, axes, dims)),
+            BooleanOp::Common => empty(),
+            BooleanOp::Fuse => {
+                if flush {
+                    refused(
+                        "the flush landing — the cylinder's cap lies exactly on the box's face \
+                         plane, and the landing union is the coplanar-merge family (a strict \
+                         overhang composes exactly; a landing merges), refused by name — this \
+                         kernel never silently merges",
+                    )
+                } else {
+                    refused(
+                        "disjoint fuse — the result is a two-shell compound, not a single \
+                         closed shell",
+                    )
+                }
+            }
+        });
+    }
+    // ---- contained: the cylinder inside the box -----------------------
+    let disk_within = ci - rc >= 0.0 && ci + rc <= li && cj - rc >= 0.0 && cj + rc <= lj;
+    let disk_strict = ci - rc > 0.0 && ci + rc < li && cj - rc > 0.0 && cj + rc < lj;
+    if disk_within && t_lo >= 0.0 && t_hi <= ln {
+        return Ok(match op {
+            BooleanOp::Common => solid(cylinder_piece(oc, ac, rc, 0.0, hc)),
+            BooleanOp::Fuse => solid(whole_box_brep(o, axes, dims)),
+            BooleanOp::Cut => {
+                if t_lo > 0.0 && t_hi < ln {
+                    refused(
+                        "the internal void — the cylinder is strictly inside the box, and the \
+                         void needs a second shell, not modeled in this family",
+                    )
+                } else {
+                    // Flush containment: the bore is a legitimate
+                    // blind or through hole — the construction's own
+                    // path.
+                    return box_cylinder_cut(o, axes, dims, oc, ac, rc, dn, s, n, t_lo, t_hi);
+                }
+            }
+        });
+    }
+    // ---- the constructive tier -----------------------------------------
+    let ta = t_lo.max(0.0);
+    let tb = t_hi.min(ln);
+    match op {
+        BooleanOp::Common => {
+            if !disk_within {
+                return Ok(refused(
+                    "the section disk crosses the box's cross-section — the side-clipped \
+                     cylindrical section is the trim-domain slice, not constructed in this \
+                     family",
+                ));
+            }
+            // The clipped cylinder: the overlap column, a plain
+            // piece in the cylinder's own v-frame.
+            let v_a = (ta - dn) * s;
+            let v_b = (tb - dn) * s;
+            Ok(solid(cylinder_piece(
+                oc,
+                ac,
+                rc,
+                v_a.min(v_b),
+                v_a.max(v_b),
+            )))
+        }
+        BooleanOp::Cut => {
+            if !disk_strict {
+                return Ok(refused(if disk_within {
+                    "the section disk is tangent to the box's cross-section — the annular face \
+                     would pinch at a point that is no vertex of either wire, and the tangency \
+                     is the boundary of the edge-crossing family (the trim-domain slice); this \
+                     kernel never silently degenerates"
+                } else {
+                    "the section disk crosses the box's cross-section — the hole breaking the \
+                     box's side faces is the trim-domain slice, not constructed in this family"
+                }));
+            }
+            box_cylinder_cut(o, axes, dims, oc, ac, rc, dn, s, n, t_lo, t_hi)
+        }
+        BooleanOp::Fuse => {
+            if !disk_strict {
+                return Ok(refused(if disk_within {
+                    "the section disk is tangent to the box's cross-section — the annular face \
+                     would pinch at a point that is no vertex of either wire, and the tangency \
+                     is the boundary of the edge-crossing family (the trim-domain slice); this \
+                     kernel never silently degenerates"
+                } else {
+                    "the section disk crosses the box's cross-section — the column breaking \
+                     the box's side faces is the trim-domain slice, not constructed in this \
+                     family"
+                }));
+            }
+            // The parts beyond the slab compose; a flush far end
+            // contributes nothing (its cap lies interior, covered by
+            // the box's own full face) — the input's own arithmetic,
+            // not a merge.
+            box_cylinder_fuse(o, axes, dims, oc, ac, rc, dn, s, n, t_lo, t_hi)
+        }
+    }
+}
+
+/// The box×cylinder cut at a constructive station: the overlap
+/// `[ta, tb]` open at `ta == 0` (the low face), at `tb == ln` (the
+/// high face), or both — the through hole or the blind bore. Exactly
+/// TWO rim circles are authored (at `ta` and `tb`), each shared by
+/// the wall band and its other consumer (the annulus of an opening,
+/// the disk of a floor) — the closed-shell edge contract by
+/// construction.
+#[allow(clippy::too_many_arguments)] // the box and cylinder frames are the vocabulary
+fn box_cylinder_cut(
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    oc: Vector3,
+    ac: Vector3,
+    rc: f64,
+    dn: f64,
+    s: f64,
+    n: usize,
+    t_lo: f64,
+    t_hi: f64,
+) -> Result<BooleanOutcome, String> {
+    let ln = dims[n];
+    let ta = t_lo.max(0.0);
+    let tb = t_hi.min(ln);
+    let e = any_perpendicular(ac);
+    let axis_point = |t: f64| {
+        v3(
+            oc.x + (t - dn) * axes[n].x,
+            oc.y + (t - dn) * axes[n].y,
+            oc.z + (t - dn) * axes[n].z,
+        )
+    };
+    let rim = |t: f64| Curve::Circle {
+        center: axis_point(t),
+        axis: ac,
+        ref_dir: e,
+        radius: rc,
+    };
+    let v_of = |t: f64| (t - dn) * s;
+    let open_low = t_lo <= 0.0;
+    let open_high = t_hi >= ln;
+    let mut draft = Draft::new();
+    // The two shared rim circles: at the wall's ends.
+    let e_ta = draft.circle(rim(ta));
+    let e_tb = draft.circle(rim(tb));
+    // The box's faces: the ⊥n faces annular where the hole opens,
+    // everything else plain.
+    for k in 0..3 {
+        for high in [false, true] {
+            let holed = k == n && ((high && open_high) || (!high && open_low));
+            if holed {
+                let n_out = if high {
+                    axes[n]
+                } else {
+                    v3(-axes[n].x, -axes[n].y, -axes[n].z)
+                };
+                let hole = if high { e_tb } else { e_ta };
+                holed_rect_face(&mut draft, o, axes, dims, n, n_out, hole, ac);
+                continue;
+            }
+            plain_box_face(&mut draft, o, axes, dims, k, high);
+        }
+    }
+    // The wall band [ta, tb], REVERSED — the solid outside the
+    // cylinder (the nested-tube wall precedent).
+    let surface = Surface::Cylinder {
+        origin: oc,
+        axis: ac,
+        ref_dir: e,
+        radius: rc,
+    };
+    if s > 0.0 {
+        wall_band(&mut draft, surface, e_ta, e_tb, v_of(ta), v_of(tb), true);
+    } else {
+        wall_band(&mut draft, surface, e_tb, e_ta, v_of(tb), v_of(ta), true);
+    }
+    // The blind bore's floor: the disk at the closed end, outward
+    // INTO the hole (away from the material beyond it).
+    if !(open_low && open_high) {
+        let (t_floor, outward) = if open_low {
+            (tb, v3(-axes[n].x, -axes[n].y, -axes[n].z))
+        } else {
+            (ta, axes[n])
+        };
+        let e_floor = if open_low { e_tb } else { e_ta };
+        draft.faces.push(plane_disk_face(
+            axis_point(t_floor),
+            outward,
+            e,
+            e_floor,
+            rc,
+            outward.dot(&ac) > 0.0,
+        ));
+    }
+    finish_single_shell(draft, "the box×cylinder cut")
+}
+
+/// The box×cylinder fuse at a constructive station: the cylinder's
+/// parts strictly beyond the slab — `[t_lo, 0]` below, `[ln, t_hi]`
+/// above — each a wall band with its far cap, and each strictly
+/// straddling part's crossed face an annulus. A flush far end (the
+/// cap coplanar with the face plane) contributes NOTHING: the cap
+/// lies interior to the union, covered by the box's own full face.
+#[allow(clippy::too_many_arguments)] // the box and cylinder frames are the vocabulary
+fn box_cylinder_fuse(
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    oc: Vector3,
+    ac: Vector3,
+    rc: f64,
+    dn: f64,
+    s: f64,
+    n: usize,
+    t_lo: f64,
+    t_hi: f64,
+) -> Result<BooleanOutcome, String> {
+    let ln = dims[n];
+    let e = any_perpendicular(ac);
+    let axis_point = |t: f64| {
+        v3(
+            oc.x + (t - dn) * axes[n].x,
+            oc.y + (t - dn) * axes[n].y,
+            oc.z + (t - dn) * axes[n].z,
+        )
+    };
+    let rim = |t: f64| Curve::Circle {
+        center: axis_point(t),
+        axis: ac,
+        ref_dir: e,
+        radius: rc,
+    };
+    let v_of = |t: f64| (t - dn) * s;
+    let below = t_lo < 0.0;
+    let above = t_hi > ln;
+    let mut draft = Draft::new();
+    // The rim circles actually consumed: the crossed-face sections
+    // and the far caps' rims — pushed only when their part exists.
+    let e_low = if below {
+        Some(draft.circle(rim(0.0)))
+    } else {
+        None
+    };
+    let e_high = if above {
+        Some(draft.circle(rim(ln)))
+    } else {
+        None
+    };
+    let e_cap_lo = if below {
+        Some(draft.circle(rim(t_lo)))
+    } else {
+        None
+    };
+    let e_cap_hi = if above {
+        Some(draft.circle(rim(t_hi)))
+    } else {
+        None
+    };
+    // The box's faces: the crossed faces annular, the flush ones
+    // plain and full.
+    for k in 0..3 {
+        for high in [false, true] {
+            let holed = k == n && ((high && above) || (!high && below));
+            if holed {
+                let n_out = if high {
+                    axes[n]
+                } else {
+                    v3(-axes[n].x, -axes[n].y, -axes[n].z)
+                };
+                let hole = if high { e_high } else { e_low };
+                let hole = hole.expect("the holed face's part exists");
+                holed_rect_face(&mut draft, o, axes, dims, n, n_out, hole, ac);
+                continue;
+            }
+            plain_box_face(&mut draft, o, axes, dims, k, high);
+        }
+    }
+    let surface = || Surface::Cylinder {
+        origin: oc,
+        axis: ac,
+        ref_dir: e,
+        radius: rc,
+    };
+    // The below part: the wall band [t_lo, 0] (natural — the solid
+    // inside the column there) and the cap at t_lo, outward −an.
+    if let (Some(e_low), Some(e_cap_lo)) = (e_low, e_cap_lo) {
+        if s > 0.0 {
+            wall_band(
+                &mut draft,
+                surface(),
+                e_cap_lo,
+                e_low,
+                v_of(t_lo),
+                v_of(0.0),
+                false,
+            );
+        } else {
+            wall_band(
+                &mut draft,
+                surface(),
+                e_low,
+                e_cap_lo,
+                v_of(0.0),
+                v_of(t_lo),
+                false,
+            );
+        }
+        let outward = v3(-axes[n].x, -axes[n].y, -axes[n].z);
+        draft.faces.push(plane_disk_face(
+            axis_point(t_lo),
+            outward,
+            e,
+            e_cap_lo,
+            rc,
+            outward.dot(&ac) > 0.0,
+        ));
+    }
+    // The above part: the wall band [ln, t_hi] and the cap at t_hi,
+    // outward +an.
+    if let (Some(e_high), Some(e_cap_hi)) = (e_high, e_cap_hi) {
+        if s > 0.0 {
+            wall_band(
+                &mut draft,
+                surface(),
+                e_high,
+                e_cap_hi,
+                v_of(ln),
+                v_of(t_hi),
+                false,
+            );
+        } else {
+            wall_band(
+                &mut draft,
+                surface(),
+                e_cap_hi,
+                e_high,
+                v_of(t_hi),
+                v_of(ln),
+                false,
+            );
+        }
+        draft.faces.push(plane_disk_face(
+            axis_point(t_hi),
+            axes[n],
+            e,
+            e_cap_hi,
+            rc,
+            axes[n].dot(&ac) > 0.0,
+        ));
+    }
+    finish_single_shell(draft, "the box×cylinder fuse")
+}
+
+/// One plain box face (the whole-box pattern): the four canonical
+/// corners CCW against the outward normal, the frame right-handed
+/// against it.
+fn plain_box_face(
+    draft: &mut Draft,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    k: usize,
+    high: bool,
+) {
+    let n_out = if high {
+        axes[k]
+    } else {
+        v3(-axes[k].x, -axes[k].y, -axes[k].z)
+    };
+    let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+    let (ia, ib) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out) > 0.0 {
+        (span[0], span[1])
+    } else {
+        (span[1], span[0])
+    };
+    let s_of = |a: u8, b: u8| -> [u8; 3] {
+        let mut s = [0u8, 0, 0];
+        s[k] = high as u8;
+        s[ia] = a;
+        s[ib] = b;
+        s
+    };
+    rect_face(
+        draft,
+        box_corner(o, axes, dims, s_of(0, 0)),
+        box_corner(o, axes, dims, s_of(1, 0)),
+        box_corner(o, axes, dims, s_of(1, 1)),
+        box_corner(o, axes, dims, s_of(0, 1)),
+        n_out,
+        axes[ia],
+        axes[ib],
+        dims[ia],
+        dims[ib],
+    );
+}
+
+/// One annular box face: the ⊥n face's rectangle with the
+/// cylinder's rim circle as a strictly-interior hole. The outer wire
+/// is the canonical rectangle CCW against the outward normal; the
+/// hole runs CW against it — forward exactly when the circle's own
+/// axis points against the outward normal (the region-on-left rule
+/// for holes, the offset-station pattern).
+#[allow(clippy::too_many_arguments)] // the box frame + the hole's own partners
+fn holed_rect_face(
+    draft: &mut Draft,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    n: usize,
+    n_out: Vector3,
+    hole: usize,
+    ac: Vector3,
+) {
+    let span: Vec<usize> = (0..3).filter(|&m| m != n).collect();
+    let (ia, ib) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out) > 0.0 {
+        (span[0], span[1])
+    } else {
+        (span[1], span[0])
+    };
+    let high = n_out == axes[n];
+    let s_of = |a: u8, b: u8| -> [u8; 3] {
+        let mut s = [0u8, 0, 0];
+        s[n] = high as u8;
+        s[ia] = a;
+        s[ib] = b;
+        s
+    };
+    let c00 = box_corner(o, axes, dims, s_of(0, 0));
+    let c10 = box_corner(o, axes, dims, s_of(1, 0));
+    let c11 = box_corner(o, axes, dims, s_of(1, 1));
+    let c01 = box_corner(o, axes, dims, s_of(0, 1));
+    let outer = [
+        draft.seam(c00, c10),
+        draft.seam(c10, c11),
+        draft.seam(c11, c01),
+        draft.seam(c01, c00),
+    ];
+    draft.faces.push(TopoFace {
+        surface: Surface::Plane {
+            origin: c00,
+            normal: n_out,
+            x_dir: axes[ia],
+        },
+        uv_bounds: [0.0, dims[ia], 0.0, dims[ib]],
+        wires: vec![
+            TopoWire {
+                edges: outer
+                    .iter()
+                    .map(|&(ed, f)| WireEdge {
+                        edge: ed,
+                        forward: f,
+                    })
+                    .collect(),
+            },
+            TopoWire {
+                edges: vec![WireEdge {
+                    edge: hole,
+                    forward: ac.dot(&n_out) < 0.0,
+                }],
+            },
+        ],
+        reversed: false,
+    });
+}
+
+/// One cylindrical wall band between two already-authored rim
+/// circles (`e_lo` at the smaller cylinder v, `e_hi` at the larger):
+/// the seam between their seam points and the strip face — the walk
+/// [seam up, upper back, seam down, lower forward] against the
+/// natural normal, `reversed` carrying which side the solid lies on.
+fn wall_band(
+    draft: &mut Draft,
+    surface: Surface,
+    e_lo: usize,
+    e_hi: usize,
+    v_lo: f64,
+    v_hi: f64,
+    reversed: bool,
+) {
+    let p_lo = draft.edges[e_lo].curve.point(0.0);
+    let p_hi = draft.edges[e_hi].curve.point(0.0);
+    let (seam, _) = draft.seam(p_lo, p_hi);
+    draft.faces.push(cylinder_strip_face(
+        surface, e_lo, e_hi, seam, v_lo, v_hi, reversed,
+    ));
+}
