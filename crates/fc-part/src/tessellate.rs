@@ -496,6 +496,42 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
                 // signs are not yet carried here — the trim-domain
                 // classification slice (K4-2d). Until then: refuse by
                 // name, the exact channels still measuring the solid.
+                // K4-2d/3: the spherical polygon — a sphere face whose
+                // single wire is a loop of open, single-use arcs (the
+                // box×sphere bite patches: the octant behind a corner
+                // bite, the quarter behind an edge bite, their
+                // complements). The band machinery reads latitude
+                // rims, pole lines, and seam chains; a polygon domain
+                // bounded by tilted great-circle arcs is none of
+                // those, and tiling it through the band walk emits a
+                // torn mesh — a plausible-looking wrong answer. Refuse
+                // by name: the exact channels still measure it, and
+                // the trim-domain classification slice (K4-2d) is the
+                // honest widening path.
+                if let Surface::Sphere { .. } = face.surface {
+                    let polygon = face.wires.len() == 1 && {
+                        let uses: Vec<usize> = face.wires[0]
+                            .edges
+                            .iter()
+                            .filter(|we| !brep.is_degenerate(we.edge))
+                            .map(|we| we.edge)
+                            .collect();
+                        uses.len() >= 2
+                            && uses.iter().all(|e| {
+                                brep.edges[*e].start != brep.edges[*e].end
+                                    && uses.iter().filter(|e2| *e2 == e).count() == 1
+                            })
+                    };
+                    if polygon {
+                        return Err(format!(
+                            "face {fi}: a sphere face trimmed by a loop of open arcs — the \
+                             spherical polygon (the box×sphere bite patches of K4-2d/3); the \
+                             band tessellator reads latitude rims, pole lines, and seams, and \
+                             would tear this domain — trim-domain classification is the \
+                             K4-2d slice; the exact channels still measure it"
+                        ));
+                    }
+                }
                 let loop_umin = outer.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
                 let loop_umax = outer.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
                 let loop_span = loop_umax - loop_umin;

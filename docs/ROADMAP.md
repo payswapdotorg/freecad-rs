@@ -904,8 +904,78 @@ behind us.
       elliptical arcs refuse (the corner is the cylinder's), malformed
       corner wires (rims not sharing two corner u values, a sinusoid
       crossing its arc rim) refuse by name. Suite: 680, none ignored.
-- [ ] **K4-2d/3** general booleans with subsurface classification
-      and trimming on the loaded operands
+- [x] **K4-2d/3 slice 1 (landing 2026-10-30)** the box×sphere bite
+      taxonomy — an imported box-class operand meets a sphere whose
+      center sits bit-exactly on the box's boundary skeleton, and the
+      three booleans run exactly through the real `Part::Cut/Fuse/
+      Common` (the ADR 0004 dispatch table widened by amendment, the
+      first family the exact-intent rule reaches with a LOADED
+      box). **The stations**: the corner (the octant bite — the three
+      adjacent faces each losing a quarter-disk, their wires carrying
+      the boundary arc; the REVERSED spherical patch on the negative
+      arc cycle for the cut, the unreversed complement for the fuse —
+      Cut and Fuse differ only in the flag, the K3c-2 discipline; the
+      octant ball itself for the common), the edge (the quarter ball —
+      two faces bitten by half-disks, the patch bounded by two
+      half-great-circles between the edge's two sphere points), the
+      face (the half ball behind an interior circular hole — the
+      holed plane face plus the hemisphere cap, the existing
+      machinery). **The spherical-polygon measure**
+      (`measure.rs`): a sphere face whose single wire is a loop of
+      open, single-use, great-circle arcs reads exactly — the area by
+      Gauss–Bonnet (`r²(2π − s·Στ)`, the geodesic turn angles at the
+      vertices), the outward vector area by the Stokes line integral
+      (`½r²Σ±Θₖn̂ₖ`), the flux `σ(c·V + r·A)` — with the arcs
+      recognized in both representations this model carries (the
+      native `Circle` arc and the rational-quadratic NURBS chain the
+      construction itself authors). **The exactness discipline**: the
+      station points are the input parameters themselves, every arc is
+      the classical NURBS arc with canonical exact endpoints
+      (`push_arc_chain`), every shared vertex comes from one canonical
+      corner formula, and the authored arc directions chain
+      all-forward into the patch's positive boundary cycle — a small
+      theorem the construction leans on, verified for both box
+      handednesses at every station (the mirror and rotated-frame
+      tests). Acceptance: `tests/box_sphere_boolean.rs` (8) — the
+      three stations × the three ops against the hand closed forms
+      (the octant/quarter/half shares of `4πr³/3`) AND real OCCT's own
+      `BRepAlgoAPI` numbers (`expected_box_sphere.json`, authored by
+      `scripts/parity/regen_box_sphere_corpus.py` via the `ocp` 7.8.1
+      wheels — the two references agree to ≤4.6e-13; the kernel
+      bit-exact at the corner and face stations, ~2e-13 at the edge —
+      the rational-arc Green terms' last-bit rounding, the
+      fillet-box precedent), the face counts matching OCCT's own
+      topology, the FCBREP v2 round-trip measuring bit-identically,
+      the classification tier (whole shapes, the exact empty set, the
+      named refusals), and `tests/exact_boolean.rs` +4 — the decisive
+      chain (the imported 30×20×5 OCCT box cut exactly by a placed
+      sphere primitive, save → reopen → recompute re-deriving the
+      bit-identical exact result, the operand's bytes verbatim), the
+      fuse/common, the edge/face stations through the features, and
+      the sphere-Base swap refusal. **Honest limits, named**: the
+      center must sit bit-exactly on the station (a within-tolerance
+      but off-point center refuses — the section circles would not be
+      great circles, and this kernel never silently snaps); the bite
+      must stay within its adjacent faces (r below the extents and the
+      along-edge span, tangency refused); the general overlaps (the
+      center off the skeleton, or interior with the ball crossing
+      faces) refuse by name; the contained cut (the internal void)
+      and the disjoint fuse refuse as before; box×box and
+      box×cylinder are outside the pairing table by name; the render
+      channel refuses the polygon-patched and holed faces by name
+      (trim-domain classification — the tessellator's band machinery
+      reads latitude rims, and tiling a polygon domain through it
+      would tear: the refusal replaced a genuinely torn mesh found by
+      the first run); OCCT's own authored RESULT payloads
+      (`box_sphere_*.brp`, committed as the differential corpus)
+      structurally validate but refuse face reading — their
+      multi-segment NURBS arcs and split-circle/seam wires are the
+      named next reader slice. Suite: 692, none ignored. **The
+      remainder of K4-2d/3** (the next slices): the offset face
+      stations (the sphere biting from off the surface — small-circle
+      sections), box×box and box×cylinder families, the
+      polygon-domain tessellation, and the OCCT-authored-result
+      reader widening.
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

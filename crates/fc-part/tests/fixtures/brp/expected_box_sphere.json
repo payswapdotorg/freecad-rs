@@ -1,0 +1,257 @@
+{
+ "generator": "ocp 7.8.1 (cadquery-ocp) via BRepAlgoAPI + BRepTools.Write_s",
+ "box": {
+  "dims": [
+   30.0,
+   20.0,
+   5.0
+  ]
+ },
+ "cases": {
+  "box_sphere_cut_corner": {
+   "volume": 2985.862833058846,
+   "area": 1692.931416529423,
+   "faces": 7,
+   "edges": 31,
+   "vertices": 62,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface",
+    "Plane"
+   ]
+  },
+  "box_sphere_fuse_corner": {
+   "volume": 3098.960168588079,
+   "area": 1777.7544181763474,
+   "faces": 7,
+   "edges": 34,
+   "vertices": 68,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface",
+    "Plane"
+   ]
+  },
+  "box_sphere_common_corner": {
+   "volume": 14.137166941154067,
+   "area": 35.342917352885166,
+   "faces": 4,
+   "edges": 13,
+   "vertices": 26,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "SphericalSurface",
+    "Plane"
+   ]
+  },
+  "box_sphere_cut_edge": {
+   "volume": 2971.7256661176916,
+   "area": 1700.0,
+   "faces": 7,
+   "edges": 33,
+   "vertices": 66,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_fuse_edge": {
+   "volume": 3084.8230016469247,
+   "area": 1756.5486677646163,
+   "faces": 7,
+   "edges": 36,
+   "vertices": 72,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_common_edge": {
+   "volume": 28.27433388230814,
+   "area": 56.548667764616276,
+   "faces": 3,
+   "edges": 9,
+   "vertices": 18,
+   "surface_kinds": [
+    "Plane",
+    "SphericalSurface",
+    "Plane"
+   ]
+  },
+  "box_sphere_cut_face": {
+   "volume": 2983.2448391808543,
+   "area": 1712.5663706143591,
+   "faces": 7,
+   "edges": 29,
+   "vertices": 58,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_fuse_face": {
+   "volume": 3016.755160819145,
+   "area": 1712.5663706143594,
+   "faces": 7,
+   "edges": 29,
+   "vertices": 58,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_common_face": {
+   "volume": 16.755160819145537,
+   "area": 37.69911184307748,
+   "faces": 2,
+   "edges": 5,
+   "vertices": 10,
+   "surface_kinds": [
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_cut_inside": {
+   "volume": 2985.862833058846,
+   "area": 1728.2743338823082,
+   "faces": 7,
+   "edges": 28,
+   "vertices": 56,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_fuse_inside": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_sphere_common_inside": {
+   "volume": 14.137166941154069,
+   "area": 28.274333882308138,
+   "faces": 1,
+   "edges": 4,
+   "vertices": 8,
+   "surface_kinds": [
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_cut_disjoint": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  },
+  "box_sphere_fuse_disjoint": {
+   "volume": 3523.5987755982987,
+   "area": 2014.1592653589792,
+   "faces": 7,
+   "edges": 28,
+   "vertices": 56,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_common_disjoint": {
+   "volume": 0.0,
+   "area": 0.0,
+   "faces": 0,
+   "edges": 0,
+   "vertices": 0,
+   "surface_kinds": []
+  },
+  "box_sphere_cut_engulf": {
+   "volume": 0.0,
+   "area": 0.0,
+   "faces": 0,
+   "edges": 0,
+   "vertices": 0,
+   "surface_kinds": []
+  },
+  "box_sphere_fuse_engulf": {
+   "volume": 523598.7755982988,
+   "area": 31415.926535897932,
+   "faces": 1,
+   "edges": 4,
+   "vertices": 8,
+   "surface_kinds": [
+    "SphericalSurface"
+   ]
+  },
+  "box_sphere_common_engulf": {
+   "volume": 3000.0,
+   "area": 1700.0,
+   "faces": 6,
+   "edges": 24,
+   "vertices": 48,
+   "surface_kinds": [
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane",
+    "Plane"
+   ]
+  }
+ }
+}

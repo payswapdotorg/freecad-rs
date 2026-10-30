@@ -1,6 +1,9 @@
 # ADR 0004: The exact/faceted operation contract — one representation, named refusals, no silent downgrades
 
-- **Status:** Accepted (2026-10-30). Extends
+- **Status:** Accepted (2026-10-30); **amended 2026-10-30 by the
+  K4-2d/3 slice 1 landing** (the dispatch table widened with the
+  box×sphere family — the revisit trigger this ADR itself defined,
+  exercised for the first time). Extends
   [`0003-geometry-kernel-strategy.md`](0003-geometry-kernel-strategy.md)
   from the kernel program into the application's operation layer; does
   not revisit the kernel decision.
@@ -78,19 +81,26 @@ For `Part::Cut` / `Part::Fuse` / `Part::Common`, in priority order
 
 - **A `Brep` operand is present** → exact execution is required:
   - Both operands classify to the supported analytic classes (a
-    `Brep` payload recognized as a sphere or cylinder solid, or a
-    `Sphere`/`Cylinder` primitive; placements applied) → the exact
-    BRep boolean runs and the result is `Brep`. An `Empty` outcome is
-    an exact answer represented as an empty mesh result (emptiness
-    has no geometry identity to lose); a `Refused` outcome is an
-    execution error carrying the kernel's own reason.
+    `Brep` payload recognized as a sphere, cylinder, or hexahedral
+    box solid, or a `Sphere`/`Cylinder`/`Box` primitive; placements
+    applied) → the exact BRep boolean runs and the result is `Brep`.
+    An `Empty` outcome is an exact answer represented as an empty
+    mesh result (emptiness has no geometry identity to lose); a
+    `Refused` outcome is an execution error carrying the kernel's own
+    reason. The pairing table (amended by K4-2d/3): sphere×sphere,
+    cylinder×cylinder, cylinder×sphere, **box×sphere** — the
+    box×sphere family covering the boundary-skeleton stations
+    (corner/edge/face bites) and the classification tier (whole
+    shapes, the empty set, the named refusals the kernel itself
+    carries).
   - The other operand is faceted, or either operand is an exact class
-    the kernel cannot pair (a box-class BRep, a B-spline face, cone or
-    torus classes, unsupported axis configurations) → **a named
-    refusal**: the error names the operands, their classes, and the
-    reason, and says how to get the faceted workflow explicitly
-    (tessellate first or use mesh operands). Never a silent
-    tessellation downgrade of the imported geometry.
+    the kernel cannot pair (a multi-surface B-rep, a B-spline face,
+    cone or torus classes, or an unpaired combination such as
+    box×box or box×cylinder) → **a named refusal**: the error names
+    the operands, their classes, and the reason, and says how to get
+    the faceted workflow explicitly (tessellate first or use mesh
+    operands). Never a silent tessellation downgrade of the imported
+    geometry.
 - **No `Brep` operand is present** → today's behavior: a faceted
   operand runs the mesh boolean (result `Mesh` — the approximation
   is the input's nature, recorded in the representation where
@@ -136,23 +146,39 @@ computed", "rejected payload", and "exact-kernel refusal".
 
 This architecture lands in slices; each stays green on its own.
 
-- **Slice 1 (landing now):** `BooleanFeature` only — the `Brep`-operand
+- **Slice 1 (landed 2026-10-30):** `BooleanFeature` only — the `Brep`-operand
   dispatch of rule 3 (exact when imported exact geometry participates;
   primitive-pair combinations keep today's faceted path until the
   refused-configuration handling — a disjoint fuse, say — and the
   recompute-on-load of derived exact results are field-proven), the
   `Option<TopoShape>` result of rule 1, the loader and save-side
   behavior of rule 4, the `placed_shape_of` of rule 2.
+- **Slice 2 (landed 2026-10-30, K4-2d/3):** the dispatch table
+  widens with the box×sphere family — the hexahedral box class (an
+  imported box-class B-rep or a `Box` primitive, placements applied
+  analytically) pairs with the sphere through the kernel's
+  boundary-skeleton bite taxonomy; the tessellator refuses the new
+  patch classes by name (the spherical polygon and the holed face —
+  trim-domain classification is the named widening path, and tiling
+  them through the band machinery would tear). The box-class refusal
+  of slice 1 is retired: what refused as "a planar-faced (box-class)
+  solid" now runs exact against a sphere and refuses by name against
+  everything else (the pairing-table message).
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
   results; widening the supported-combination table as K4-2d/3 lands
-  more exact-boolean families; PartDesign exact dispatch.
+  more exact-boolean families (the offset face stations, box×box,
+  box×cylinder); PartDesign exact dispatch.
 
 ## What we do NOT claim
 
-- **General BRep booleans through features.** Three families
-  (sphere×sphere, cylinder×cylinder, cylinder×sphere) are wired; the
-  rest refuse by name. K4-2d/3 is the milestone that widens this.
+- **General BRep booleans through features.** Four families
+  (sphere×sphere, cylinder×cylinder, cylinder×sphere, box×sphere at
+  the boundary-skeleton stations) are wired; the rest refuse by name —
+  including the box family's own honest boundaries (the
+  off-skeleton/interior-crossing general overlaps, the oversized
+  bite, the near-but-not-bit-exact station, box×box, box×cylinder).
+  K4-2d/3's later slices widen further.
 - **That the mesh fallback for unsupported primitive combinations is
   exactness.** It is faceted, the representation says so, and the
   narrowing path is more exact families, not relabeling.
@@ -166,7 +192,9 @@ This architecture lands in slices; each stays green on its own.
 
 - When K4-2d/3 lands additional exact-boolean families, the dispatch
   table grows and the faceted-fallback set shrinks — by amendment to
-  this ADR, not silently.
+  this ADR, not silently. *(Exercised 2026-10-30: the K4-2d/3 slice 1
+  landing amended rules 3 and this section's lists — the box×sphere
+  family above.)*
 - If a real downstream workflow requires saved derived-exact payloads
   (consumers that cannot recompute), revisit rule 4 with an explicit
   serialization ADR — an FCBREP exact form is the candidate, and it

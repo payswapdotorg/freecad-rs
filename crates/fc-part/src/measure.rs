@@ -346,6 +346,7 @@ fn face_flux(brep: &ExactBRep, face: &TopoFace, i: usize) -> Result<f64, String>
 
 /// The per-face reading context: the shell, the face, its index, its
 /// orientation sign, and the recognition tolerance.
+#[derive(Clone, Copy)]
 struct FaceRef<'a> {
     brep: &'a ExactBRep,
     face: &'a TopoFace,
@@ -929,6 +930,13 @@ fn sphere_face(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<(f64, f64), Strin
     let (cc, axis, rho, forward) = match single {
         Some(x) if x.2 > 0.0 && !brep.is_degenerate(face.wires[0].edges[0].edge) => x,
         _ => {
+            // The spherical polygon (K4-2d/3): a single wire of
+            // great-circle arcs — the box×sphere bite patches. Falls
+            // through to the band reading when the structure is not
+            // that (closed circles and seams are the band's business).
+            if let Some(measures) = sphere_polygon(ctx, c, r)? {
+                return Ok(measures);
+            }
             // The band: exactly two single-use closed section circles
             // (the two latitude trims), with the kept sides facing
             // each other; everything else non-degenerate is the seam
@@ -1090,6 +1098,254 @@ fn sphere_band(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<(f64, f64), Strin
     let area = 2.0 * pi * r * (s_hi - s_lo);
     let flux = sigma * (r * area + c.dot(&d) * pi * (s_hi * s_hi - s_lo * s_lo));
     Ok((area, flux))
+}
+
+// ---------------------------------------------------------------------------
+// K4-2d/3 — the spherical polygon: a sphere face trimmed by one wire
+// of great-circle arcs (the box×sphere bite patches)
+// ---------------------------------------------------------------------------
+
+/// A circular arc's geometry, unified over the two representations
+/// this model carries: the open `Curve::Circle` arc and the rational
+/// quadratic B-spline arc (`conic_arc_of`, the `brep_boolean`
+/// construction's own). The normal is the unit axis the STORED
+/// parameterization runs CCW around (`p × ṗ` direction); the
+/// tangents are the unit tangents of the stored direction at the
+/// range's start and end.
+struct ArcGeom {
+    center: Vector3,
+    normal: Vector3,
+    radius: f64,
+    sweep: f64,
+    t_start: Vector3,
+    t_end: Vector3,
+}
+
+/// Recognize one edge as an arc, in the stored direction. `Ok(None)`
+/// for everything that is not an arc this reader knows (the closed
+/// circles are the cap/band business; other curves fall to those
+/// readers' own refusals).
+fn arc_geom_of(brep: &ExactBRep, edge: usize) -> Result<Option<ArcGeom>, String> {
+    let e = &brep.edges[edge];
+    if let Curve::Circle {
+        center,
+        axis,
+        ref_dir,
+        radius,
+    } = &e.curve
+    {
+        if e.start == e.end || *radius <= 0.0 {
+            return Ok(None);
+        }
+        // The K1 circle frame: unit axis and ref_dir, y' = axis ×
+        // ref_dir. Defensive normalization — authored frames are
+        // orthonormal and the last-bit perturbation is absorbed by
+        // the analytic formulas below. A zero-length axis or ref_dir
+        // is not an arc this reader knows.
+        let (Some(a_hat), Some(x_hat)) = (axis.normalized(), ref_dir.normalized()) else {
+            return Ok(None);
+        };
+        let y_hat = a_hat.cross(&x_hat);
+        // The tangent of the stored direction at parameter t.
+        let tangent = |t: f64| -> Vector3 {
+            let (s, c) = t.sin_cos();
+            v3(
+                -s * x_hat.x + c * y_hat.x,
+                -s * x_hat.y + c * y_hat.y,
+                -s * x_hat.z + c * y_hat.z,
+            )
+        };
+        return Ok(Some(ArcGeom {
+            center: *center,
+            normal: a_hat,
+            radius: *radius,
+            sweep: e.range.1 - e.range.0,
+            t_start: tangent(e.range.0),
+            t_end: tangent(e.range.1),
+        }));
+    }
+    // The rational quadratic arc: the K3d/K4-2d construction's own
+    // representation (and the reader's pinned arcs).
+    if let Some(arc) = conic_arc_of(&e.curve)? {
+        let Curve::Bspline { points, .. } = &e.curve else {
+            return Ok(None);
+        };
+        let (p0, pm, p2) = (points[0], points[1], points[2]);
+        let (Some(t_start), Some(t_end)) = (
+            v3(pm.x - p0.x, pm.y - p0.y, pm.z - p0.z).normalized(),
+            v3(p2.x - pm.x, p2.y - pm.y, p2.z - pm.z).normalized(),
+        ) else {
+            return Ok(None);
+        };
+        return Ok(Some(ArcGeom {
+            center: arc.center,
+            normal: arc.normal,
+            radius: arc.radius,
+            sweep: arc.sweep,
+            t_start,
+            t_end,
+        }));
+    }
+    Ok(None)
+}
+
+/// One recognized arc of the spherical polygon, in the wire's
+/// TRAVERSAL direction.
+struct PolyArc {
+    /// The traversal-signed great-circle normal (`p × ṗ`, unit).
+    normal: Vector3,
+    /// The sweep angle in `(0, 2π)`.
+    sweep: f64,
+    /// The unit traversal tangent at the departure vertex.
+    t_out: Vector3,
+    /// The unit traversal tangent at the arrival vertex.
+    t_in: Vector3,
+}
+
+/// The spherical polygon: a sphere face whose single wire is a
+/// closed loop of open arcs, each a **great circle** of the face's
+/// own sphere — the box×sphere bite patches of K4-2d/3 (the octant
+/// behind a corner bite, the quarter behind an edge bite, their
+/// complements), and any other such patch. The reading is exact, in
+/// closed form:
+///
+/// * the **area** is the spherical excess via Gauss–Bonnet — geodesic
+///   arcs carry no geodesic curvature, so `A = r²·(2π − s·Στᵢ)` with
+///   `τᵢ` the signed exterior turn at each vertex (right-hand around
+///   the unit radial `v̂ᵢ`) and `s = +1` unreversed / `−1` reversed
+///   (the traversal is the region-on-left walk against the face's
+///   OUTWARD normal — the negative orientation w.r.t. the radial when
+///   the face is reversed);
+/// * the **vector area** (outward-of-sphere oriented) is the Stokes
+///   line integral `½∮ p×dp = ½r²·Σ ±Θₖ·n̂ₖ` per arc, sign-corrected
+///   by the same `s`;
+/// * the **flux** of `p·n̂` is `σ·(c·V + r·A)` — `p = c + r·v̂` on the
+///   sphere, `p·n̂ = c·n̂ + r` against the solid's outward normal
+///   `σ·v̂`.
+///
+/// Degenerate edges (the pole glue some authors carry) are skipped:
+/// they map to a point and carry no turn. Anything else that is not
+/// a single-use open arc — closed circles, seams used twice,
+/// non-arc curves — is `None`: the cap/band readers own those shapes
+/// and their refusals.
+fn sphere_polygon(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<Option<(f64, f64)>, String> {
+    let FaceRef {
+        brep,
+        face,
+        i,
+        sigma,
+        tol,
+    } = ctx;
+    let pi = std::f64::consts::PI;
+    if face.wires.len() != 1 {
+        return Ok(None);
+    }
+    let wire = &face.wires[0];
+    // The single-use open arcs, in wire order; degenerate glue skips.
+    let mut uses: Vec<(usize, bool)> = Vec::new();
+    for we in &wire.edges {
+        if brep.is_degenerate(we.edge) {
+            continue;
+        }
+        uses.push((we.edge, we.forward));
+    }
+    if uses.len() < 2 {
+        return Ok(None);
+    }
+    for &(e, _) in &uses {
+        if uses.iter().filter(|(e2, _)| *e2 == e).count() != 1 {
+            return Ok(None); // a seam chain — the band's business
+        }
+        if brep.edges[e].start == brep.edges[e].end {
+            return Ok(None); // a closed circle — the cap/band business
+        }
+    }
+    // Recognize every arc; each must be a great circle of THIS sphere
+    // (its center is the sphere's center, its radius the sphere's).
+    let mut arcs: Vec<PolyArc> = Vec::with_capacity(uses.len());
+    for &(e, fwd) in &uses {
+        let g = match arc_geom_of(brep, e)? {
+            Some(g) => g,
+            None => return Ok(None), // not an arc this reader knows
+        };
+        let off = v3(g.center.x - c.x, g.center.y - c.y, g.center.z - c.z);
+        if off.length() > tol || (g.radius - r).abs() > tol * r.max(1.0) {
+            return Err(format!(
+                "face {i}: a spherical-polygon edge whose circle is not a great circle of \
+                 the face's sphere (center off by {}, radius off by {}) — refusing rather \
+                 than reading a small circle as a great one",
+                off.length(),
+                (g.radius - r).abs()
+            ));
+        }
+        let eps = if fwd { 1.0 } else { -1.0 };
+        let neg = |v: Vector3| v3(-v.x, -v.y, -v.z);
+        arcs.push(PolyArc {
+            normal: v3(g.normal.x * eps, g.normal.y * eps, g.normal.z * eps),
+            sweep: g.sweep,
+            t_out: if fwd { g.t_start } else { neg(g.t_end) },
+            t_in: if fwd { g.t_end } else { neg(g.t_start) },
+        });
+    }
+    // The junction turns: at each vertex where arc k arrives and arc
+    // k+1 departs (the wire order, closing the loop), the signed
+    // exterior turn around the unit radial.
+    let n = arcs.len();
+    let mut sum_tau = 0.0;
+    for k in 0..n {
+        let (e_k, f_k) = uses[k];
+        let (e_next, f_next) = uses[(k + 1) % n];
+        // The shared vertex: arc k's arrival, arc (k+1)'s departure
+        // (wire continuity — validated — chains them through any
+        // degenerate glue, which maps to the same point).
+        let v_arr = if f_k {
+            brep.edges[e_k].end
+        } else {
+            brep.edges[e_k].start
+        };
+        let v_dep = if f_next {
+            brep.edges[e_next].start
+        } else {
+            brep.edges[e_next].end
+        };
+        if v_arr != v_dep {
+            return Err(format!(
+                "face {i}: the spherical-polygon wire is not vertex-continuous at junction {k}"
+            ));
+        }
+        let p = brep.vertices[v_arr].point;
+        let Some(v_hat) = v3(p.x - c.x, p.y - c.y, p.z - c.z).normalized() else {
+            return Err(format!(
+                "face {i}: a spherical-polygon vertex at the sphere's center"
+            ));
+        };
+        let t_in = arcs[k].t_in;
+        let t_out = arcs[(k + 1) % n].t_out;
+        let cross = t_in.cross(&t_out);
+        sum_tau += v_hat.dot(&cross).atan2(t_in.dot(&t_out));
+    }
+    let s = sigma;
+    let area = r * r * (2.0 * pi - s * sum_tau);
+    if !(area > 0.0 && area < 4.0 * pi * r * r) {
+        return Err(format!(
+            "face {i}: the spherical-polygon wire does not bound a patch (area {area:.6} \
+             outside (0, 4πr²)) — the turn angles do not close a simple region"
+        ));
+    }
+    // The vector area, outward-of-sphere oriented: the traversal
+    // integral sign-corrected by s (reversed faces traverse the
+    // negative orientation w.r.t. the radial).
+    let mut v_vec = v3(0.0, 0.0, 0.0);
+    for arc in &arcs {
+        v_vec = v3(
+            v_vec.x + 0.5 * r * r * arc.sweep * arc.normal.x,
+            v_vec.y + 0.5 * r * r * arc.sweep * arc.normal.y,
+            v_vec.z + 0.5 * r * r * arc.sweep * arc.normal.z,
+        );
+    }
+    let v_vec = v3(s * v_vec.x, s * v_vec.y, s * v_vec.z);
+    let flux = sigma * (c.dot(&v_vec) + r * area);
+    Ok(Some((area, flux)))
 }
 
 // ---------------------------------------------------------------------------

@@ -4881,3 +4881,1305 @@ fn nested_chimney(
         faces,
     }
 }
+
+// ---------------------------------------------------------------------------
+// K4-2d/3 — box × sphere: the bite taxonomy on the box's boundary
+// skeleton
+// ---------------------------------------------------------------------------
+//
+// A loaded box-class operand (or any hexahedral box) meets a sphere
+// whose center sits exactly on the box's boundary skeleton — at a
+// corner (the bite is an octant ball), on an edge (a quarter ball
+// spanning the two adjacent faces), or on a face (a half ball behind
+// an interior circular hole). The three booleans are the face choices
+// of each station:
+//
+// * **Cut** — the box with the bite removed: the bitten adjacent
+//   faces (each losing its disk share, the boundary arc in the wire)
+//   + the untouched faces + the REVERSED spherical patch (the solid
+//   lies outside the sphere there);
+// * **Fuse** — the box plus the bulge (the ball's complement share):
+//   the SAME bitten faces (the disk shares are interior to the union)
+//   + the untouched faces + the unreversed complement patch — Cut and
+//   Fuse differ only in the patch's `reversed` flag and the region it
+//   keeps, the K3c-2 discipline;
+// * **Common** — the bite itself: the disk faces (quarter, half, or
+//   the full circle's disk) + the unreversed patch.
+//
+// The arc-bounded patches read through the spherical polygon
+// (measure's K4-2d/3 reading: Gauss–Bonnet excess area, the Stokes
+// vector area); the circle-bounded one through the cap. The authored
+// arcs are the classical NURBS arcs with canonical exact endpoints
+// (`push_arc_chain`), every shared vertex comes from one canonical
+// corner formula — the bit-exact contract — and the authored arc
+// directions chain all-forward into the patch's POSITIVE cycle (the
+// boundary orientation against the outward-of-sphere normal), a small
+// theorem this construction leans on, verified for both box
+// handednesses at every station.
+//
+// Honest refusals, by name, never approximated:
+// * the center OFF the skeleton (an interior center whose ball crosses
+//   faces, or a center outside the slabs) — the general spherical
+//   overlap is not constructed;
+// * the bite leaving its adjacent faces (r beyond an extent, or
+//   beyond the along-edge span) — exact tangency at a bound included;
+// * the center within recognition tolerance of a station but not
+//   bit-exactly on it — the section circles would not be great
+//   circles, and this kernel never silently snaps;
+// * the contained cut (the internal void — a second shell) and the
+//   disjoint fuse (a two-shell compound) — the family-wide refusals.
+//
+// The classification tolerances are recognition-scale (1e-9·scale:
+// which station, or none); everything CONSTRUCTED is exact.
+
+/// The box×sphere boolean. `o` is a corner; `a1`/`a2`/`a3` the unit
+/// axes (mutually perpendicular, either handedness); `l1`/`l2`/`l3`
+/// the extents along them; `cs`/`r` the sphere. Placements are
+/// applied analytically by the caller (the feature dispatch).
+#[allow(clippy::too_many_arguments)] // the box frame + dims + the sphere — the family's own vocabulary
+pub fn box_sphere_boolean(
+    op: BooleanOp,
+    o: Vector3,
+    a1: Vector3,
+    a2: Vector3,
+    a3: Vector3,
+    l1: f64,
+    l2: f64,
+    l3: f64,
+    cs: Vector3,
+    r: f64,
+) -> Result<BooleanOutcome, String> {
+    require_unit(a1, "box axis a1")?;
+    require_unit(a2, "box axis a2")?;
+    require_unit(a3, "box axis a3")?;
+    if (a1.dot(&a2)).abs() > 1e-9 || (a1.dot(&a3)).abs() > 1e-9 || (a2.dot(&a3)).abs() > 1e-9 {
+        return Err("the box axes must be mutually perpendicular".into());
+    }
+    if !(l1 > 0.0 && l2 > 0.0 && l3 > 0.0) {
+        return Err("the box extents must be positive".into());
+    }
+    if r <= 0.0 {
+        return Err("the sphere radius must be positive".into());
+    }
+    let scale = l1
+        .max(l2)
+        .max(l3)
+        .max(r)
+        .max(o.x.abs().max(o.y.abs()).max(o.z.abs()))
+        .max(cs.x.abs().max(cs.y.abs()).max(cs.z.abs()))
+        .max(1.0);
+    let eps = 1e-9 * scale;
+    let axes = [a1, a2, a3];
+    let dims = [l1, l2, l3];
+    let d = [
+        v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&a1),
+        v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&a2),
+        v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&a3),
+    ];
+
+    // ---- engulf: the box entirely inside the ball -------------------
+    // (convexity: all corners inside ⟹ the box inside; tangency
+    // included on purpose — the touched remnant is measure-zero).
+    let mut max_corner_d = 0.0f64;
+    for s in 0..8u8 {
+        let p = box_corner(o, axes, dims, [s & 1, (s >> 1) & 1, (s >> 2) & 1]);
+        let dd = v3(p.x - cs.x, p.y - cs.y, p.z - cs.z).length();
+        max_corner_d = max_corner_d.max(dd);
+    }
+    if max_corner_d <= r {
+        return Ok(match op {
+            BooleanOp::Cut => empty(),
+            BooleanOp::Fuse => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(sphere_brep_at(cs, r)),
+            },
+            BooleanOp::Common => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(whole_box_brep(o, axes, dims)),
+            },
+        });
+    }
+
+    // ---- disjoint (external tangency included) ----------------------
+    let mut min_d2 = 0.0f64;
+    for k in 0..3 {
+        let excess = if d[k] < 0.0 {
+            -d[k]
+        } else if d[k] > dims[k] {
+            d[k] - dims[k]
+        } else {
+            0.0
+        };
+        min_d2 += excess * excess;
+    }
+    if min_d2 >= r * r {
+        return Ok(match op {
+            BooleanOp::Cut => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(whole_box_brep(o, axes, dims)),
+            },
+            BooleanOp::Fuse => refused(
+                "disjoint fuse — the result is a two-shell compound, not a single closed shell",
+            ),
+            BooleanOp::Common => empty(),
+        });
+    }
+
+    // ---- contained: the ball entirely inside the box ----------------
+    if (0..3).all(|k| d[k] >= r && dims[k] - d[k] >= r) {
+        return Ok(match op {
+            BooleanOp::Cut => refused(
+                "contained cut — the internal void needs a second shell, not modeled in this \
+                 family (the sphere is entirely inside the box)",
+            ),
+            BooleanOp::Fuse => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(whole_box_brep(o, axes, dims)),
+            },
+            BooleanOp::Common => BooleanOutcome {
+                kind: BooleanOutcomeKind::Solid(sphere_brep_at(cs, r)),
+            },
+        });
+    }
+
+    // ---- the station classification ---------------------------------
+    // Per axis: OnLow / OnHigh (the center on that face's plane), In
+    // (strictly inside the slab), Out (outside the slabs).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Side {
+        OnLow,
+        OnHigh,
+        In,
+        Out,
+    }
+    let side = |k: usize| -> Side {
+        if d[k].abs() <= eps {
+            Side::OnLow
+        } else if (dims[k] - d[k]).abs() <= eps {
+            Side::OnHigh
+        } else if d[k] > 0.0 && d[k] < dims[k] {
+            Side::In
+        } else {
+            Side::Out
+        }
+    };
+    let sides = [side(0), side(1), side(2)];
+    if sides.contains(&Side::Out) {
+        return Ok(refused(
+            "the sphere's center is off the box's boundary skeleton (outside a slab) — the \
+             general spherical overlap is not constructed in this family",
+        ));
+    }
+    // The stations demand bit-exactness: the section circles are great
+    // circles of the operand sphere only when the center lies ON the
+    // face planes exactly as the arithmetic reads it.
+    for k in 0..3 {
+        if sides[k] != Side::In {
+            let off = if sides[k] == Side::OnHigh {
+                dims[k] - d[k]
+            } else {
+                d[k]
+            };
+            if off != 0.0 {
+                return Ok(refused(&format!(
+                    "the sphere's center is {off:.3e} from the box's face-{k} plane — within \
+                     recognition tolerance but not exactly on it; the section circles would not \
+                     be great circles, and this kernel never silently snaps (place the operand \
+                     exactly, or tessellate for the faceted workflow)"
+                )));
+            }
+        }
+    }
+    let sig = |k: usize| -> u8 {
+        if sides[k] == Side::OnHigh {
+            1
+        } else {
+            0
+        }
+    };
+    let on: Vec<usize> = (0..3).filter(|&k| sides[k] != Side::In).collect();
+    match on.len() {
+        3 => corner_station(op, o, axes, dims, cs, r, [sig(0), sig(1), sig(2)]),
+        2 => edge_station(
+            op,
+            o,
+            axes,
+            dims,
+            cs,
+            r,
+            [on[0], on[1]],
+            [sig(on[0]), sig(on[1])],
+        ),
+        1 => face_station(op, o, axes, dims, cs, r, on[0], sig(on[0])),
+        _ => Ok(refused(
+            "the sphere crosses the box's faces from an interior center — the general \
+             spherical section is not constructed in this family",
+        )),
+    }
+}
+
+/// The canonical corner `o + s1·(l1·a1) + s2·(l2·a2) + s3·(l3·a3)` in
+/// one fixed accumulation order — every face references these exact
+/// points, so shared corners are bit-identical across faces.
+fn box_corner(o: Vector3, axes: [Vector3; 3], dims: [f64; 3], s: [u8; 3]) -> Vector3 {
+    let mut p = o;
+    for k in 0..3 {
+        if s[k] == 1 {
+            p = v3(
+                p.x + dims[k] * axes[k].x,
+                p.y + dims[k] * axes[k].y,
+                p.z + dims[k] * axes[k].z,
+            );
+        }
+    }
+    p
+}
+
+/// The construction accumulators: vertices deduplicated by exact
+/// equality, edges appended once and reused (the shared box edges
+/// author once, every face reuses with its own traversal flag), faces
+/// appended.
+struct Draft {
+    vertices: Vec<TopoVertex>,
+    edges: Vec<TopoEdge>,
+    faces: Vec<TopoFace>,
+}
+
+impl Draft {
+    fn new() -> Self {
+        Draft {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            faces: Vec::new(),
+        }
+    }
+
+    fn vertex(&mut self, p: Vector3) -> usize {
+        match self.vertices.iter().position(|v| v.point == p) {
+            Some(i) => i,
+            None => {
+                self.vertices.push(TopoVertex { point: p });
+                self.vertices.len() - 1
+            }
+        }
+    }
+
+    /// One straight seam edge between exact canonical points,
+    /// find-or-append by the unordered endpoint pair. Returns the edge
+    /// index and the traversal flag for the a→b direction of THIS
+    /// call.
+    fn seam(&mut self, a: Vector3, b: Vector3) -> (usize, bool) {
+        let ia = self.vertex(a);
+        let ib = self.vertex(b);
+        for (ei, e) in self.edges.iter().enumerate() {
+            if let Curve::Bspline {
+                degree: 1, points, ..
+            } = &e.curve
+            {
+                if points.len() == 2
+                    && (e.start == ia && e.end == ib || e.start == ib && e.end == ia)
+                {
+                    return (ei, e.start == ia);
+                }
+            }
+        }
+        self.edges.push(seam_between(a, b, ia, ib));
+        (self.edges.len() - 1, true)
+    }
+
+    /// One arc chain (the classical NURBS arcs, canonical exact
+    /// endpoints); the vertices for `p_start`/`p_end` are found or
+    /// added. Returns the chain.
+    #[allow(clippy::too_many_arguments)] // push_arc_chain's own vocabulary
+    fn arc(
+        &mut self,
+        center: Vector3,
+        x_hat: Vector3,
+        y_hat: Vector3,
+        radius: f64,
+        p_start: Vector3,
+        p_end: Vector3,
+        theta_start: f64,
+        sweep: f64,
+    ) -> ArcChain {
+        let v_start = self.vertex(p_start);
+        let v_end = self.vertex(p_end);
+        push_arc_chain(
+            &mut self.vertices,
+            &mut self.edges,
+            center,
+            x_hat,
+            y_hat,
+            radius,
+            p_start,
+            p_end,
+            theta_start,
+            sweep,
+            v_start,
+            v_end,
+        )
+    }
+
+    /// One closed circle edge with its own seam vertex; the edge index.
+    fn circle(&mut self, curve: Curve) -> usize {
+        let vi = self.vertices.len();
+        self.vertices.push(TopoVertex {
+            point: curve.point(0.0),
+        });
+        self.edges.push(TopoEdge {
+            curve,
+            range: (0.0, std::f64::consts::TAU),
+            start: vi,
+            end: vi,
+        });
+        self.edges.len() - 1
+    }
+
+    /// The chain's uses for the traversal `from → to` (the chain must
+    /// connect exactly those vertices).
+    fn chain_use_between(&self, chain: &ArcChain, from: usize, to: usize) -> Vec<WireEdge> {
+        let s = self.edges[chain.edges[0]].start;
+        let e = self.edges[chain.edges[chain.edges.len() - 1]].end;
+        if s == from && e == to {
+            chain_uses(chain, true)
+        } else if s == to && e == from {
+            chain_uses(chain, false)
+        } else {
+            panic!("the arc chain does not connect the walk's vertices")
+        }
+    }
+
+    fn finish(self) -> Result<ExactBRep, String> {
+        let brep = ExactBRep {
+            vertices: self.vertices,
+            edges: self.edges,
+            faces: self.faces,
+        };
+        brep.validate()
+            .map_err(|e| format!("the constructed solid failed validation: {e}"))?;
+        Ok(brep)
+    }
+}
+
+/// A full rectangle face: the four canonical corners in CCW order
+/// against the outward normal, the frame `(e_a, e_b)` right-handed
+/// against it, the walk four seams (flags per call — shared edges
+/// oppose), `reversed = false`.
+#[allow(clippy::too_many_arguments)] // the frame + corners + extents
+fn rect_face(
+    draft: &mut Draft,
+    c00: Vector3,
+    c10: Vector3,
+    c11: Vector3,
+    c01: Vector3,
+    n_out: Vector3,
+    e_a: Vector3,
+    _e_b: Vector3,
+    la: f64,
+    lb: f64,
+) {
+    let w = [
+        draft.seam(c00, c10),
+        draft.seam(c10, c11),
+        draft.seam(c11, c01),
+        draft.seam(c01, c00),
+    ];
+    draft.faces.push(TopoFace {
+        surface: Surface::Plane {
+            origin: c00,
+            normal: n_out,
+            x_dir: e_a,
+        },
+        uv_bounds: [0.0, la, 0.0, lb],
+        wires: vec![TopoWire {
+            edges: w
+                .iter()
+                .map(|&(e, f)| WireEdge {
+                    edge: e,
+                    forward: f,
+                })
+                .collect(),
+        }],
+        reversed: false,
+    });
+}
+
+/// The whole box: six rectangle faces over the canonical corners.
+fn whole_box_brep(o: Vector3, axes: [Vector3; 3], dims: [f64; 3]) -> ExactBRep {
+    let mut draft = Draft::new();
+    for k in 0..3 {
+        for &high in &[false, true] {
+            let n_out = if high {
+                axes[k]
+            } else {
+                v3(-axes[k].x, -axes[k].y, -axes[k].z)
+            };
+            let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+            let (ia, ib) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out) > 0.0 {
+                (span[0], span[1])
+            } else {
+                (span[1], span[0])
+            };
+            let s_of = |a: u8, b: u8| -> [u8; 3] {
+                let mut s = [0u8, 0, 0];
+                s[k] = high as u8;
+                s[ia] = a;
+                s[ib] = b;
+                s
+            };
+            rect_face(
+                &mut draft,
+                box_corner(o, axes, dims, s_of(0, 0)),
+                box_corner(o, axes, dims, s_of(1, 0)),
+                box_corner(o, axes, dims, s_of(1, 1)),
+                box_corner(o, axes, dims, s_of(0, 1)),
+                n_out,
+                axes[ia],
+                axes[ib],
+                dims[ia],
+                dims[ib],
+            );
+        }
+    }
+    draft
+        .finish()
+        .expect("the whole box validates by construction")
+}
+
+/// The sphere patch face over one closed cycle of arc chains: the
+/// full natural UV box, the wire the chained uses (all forward, in
+/// cycle order; the reversed cycle for `negate`), and the `reversed`
+/// flag.
+fn patch_face(surface: Surface, chains: &[&ArcChain], negate: bool, reversed: bool) -> TopoFace {
+    let mut uses: Vec<WireEdge> = Vec::new();
+    if negate {
+        for chain in chains.iter().rev() {
+            uses.extend(chain_uses(chain, false));
+        }
+    } else {
+        for chain in chains {
+            uses.extend(chain_uses(chain, true));
+        }
+    }
+    TopoFace {
+        surface,
+        uv_bounds: [
+            0.0,
+            std::f64::consts::TAU,
+            -std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+        ],
+        wires: vec![TopoWire { edges: uses }],
+        reversed,
+    }
+}
+
+/// Chain the arcs (each used forward) into the closed cycle starting
+/// at the vertex `start`: follow each chain's arrival vertex to the
+/// next chain's departure. Returns the chain indices in cycle order —
+/// the POSITIVE cycle (the authored directions chain into it, both
+/// box handednesses, every station).
+fn arc_cycle_order(draft: &Draft, chains: &[ArcChain], start: usize) -> Vec<usize> {
+    let span_of = |c: &ArcChain| -> (usize, usize) {
+        let s = draft.edges[c.edges[0]].start;
+        let e = draft.edges[c.edges[c.edges.len() - 1]].end;
+        (s, e)
+    };
+    let mut order: Vec<usize> = Vec::new();
+    let mut at = start;
+    while order.len() < chains.len() {
+        let next = (0..chains.len())
+            .find(|&ci| !order.contains(&ci) && span_of(&chains[ci]).0 == at)
+            .expect("the arcs chain into a closed cycle");
+        at = span_of(&chains[next]).1;
+        order.push(next);
+    }
+    order
+}
+
+// ---------------------------------------------------------------------------
+// the corner station — the octant bite
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)] // the box frame is the vocabulary
+fn corner_station(
+    op: BooleanOp,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    cs: Vector3,
+    r: f64,
+    sig: [u8; 3],
+) -> Result<BooleanOutcome, String> {
+    let p_corner = box_corner(o, axes, dims, sig);
+    if cs != p_corner {
+        return Ok(refused(&format!(
+            "the sphere's center is off the corner point by ({:.3e}, {:.3e}, {:.3e}) — the \
+             station demands the exact corner; this kernel never silently snaps",
+            cs.x - p_corner.x,
+            cs.y - p_corner.y,
+            cs.z - p_corner.z
+        )));
+    }
+    // The bite must stay within all three adjacent faces: the
+    // quarter-disk on the face ⟂ u_k needs r below the two other
+    // extents, and the three together bind at the minimum extent.
+    if r >= dims[0].min(dims[1]).min(dims[2]) {
+        return Ok(refused(
+            "the corner bite leaves the box's adjacent faces (r is not below every extent) — \
+             the octant bite is the only corner construction in this family",
+        ));
+    }
+    // The interior directions and the far-side s-entries.
+    let u: [Vector3; 3] = std::array::from_fn(|k| {
+        if sig[k] == 1 {
+            v3(-axes[k].x, -axes[k].y, -axes[k].z)
+        } else {
+            axes[k]
+        }
+    });
+    let s_far = |k: usize| -> u8 {
+        if sig[k] == 1 {
+            0
+        } else {
+            1
+        }
+    };
+    // The axis points on the three edges from the corner — canonical.
+    let x_pt = |k: usize| {
+        v3(
+            p_corner.x + r * u[k].x,
+            p_corner.y + r * u[k].y,
+            p_corner.z + r * u[k].z,
+        )
+    };
+    let sphere_surface = Surface::Sphere {
+        center: cs,
+        axis: u[2],
+        ref_dir: u[0],
+        radius: r,
+    };
+    // The face F_k's frame and corners (shared by the bitten and the
+    // quarter-disk variants).
+    let frame_of = |k: usize| -> (usize, usize) {
+        let n_out = v3(-u[k].x, -u[k].y, -u[k].z);
+        let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+        if u[span[0]].cross(&u[span[1]]).dot(&n_out) > 0.0 {
+            (span[0], span[1])
+        } else {
+            (span[1], span[0])
+        }
+    };
+    let corners_of = |ia: usize, ib: usize| -> (Vector3, Vector3, Vector3, Vector3) {
+        let s_of = |a: u8, b: u8| -> [u8; 3] {
+            let mut s = sig;
+            s[ia] = if a == 1 { s_far(ia) } else { sig[ia] };
+            s[ib] = if b == 1 { s_far(ib) } else { sig[ib] };
+            s
+        };
+        (
+            box_corner(o, axes, dims, s_of(0, 0)),
+            box_corner(o, axes, dims, s_of(1, 0)),
+            box_corner(o, axes, dims, s_of(1, 1)),
+            box_corner(o, axes, dims, s_of(0, 1)),
+        )
+    };
+
+    // ---- Cut / Fuse: the six box faces (the adjacent ones bitten) --
+    let bite_solid = |negate: bool, reversed: bool| -> Result<ExactBRep, String> {
+        let mut draft = Draft::new();
+        let mut arcs: Vec<ArcChain> = Vec::new();
+        for k in 0..3 {
+            let n_out = v3(-u[k].x, -u[k].y, -u[k].z);
+            let (ia, ib) = frame_of(k);
+            let (c00, c10, c11, c01) = corners_of(ia, ib);
+            // The bite arc: from X_{e_b} to X_{e_a}, CCW around
+            // (e_b × e_a) — the INWARD normal — authored exactly in
+            // the walk's direction.
+            let chain = draft.arc(
+                p_corner,
+                u[ib],
+                u[ia],
+                r,
+                x_pt(ib),
+                x_pt(ia),
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+            arcs.push(chain);
+            // The CCW walk: X_ea → c10 → c11 → c01 → X_eb → arc → X_ea.
+            let lines = [
+                draft.seam(x_pt(ia), c10),
+                draft.seam(c10, c11),
+                draft.seam(c11, c01),
+                draft.seam(c01, x_pt(ib)),
+            ];
+            let mut uses: Vec<WireEdge> = lines
+                .iter()
+                .map(|&(e, f)| WireEdge {
+                    edge: e,
+                    forward: f,
+                })
+                .collect();
+            uses.extend(chain_uses(&arcs[k], true));
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: u[ia],
+                },
+                uv_bounds: [0.0, dims[ia], 0.0, dims[ib]],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // The three opposite faces: plain rectangles.
+        for k in 0..3 {
+            let n_out = u[k];
+            let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+            let (ia, ib) = if u[span[0]].cross(&u[span[1]]).dot(&n_out) > 0.0 {
+                (span[0], span[1])
+            } else {
+                (span[1], span[0])
+            };
+            let s_of = |a: u8, b: u8| -> [u8; 3] {
+                let mut s = sig;
+                s[k] = s_far(k);
+                s[ia] = if a == 1 { s_far(ia) } else { sig[ia] };
+                s[ib] = if b == 1 { s_far(ib) } else { sig[ib] };
+                s
+            };
+            rect_face(
+                &mut draft,
+                box_corner(o, axes, dims, s_of(0, 0)),
+                box_corner(o, axes, dims, s_of(1, 0)),
+                box_corner(o, axes, dims, s_of(1, 1)),
+                box_corner(o, axes, dims, s_of(0, 1)),
+                n_out,
+                u[ia],
+                u[ib],
+                dims[ia],
+                dims[ib],
+            );
+        }
+        // The patch on the NEGATIVE cycle (Cut's reversed bite patch,
+        // Fuse's complement bulge).
+        let v_x0 = draft.vertex(x_pt(0));
+        let order = arc_cycle_order(&draft, &arcs, v_x0);
+        let cycle: Vec<&ArcChain> = order.iter().map(|&ci| &arcs[ci]).collect();
+        draft
+            .faces
+            .push(patch_face(sphere_surface.clone(), &cycle, negate, reversed));
+        draft.finish()
+    };
+
+    // ---- Common: the octant ball (three quarter-disks + patch) ----
+    let octant_ball = || -> Result<ExactBRep, String> {
+        let mut draft = Draft::new();
+        let mut arcs: Vec<ArcChain> = Vec::new();
+        for k in 0..3 {
+            let n_out = v3(-u[k].x, -u[k].y, -u[k].z);
+            let (ia, ib) = frame_of(k);
+            // The quarter-disk face: the walk X_ea → arc → X_eb → P →
+            // X_ea (the arc backward — the authored direction is
+            // X_eb → X_ea).
+            let chain = draft.arc(
+                p_corner,
+                u[ib],
+                u[ia],
+                r,
+                x_pt(ib),
+                x_pt(ia),
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+            arcs.push(chain);
+            let v_xa = draft.vertex(x_pt(ia));
+            let v_xb = draft.vertex(x_pt(ib));
+            let mut uses = draft.chain_use_between(&arcs[k], v_xa, v_xb);
+            let d1 = draft.seam(x_pt(ib), p_corner);
+            uses.push(WireEdge {
+                edge: d1.0,
+                forward: d1.1,
+            });
+            let d2 = draft.seam(p_corner, x_pt(ia));
+            uses.push(WireEdge {
+                edge: d2.0,
+                forward: d2.1,
+            });
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: p_corner,
+                    normal: n_out,
+                    x_dir: u[ia],
+                },
+                uv_bounds: [0.0, r, 0.0, r],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        let v_x0 = draft.vertex(x_pt(0));
+        let order = arc_cycle_order(&draft, &arcs, v_x0);
+        let cycle: Vec<&ArcChain> = order.iter().map(|&ci| &arcs[ci]).collect();
+        draft
+            .faces
+            .push(patch_face(sphere_surface.clone(), &cycle, false, false));
+        draft.finish()
+    };
+
+    let brep = match op {
+        BooleanOp::Cut => bite_solid(true, true)?,
+        BooleanOp::Fuse => bite_solid(true, false)?,
+        BooleanOp::Common => octant_ball()?,
+    };
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// the edge station — the quarter-ball bite
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)] // the box frame is the vocabulary
+fn edge_station(
+    op: BooleanOp,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    cs: Vector3,
+    r: f64,
+    on: [usize; 2],
+    sig_on: [u8; 2],
+) -> Result<BooleanOutcome, String> {
+    let [p, q] = on; // the two axes whose faces carry the center
+    let e = 3 - p - q; // the along-edge axis
+    let d = |k: usize| v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&axes[k]);
+    let t = d(e);
+    // The interior directions of the two adjacent faces.
+    let u_p = if sig_on[0] == 1 {
+        v3(-axes[p].x, -axes[p].y, -axes[p].z)
+    } else {
+        axes[p]
+    };
+    let u_q = if sig_on[1] == 1 {
+        v3(-axes[q].x, -axes[q].y, -axes[q].z)
+    } else {
+        axes[q]
+    };
+    // The bite must stay within the two faces and the edge span.
+    if !(r < t && r < dims[e] - t && r < dims[p] && r < dims[q]) {
+        return Ok(refused(
+            "the edge bite leaves its adjacent faces or the edge span — the quarter-ball bite \
+             is the only edge construction in this family",
+        ));
+    }
+    let a_e = axes[e];
+    let neg_a_e = v3(-a_e.x, -a_e.y, -a_e.z);
+    // The station points, canonical: the two edge-axis points and the
+    // two in-face apexes.
+    let a_pt = v3(cs.x - r * a_e.x, cs.y - r * a_e.y, cs.z - r * a_e.z);
+    let b_pt = v3(cs.x + r * a_e.x, cs.y + r * a_e.y, cs.z + r * a_e.z);
+    // The local-to-global corner mapping: local (se along the edge,
+    // sp along u_p, sq along u_q).
+    let s_edge = |se: u8, sp: u8, sq: u8| -> [u8; 3] {
+        let mut s = [0u8, 0, 0];
+        s[e] = se;
+        s[p] = if u_p == axes[p] { sp } else { 1 - sp };
+        s[q] = if u_q == axes[q] { sq } else { 1 - sq };
+        s
+    };
+    let corner = |se: u8, sp: u8, sq: u8| box_corner(o, axes, dims, s_edge(se, sp, sq));
+    // The frame parity: (a_e × u_p) · u_q = ±1. par > 0: F_p spans
+    // (a_e, u_q) with the bite on its e_a boundary (the walk a_pt →
+    // arc → b_pt), F_q spans (u_p, a_e) with the bite on its e_b
+    // boundary (the walk b_pt → arc → a_pt); par < 0 mirrors both.
+    let par = a_e.cross(&u_p).dot(&u_q);
+    let sphere_surface = Surface::Sphere {
+        center: cs,
+        axis: u_p,
+        ref_dir: a_e,
+        radius: r,
+    };
+    // The four untouched faces: far-p, far-q, and the two e-ends.
+    let untouched = |draft: &mut Draft| {
+        // The far sides: opposite the station's faces (u_p == axes[p]
+        // means the station sits on the LOW face, so far is HIGH).
+        for (k, high) in [
+            (p, u_p == axes[p]),
+            (q, u_q == axes[q]),
+            (e, false),
+            (e, true),
+        ] {
+            let n_out = if high {
+                axes[k]
+            } else {
+                v3(-axes[k].x, -axes[k].y, -axes[k].z)
+            };
+            let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+            let (ia, ib) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out) > 0.0 {
+                (span[0], span[1])
+            } else {
+                (span[1], span[0])
+            };
+            let s_of = |a: u8, b: u8| -> [u8; 3] {
+                let mut s = [0u8, 0, 0];
+                s[k] = high as u8;
+                s[ia] = a;
+                s[ib] = b;
+                s
+            };
+            rect_face(
+                draft,
+                box_corner(o, axes, dims, s_of(0, 0)),
+                box_corner(o, axes, dims, s_of(1, 0)),
+                box_corner(o, axes, dims, s_of(1, 1)),
+                box_corner(o, axes, dims, s_of(0, 1)),
+                n_out,
+                axes[ia],
+                axes[ib],
+                dims[ia],
+                dims[ib],
+            );
+        }
+    };
+
+    // ---- Cut / Fuse ------------------------------------------------
+    let bite_solid = |negate: bool, reversed: bool| -> Result<ExactBRep, String> {
+        let mut draft = Draft::new();
+        // F_p's bite arc: through x_q, authored a_pt → b_pt (par > 0)
+        // or b_pt → a_pt (par < 0) — the walk's direction, CCW around
+        // F_p's inward normal.
+        let arc_p = draft.arc(
+            cs,
+            if par > 0.0 { neg_a_e } else { a_e },
+            u_q,
+            r,
+            if par > 0.0 { a_pt } else { b_pt },
+            if par > 0.0 { b_pt } else { a_pt },
+            0.0,
+            std::f64::consts::PI,
+        );
+        // F_q's bite arc: through x_p, authored b_pt → a_pt (par > 0)
+        // or a_pt → b_pt (par < 0).
+        let arc_q = draft.arc(
+            cs,
+            if par > 0.0 { a_e } else { neg_a_e },
+            u_p,
+            r,
+            if par > 0.0 { b_pt } else { a_pt },
+            if par > 0.0 { a_pt } else { b_pt },
+            0.0,
+            std::f64::consts::PI,
+        );
+        // F_p: the CCW walk with the bite on the a_e boundary.
+        {
+            let n_out = v3(-u_p.x, -u_p.y, -u_p.z);
+            let c00 = corner(0, 0, 0);
+            let c10 = corner(1, 0, 0);
+            let c11 = corner(1, 0, 1);
+            let c01 = corner(0, 0, 1);
+            let (e_a, la, lb) = if par > 0.0 {
+                (a_e, dims[e], dims[q])
+            } else {
+                (u_q, dims[q], dims[e])
+            };
+            let mut uses: Vec<WireEdge> = Vec::new();
+            let mut walk = |from: Vector3, to: Vector3, uses: &mut Vec<WireEdge>| {
+                let s = draft.seam(from, to);
+                uses.push(WireEdge {
+                    edge: s.0,
+                    forward: s.1,
+                });
+            };
+            if par > 0.0 {
+                // c00 → a_pt → arc → b_pt → c10 → c11 → c01 → c00.
+                walk(c00, a_pt, &mut uses);
+                uses.extend(chain_uses(&arc_p, true));
+                walk(b_pt, c10, &mut uses);
+                walk(c10, c11, &mut uses);
+                walk(c11, c01, &mut uses);
+                walk(c01, c00, &mut uses);
+            } else {
+                // c00 → c10 → c11 → c01 → b_pt → arc → a_pt → c00.
+                walk(c00, c10, &mut uses);
+                walk(c10, c11, &mut uses);
+                walk(c11, c01, &mut uses);
+                walk(c01, b_pt, &mut uses);
+                uses.extend(chain_uses(&arc_p, true));
+                walk(a_pt, c00, &mut uses);
+            }
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [0.0, la, 0.0, lb],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // F_q: the CCW walk with the bite on the a_e boundary
+        // (par < 0) or the e_b boundary (par > 0).
+        {
+            let n_out = v3(-u_q.x, -u_q.y, -u_q.z);
+            let c00 = corner(0, 0, 0);
+            let c10 = corner(0, 1, 0);
+            let c11 = corner(1, 1, 0);
+            let c01 = corner(1, 0, 0);
+            let (e_a, la, lb) = if par > 0.0 {
+                (u_p, dims[p], dims[e])
+            } else {
+                (a_e, dims[e], dims[p])
+            };
+            let mut uses: Vec<WireEdge> = Vec::new();
+            let mut walk = |from: Vector3, to: Vector3, uses: &mut Vec<WireEdge>| {
+                let s = draft.seam(from, to);
+                uses.push(WireEdge {
+                    edge: s.0,
+                    forward: s.1,
+                });
+            };
+            if par > 0.0 {
+                // c00 → c10 → c11 → c01 → b_pt → arc → a_pt → c00.
+                walk(c00, c10, &mut uses);
+                walk(c10, c11, &mut uses);
+                walk(c11, c01, &mut uses);
+                walk(c01, b_pt, &mut uses);
+                uses.extend(chain_uses(&arc_q, true));
+                walk(a_pt, c00, &mut uses);
+            } else {
+                // c00 → a_pt → arc → b_pt → c10 → c11 → c01 → c00.
+                walk(c00, a_pt, &mut uses);
+                uses.extend(chain_uses(&arc_q, true));
+                walk(b_pt, c10, &mut uses);
+                walk(c10, c11, &mut uses);
+                walk(c11, c01, &mut uses);
+                walk(c01, c00, &mut uses);
+            }
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [0.0, la, 0.0, lb],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        untouched(&mut draft);
+        // The patch on the NEGATIVE cycle: the arcs chained
+        // all-forward from a_pt (the positive cycle), then negated.
+        let chains = vec![arc_p, arc_q];
+        let v_a = draft.vertex(a_pt);
+        let order = arc_cycle_order(&draft, &chains, v_a);
+        let cycle: Vec<&ArcChain> = order.iter().map(|&ci| &chains[ci]).collect();
+        draft
+            .faces
+            .push(patch_face(sphere_surface.clone(), &cycle, negate, reversed));
+        draft.finish()
+    };
+
+    // ---- Common: the quarter ball (two half-disks + patch) --------
+    let quarter_ball = || -> Result<ExactBRep, String> {
+        let mut draft = Draft::new();
+        // The same authored directions as the bitten faces (through
+        // x_q from a_pt when par > 0, etc.) — the walks below use
+        // `chain_use_between`, so only connectivity matters.
+        let arc_p = draft.arc(
+            cs,
+            if par > 0.0 { neg_a_e } else { a_e },
+            u_q,
+            r,
+            if par > 0.0 { a_pt } else { b_pt },
+            if par > 0.0 { b_pt } else { a_pt },
+            0.0,
+            std::f64::consts::PI,
+        );
+        let arc_q = draft.arc(
+            cs,
+            if par > 0.0 { a_e } else { neg_a_e },
+            u_p,
+            r,
+            if par > 0.0 { b_pt } else { a_pt },
+            if par > 0.0 { a_pt } else { b_pt },
+            0.0,
+            std::f64::consts::PI,
+        );
+        let v_a = draft.vertex(a_pt);
+        let v_b = draft.vertex(b_pt);
+        // F_p's half-disk (in F_p's plane, through x_q): the walk
+        // a_pt → diameter → b_pt → arc → a_pt.
+        {
+            let (uses_dia, fwd_dia) = draft.seam(a_pt, b_pt);
+            let mut uses = vec![WireEdge {
+                edge: uses_dia,
+                forward: fwd_dia,
+            }];
+            uses.extend(draft.chain_use_between(&arc_p, v_b, v_a));
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: cs,
+                    normal: v3(-u_p.x, -u_p.y, -u_p.z),
+                    x_dir: a_e,
+                },
+                uv_bounds: [-r, r, 0.0, r],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // F_q's half-disk (in F_q's plane, through x_p): the walk
+        // b_pt → diameter → a_pt → arc → b_pt.
+        {
+            let (uses_dia, fwd_dia) = draft.seam(b_pt, a_pt);
+            let mut uses = vec![WireEdge {
+                edge: uses_dia,
+                forward: fwd_dia,
+            }];
+            uses.extend(draft.chain_use_between(&arc_q, v_a, v_b));
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: cs,
+                    normal: v3(-u_q.x, -u_q.y, -u_q.z),
+                    x_dir: u_p,
+                },
+                uv_bounds: [0.0, r, -r, r],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // The patch on the POSITIVE cycle.
+        let chains = vec![arc_p, arc_q];
+        let order = arc_cycle_order(&draft, &chains, v_a);
+        let cycle: Vec<&ArcChain> = order.iter().map(|&ci| &chains[ci]).collect();
+        draft
+            .faces
+            .push(patch_face(sphere_surface.clone(), &cycle, false, false));
+        draft.finish()
+    };
+
+    let brep = match op {
+        BooleanOp::Cut => bite_solid(true, true)?,
+        BooleanOp::Fuse => bite_solid(true, false)?,
+        BooleanOp::Common => quarter_ball()?,
+    };
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// the face station — the half-ball bite behind a circular hole
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)] // the box frame is the vocabulary
+fn face_station(
+    op: BooleanOp,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    cs: Vector3,
+    r: f64,
+    n: usize,
+    sig_n: u8,
+) -> Result<BooleanOutcome, String> {
+    let d = |k: usize| v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&axes[k]);
+    let others: Vec<usize> = (0..3).filter(|&m| m != n).collect();
+    let (i, j) = (others[0], others[1]);
+    // The interior direction of the station's face.
+    let u_n = if sig_n == 1 {
+        v3(-axes[n].x, -axes[n].y, -axes[n].z)
+    } else {
+        axes[n]
+    };
+    // The bite must stay interior to the face and within the depth.
+    if !(r < d(i) && r < dims[i] - d(i) && r < d(j) && r < dims[j] - d(j) && r < dims[n]) {
+        return Ok(refused(
+            "the face bite's circle leaves the face (or the half ball exceeds the depth) — the \
+             interior-hole construction is the only face bite in this family",
+        ));
+    }
+    let n_out = v3(-u_n.x, -u_n.y, -u_n.z);
+    // The face's frame: (e_a, e_b) from {a_i, a_j}, right-handed
+    // against n_out.
+    let (ia, ib) = if axes[i].cross(&axes[j]).dot(&n_out) > 0.0 {
+        (i, j)
+    } else {
+        (j, i)
+    };
+    let e_a = axes[ia];
+    // The station face's side entry (the plane the center sits on).
+    let s_n = if u_n == axes[n] { 0u8 } else { 1 };
+    let s_face = |a: u8, b: u8| -> [u8; 3] {
+        let mut s = [0u8, 0, 0];
+        s[n] = s_n;
+        s[ia] = a;
+        s[ib] = b;
+        s
+    };
+    // The section circle: a great circle of the sphere (the center
+    // is ON the face plane, bit-exact by the station demand), stored
+    // CCW around the INWARD normal u_n.
+    let circle_curve = Curve::Circle {
+        center: cs,
+        axis: u_n,
+        ref_dir: e_a,
+        radius: r,
+    };
+    let sphere_surface = Surface::Sphere {
+        center: cs,
+        axis: u_n,
+        ref_dir: e_a,
+        radius: r,
+    };
+
+    let brep = match op {
+        BooleanOp::Cut | BooleanOp::Fuse => {
+            let mut draft = Draft::new();
+            let circle_edge = draft.circle(circle_curve.clone());
+            // The five untouched faces.
+            for k in 0..3 {
+                for high in [false, true] {
+                    // Skip the station's own face (holed below).
+                    if k == n && ((u_n == axes[n] && !high) || (u_n != axes[n] && high)) {
+                        continue;
+                    }
+                    let n_out_k = if high {
+                        axes[k]
+                    } else {
+                        v3(-axes[k].x, -axes[k].y, -axes[k].z)
+                    };
+                    let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+                    let (ka, kb) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out_k) > 0.0 {
+                        (span[0], span[1])
+                    } else {
+                        (span[1], span[0])
+                    };
+                    let s_of = |a: u8, b: u8| -> [u8; 3] {
+                        let mut s = [0u8, 0, 0];
+                        s[k] = high as u8;
+                        s[ka] = a;
+                        s[kb] = b;
+                        s
+                    };
+                    rect_face(
+                        &mut draft,
+                        box_corner(o, axes, dims, s_of(0, 0)),
+                        box_corner(o, axes, dims, s_of(1, 0)),
+                        box_corner(o, axes, dims, s_of(1, 1)),
+                        box_corner(o, axes, dims, s_of(0, 1)),
+                        n_out_k,
+                        axes[ka],
+                        axes[kb],
+                        dims[ka],
+                        dims[kb],
+                    );
+                }
+            }
+            // The holed face: the outer rectangle CCW + the hole
+            // circle forward (CCW around the inward normal — the
+            // region-on-left rule for holes).
+            let c00 = box_corner(o, axes, dims, s_face(0, 0));
+            let c10 = box_corner(o, axes, dims, s_face(1, 0));
+            let c11 = box_corner(o, axes, dims, s_face(1, 1));
+            let c01 = box_corner(o, axes, dims, s_face(0, 1));
+            let outer = [
+                draft.seam(c00, c10),
+                draft.seam(c10, c11),
+                draft.seam(c11, c01),
+                draft.seam(c01, c00),
+            ];
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [0.0, dims[ia], 0.0, dims[ib]],
+                wires: vec![
+                    TopoWire {
+                        edges: outer
+                            .iter()
+                            .map(|&(ed, f)| WireEdge {
+                                edge: ed,
+                                forward: f,
+                            })
+                            .collect(),
+                    },
+                    TopoWire {
+                        edges: vec![WireEdge {
+                            edge: circle_edge,
+                            forward: true,
+                        }],
+                    },
+                ],
+                reversed: false,
+            });
+            // The hemisphere patch: the station's INWARD side for Cut
+            // (reversed — the solid lies outside the sphere), the
+            // OUTWARD side for Fuse (unreversed); both traverse the
+            // circle backward (the negative orientation w.r.t. the
+            // stored axis — the kept side follows from the cap rule).
+            let reversed = op == BooleanOp::Cut;
+            draft.faces.push(TopoFace {
+                surface: sphere_surface,
+                uv_bounds: [
+                    0.0,
+                    std::f64::consts::TAU,
+                    -std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::FRAC_PI_2,
+                ],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: circle_edge,
+                        forward: false,
+                    }],
+                }],
+                reversed,
+            });
+            draft.finish()?
+        }
+        BooleanOp::Common => {
+            // The half ball: the flat disk + the cap, sharing the
+            // circle in opposite directions.
+            let mut draft = Draft::new();
+            let circle_edge = draft.circle(circle_curve);
+            // The disk (outward −u_n): the circle backward.
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: cs,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [-r, r, -r, r],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: circle_edge,
+                        forward: false,
+                    }],
+                }],
+                reversed: false,
+            });
+            // The cap (the +u_n hemisphere, unreversed): the circle
+            // forward.
+            draft.faces.push(TopoFace {
+                surface: sphere_surface,
+                uv_bounds: [
+                    0.0,
+                    std::f64::consts::TAU,
+                    -std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::FRAC_PI_2,
+                ],
+                wires: vec![TopoWire {
+                    edges: vec![WireEdge {
+                        edge: circle_edge,
+                        forward: true,
+                    }],
+                }],
+                reversed: false,
+            });
+            draft.finish()?
+        }
+    };
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
+}

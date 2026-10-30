@@ -16,8 +16,8 @@ use fc_app::{impl_document_object, Document, DocumentObject, Property, PropertyC
 use fc_base::{Matrix4, Placement, Vector3};
 
 use crate::brep_boolean::{
-    cylinder_cylinder_boolean, cylinder_sphere_boolean, sphere_sphere_boolean, BooleanOp,
-    BooleanOutcome, BooleanOutcomeKind,
+    box_sphere_boolean, cylinder_cylinder_boolean, cylinder_sphere_boolean, sphere_sphere_boolean,
+    BooleanOp, BooleanOutcome, BooleanOutcomeKind,
 };
 use crate::shape::{Mesh, TopoShape, DEFAULT_DEFLECTION};
 use crate::topology::{ExactBRep, Surface};
@@ -340,8 +340,9 @@ impl BooleanKind {
 
 /// An exact analytic solid with the operand's placement baked into
 /// its parameters — the dispatch vocabulary of ADR 0004 rule 3: the
-/// operand classes the exact boolean kernel can pair (a sphere- or
-/// cylinder-class `Brep`, a `Sphere`/`Cylinder` primitive).
+/// operand classes the exact boolean kernel can pair (a sphere-,
+/// cylinder-, or box-class `Brep`, a `Sphere`/`Cylinder`/`Box`
+/// primitive).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExactSolid {
     Sphere {
@@ -354,6 +355,17 @@ pub enum ExactSolid {
         axis: Vector3,
         radius: f64,
         height: f64,
+    },
+    /// A hexahedral box: a corner, the three unit edge directions
+    /// (mutually perpendicular, either handedness), and the extents
+    /// along them — the K4-2d/3 dispatch class (an imported
+    /// box-class B-rep, or a `Box` primitive; the placement applied
+    /// analytically: the corner transformed as a point, the axes as
+    /// directions).
+    Box {
+        origin: Vector3,
+        axes: [Vector3; 3],
+        dims: [f64; 3],
     },
 }
 
@@ -440,7 +452,10 @@ pub fn placed_shape_of(obj: &dyn DocumentObject) -> Result<TopoShape, String> {
 /// unsupported class named — never a guess. A sphere solid is its one
 /// sphere face; a cylinder solid is one cylindrical lateral face plus
 /// two planar caps perpendicular to the axis (the height is the cap
-/// separation, the origin the lateral face's own base point).
+/// separation, the origin the lateral face's own base point); a box
+/// solid is six planar faces in three antipodal, pairwise
+/// perpendicular direction groups — a hexahedron whose every wire
+/// vertex is one of the eight derived corners (the K4-2d/3 class).
 fn classify_brep_solid(brep: &ExactBRep) -> Result<ExactSolid, String> {
     if brep.faces.len() == 1 {
         if let Surface::Sphere { center, radius, .. } = &brep.faces[0].surface {
@@ -503,11 +518,17 @@ fn classify_brep_solid(brep: &ExactBRep) -> Result<ExactSolid, String> {
             }
         }
     }
+    // The hexahedral box class (K4-2d/3): six planar faces in three
+    // antipodal direction groups, pairwise perpendicular, every wire
+    // vertex one of the eight derived corners.
+    if let Some(sol) = classify_box_brep(brep) {
+        return Ok(sol);
+    }
     // Name the unsupported class honestly.
     let kinds: Vec<&str> = brep.faces.iter().map(|f| f.surface.kind_name()).collect();
     if kinds.iter().all(|k| *k == "Plane") {
         return Err(format!(
-            "a planar-faced (box-class) solid ({} faces)",
+            "a planar-faced solid that is not a hexahedral box ({} faces)",
             brep.faces.len()
         ));
     }
@@ -524,6 +545,118 @@ fn classify_brep_solid(brep: &ExactBRep) -> Result<ExactSolid, String> {
         "a multi-surface solid (face kinds: {})",
         kinds.join(", ")
     ))
+}
+
+/// Recognize the hexahedral box in an `ExactBRep`: six `Plane` faces
+/// grouped into three antipodal direction groups (each group exactly
+/// one `+d̂` and one `−d̂` face), the three group directions pairwise
+/// perpendicular, the extents the plane offsets' separation, and —
+/// the hexahedron check — every face wire vertex within tolerance of
+/// one of the eight derived corners. `None` for anything else (the
+/// caller names the class).
+fn classify_box_brep(brep: &ExactBRep) -> Option<ExactSolid> {
+    if brep.faces.len() != 6 {
+        return None;
+    }
+    let mut planes: Vec<(Vector3, Vector3)> = Vec::with_capacity(6);
+    for face in &brep.faces {
+        match &face.surface {
+            Surface::Plane { origin, normal, .. } => {
+                let n = normal.normalized()?;
+                planes.push((*origin, n));
+            }
+            _ => return None,
+        }
+    }
+    // Group by direction (antiparallel joins): each group carries
+    // `(d̂, d⁺ offset, d⁻ offset)`.
+    let mut groups: Vec<(Vector3, f64, f64)> = Vec::new();
+    for (origin, n) in &planes {
+        if let Some(g) = groups
+            .iter_mut()
+            .find(|(d, _, _)| d.dot(n).abs() > 1.0 - 1e-9)
+        {
+            let off = origin.dot(n) * n.dot(&g.0).signum();
+            if off > g.1 {
+                g.1 = off;
+            }
+            if off < g.2 {
+                g.2 = off;
+            }
+        } else {
+            let off = origin.dot(n);
+            groups.push((*n, off, off));
+        }
+    }
+    if groups.len() != 3 {
+        return None;
+    }
+    let axes = [groups[0].0, groups[1].0, groups[2].0];
+    // Pairwise perpendicular.
+    for i in 0..3 {
+        for j in (i + 1)..3 {
+            if axes[i].dot(&axes[j]).abs() > 1e-7 {
+                return None;
+            }
+        }
+    }
+    let dims = [
+        groups[0].1 - groups[0].2,
+        groups[1].1 - groups[1].2,
+        groups[2].1 - groups[2].2,
+    ];
+    if !(dims[0] > 0.0 && dims[1] > 0.0 && dims[2] > 0.0) {
+        return None;
+    }
+    // The low corner, in one canonical accumulation order.
+    let mut origin = Vector3::new(0.0, 0.0, 0.0);
+    for k in 0..3 {
+        origin = Vector3::new(
+            origin.x + groups[k].2 * axes[k].x,
+            origin.y + groups[k].2 * axes[k].y,
+            origin.z + groups[k].2 * axes[k].z,
+        );
+    }
+    // The hexahedron check: every wire vertex is one of the eight
+    // corners (within recognition tolerance).
+    let scale = dims[0]
+        .max(dims[1])
+        .max(dims[2])
+        .max(origin.x.abs().max(origin.y.abs()).max(origin.z.abs()))
+        .max(1.0);
+    let tol = 1e-9 * scale;
+    let corners: Vec<Vector3> = (0..8u8)
+        .map(|s| {
+            let mut p = origin;
+            for k in 0..3 {
+                if (s >> k) & 1 == 1 {
+                    p = Vector3::new(
+                        p.x + dims[k] * axes[k].x,
+                        p.y + dims[k] * axes[k].y,
+                        p.z + dims[k] * axes[k].z,
+                    );
+                }
+            }
+            p
+        })
+        .collect();
+    for face in &brep.faces {
+        for wire in &face.wires {
+            for we in &wire.edges {
+                for vi in [brep.edges[we.edge].start, brep.edges[we.edge].end] {
+                    let p = brep.vertices[vi].point;
+                    if !corners.iter().any(|c| {
+                        (c.x - p.x).abs() <= tol
+                            && (c.y - p.y).abs() <= tol
+                            && (c.z - p.z).abs() <= tol
+                    }) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    Some(ExactSolid::Box { origin, axes, dims })
 }
 
 /// The operand's exact class with its placement applied analytically
@@ -566,10 +699,39 @@ fn classify_operand(operand: &OperandShape) -> Result<ExactSolid, String> {
                     radius,
                     height,
                 },
+                ExactSolid::Box { origin, axes, dims } => ExactSolid::Box {
+                    origin: operand.placement.transform_point(&origin),
+                    axes: [
+                        operand.placement.transform_direction(&axes[0]),
+                        operand.placement.transform_direction(&axes[1]),
+                        operand.placement.transform_direction(&axes[2]),
+                    ],
+                    dims,
+                },
             })
         }
         TopoShape::Mesh(_) => Err("a faceted operand (a mesh)".to_string()),
-        TopoShape::Box { .. } => Err("a Box operand (no exact pairing)".to_string()),
+        TopoShape::Box {
+            length,
+            width,
+            height,
+        } => Ok(ExactSolid::Box {
+            origin: operand
+                .placement
+                .transform_point(&Vector3::new(0.0, 0.0, 0.0)),
+            axes: [
+                operand
+                    .placement
+                    .transform_direction(&Vector3::new(1.0, 0.0, 0.0)),
+                operand
+                    .placement
+                    .transform_direction(&Vector3::new(0.0, 1.0, 0.0)),
+                operand
+                    .placement
+                    .transform_direction(&Vector3::new(0.0, 0.0, 1.0)),
+            ],
+            dims: [*length, *width, *height],
+        }),
         TopoShape::Cone { .. } => Err("a Cone operand (no exact pairing)".to_string()),
         TopoShape::Torus { .. } => Err("a Torus operand (no exact pairing)".to_string()),
     }
@@ -719,6 +881,60 @@ fn exact_pair(
                     .to_string(),
             ),
         },
+        // K4-2d/3: the box × sphere family — the bite taxonomy on the
+        // box's boundary skeleton.
+        (ExactSolid::Box { origin, axes, dims }, ExactSolid::Sphere { center, radius }) => {
+            boolean_op(box_sphere_boolean(
+                op.as_boolean_op(),
+                *origin,
+                axes[0],
+                axes[1],
+                axes[2],
+                dims[0],
+                dims[1],
+                dims[2],
+                *center,
+                *radius,
+            ))
+        }
+        (ExactSolid::Sphere { .. }, ExactSolid::Box { .. }) => match op {
+            // Fuse/Common are commutative: the box-first kernel API
+            // answers them with the operands swapped.
+            BooleanKind::Fuse | BooleanKind::Common => {
+                let (ExactSolid::Box { origin, axes, dims }, ExactSolid::Sphere { center, radius }) =
+                    (tool, base)
+                else {
+                    unreachable!("the match arm pinned the classes")
+                };
+                boolean_op(box_sphere_boolean(
+                    op.as_boolean_op(),
+                    *origin,
+                    axes[0],
+                    axes[1],
+                    axes[2],
+                    dims[0],
+                    dims[1],
+                    dims[2],
+                    *center,
+                    *radius,
+                ))
+            }
+            // Sphere − box has no kernel path in that order: say so,
+            // and say the workaround — never a silent swap.
+            BooleanKind::Cut => Err(
+                "sphere − box with the sphere as Base has no exact path — swap Base and \
+                 Tool for the exact cut"
+                    .to_string(),
+            ),
+        },
+        // The rest of the table is empty by name — K4-2d lands the
+        // families per-pair, and this refusal is the honest boundary.
+        _ => Err(
+            "the exact kernel pairs sphere×sphere, cylinder×cylinder, cylinder×sphere, and \
+             box×sphere — this combination is outside the pairing table (more K4-2d families \
+             land per-pair)"
+                .to_string(),
+        ),
     }
 }
 
@@ -802,9 +1018,9 @@ impl BooleanFeature {
         let classify = |operand: &OperandShape, role: &str, link: &str| {
             classify_operand(operand).map_err(|class| {
                 format!(
-                    "{type_name} '{name}': {role} '{link}' is {class}; the exact path needs a \
-                 sphere- or cylinder-class operand — tessellate first or use mesh operands for \
-                 the faceted workflow"
+                    "{type_name} '{name}': {role} '{link}' is {class}; the exact path pairs \
+                 sphere×sphere, cylinder×cylinder, cylinder×sphere, and box×sphere — \
+                 tessellate first or use mesh operands for the faceted workflow"
                 )
             })
         };
