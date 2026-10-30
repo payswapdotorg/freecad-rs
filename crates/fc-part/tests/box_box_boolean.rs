@@ -26,11 +26,12 @@
 //! The exactness discipline: the FCBREP v2 round-trip measures
 //! bit-identically, the classification outcomes (whole shapes, the
 //! exact empty set, the named refusals) are asserted by name, and
-//! the render channel is honest BOTH ways — the hole-free results
-//! tessellate WATERTIGHT with the mesh volume agreeing with the
-//! exact volume (planar faces triangulate exactly), while the
-//! hole-trimmed ones (the slot's caps, the fuse's shoulder ring)
-//! refuse by name — the two-channel contract. The frame mapping is
+//! the render channel tessellates EVERY constructive result
+//! WATERTIGHT with the mesh volume agreeing with the exact volume —
+//! the ring faces (the slot's caps, the fuse's shoulder) carry
+//! rectilinear hole wires, and the polygon-with-holes domain
+//! triangulates exactly like the hole-free ones (the trim-domain
+//! slice's planar arm). The frame mapping is
 //! part of the contract: permuted, sign-flipped, and mirrored frames
 //! run exact (the extents recomputed in the base's frame), and a
 //! rotated or near-parallel frame refuses by name — this kernel
@@ -114,17 +115,6 @@ fn occt(case: &str) -> (f64, f64, usize) {
     )
 }
 
-/// The render-channel expectation: hole-free rectilinear faces
-/// tessellate WATERTIGHT (the planar ear-clip path), the mesh volume
-/// agreeing with the exact volume; hole-trimmed faces refuse by name.
-#[derive(Clone, Copy, PartialEq)]
-enum Render {
-    /// Every face single-wired: the mesh exists, watertight, exact.
-    Meshes,
-    /// Some face carries a hole wire: the render channel refuses.
-    RefusesHoles,
-}
-
 /// The hole-wire count of a B-rep (wires beyond each face's first).
 fn hole_wires(brep: &fc_part::ExactBRep) -> usize {
     brep.faces
@@ -148,7 +138,6 @@ fn acceptance(
     want_a: f64,
     faces: usize,
     genus: usize,
-    render: Render,
 ) {
     let brep = solid(run(op, ob, dims_b));
     assert_eq!(brep.faces.len(), faces, "{name}: the face count");
@@ -191,38 +180,30 @@ fn acceptance(
         (rv - v).abs() <= 1e-12 * v.abs().max(1.0),
         "{name}: round-trip volume {rv:.12} vs {v:.12}"
     );
-    // The render channel: watertight and numerically exact for the
-    // hole-free rectilinear faces; a named refusal for the holed
-    // ones (the annulus faces of this family).
-    match render {
-        Render::Meshes => {
-            let mesh = tessellate_brep(&brep, 0.25)
-                .unwrap_or_else(|e| panic!("{name}: the render channel tessellates: {e}"));
-            let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
-            for t in &mesh.triangles {
-                for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                    *directed.entry((x, y)).or_default() += 1;
-                }
+    // The render channel: watertight and numerically exact for every
+    // constructive result — the rectilinear hole wires (the slot's
+    // caps, the fuse's shoulder ring) bridge and ear-clip exactly
+    // like the hole-free faces (the trim-domain slice's planar arm).
+    {
+        let mesh = tessellate_brep(&brep, 0.25)
+            .unwrap_or_else(|e| panic!("{name}: the render channel tessellates: {e}"));
+        let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in &mesh.triangles {
+            for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *directed.entry((x, y)).or_default() += 1;
             }
-            for (&(x, y), &n) in &directed {
-                assert!(
-                    n == 1 && directed.get(&(y, x)).copied() == Some(1),
-                    "{name}: the mesh is watertight ({x}→{y} used {n} times)"
-                );
-            }
-            let mv = mesh.volume();
+        }
+        for (&(x, y), &n) in &directed {
             assert!(
-                (mv - v).abs() <= 1e-9 * v.abs().max(1.0),
-                "{name}: the planar mesh volume {mv:.12} is the exact {v:.12}"
+                n == 1 && directed.get(&(y, x)).copied() == Some(1),
+                "{name}: the mesh is watertight ({x}→{y} used {n} times)"
             );
         }
-        Render::RefusesHoles => {
-            let err = tessellate_brep(&brep, 0.25).expect_err("the render channel refuses");
-            assert!(
-                err.contains("holes"),
-                "{name}: the tessellation refusal names its reason: {err}"
-            );
-        }
+        let mv = mesh.volume();
+        assert!(
+            (mv - v).abs() <= 1e-9 * v.abs().max(1.0),
+            "{name}: the planar mesh volume {mv:.12} is the exact {v:.12}"
+        );
     }
 }
 
@@ -247,7 +228,6 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         1700.0,
         9,
         0,
-        Render::Meshes,
     );
     acceptance(
         "corner fuse",
@@ -259,7 +239,6 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         2030.0,
         12,
         0,
-        Render::Meshes,
     );
     acceptance(
         "corner common",
@@ -271,7 +250,6 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         110.0,
         6,
         0,
-        Render::Meshes,
     );
 }
 
@@ -292,7 +270,6 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         1650.0,
         8,
         0,
-        Render::Meshes,
     );
     acceptance(
         "edge fuse",
@@ -304,7 +281,6 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         2150.0,
         12,
         0,
-        Render::Meshes,
     );
     acceptance(
         "edge common",
@@ -316,7 +292,6 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         150.0,
         6,
         0,
-        Render::Meshes,
     );
 }
 
@@ -337,7 +312,6 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         1400.0,
         6,
         0,
-        Render::Meshes,
     );
     acceptance(
         "face fuse",
@@ -349,7 +323,6 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         3160.0,
         11,
         0,
-        Render::RefusesHoles,
     );
     acceptance(
         "face common",
@@ -361,7 +334,6 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         1500.0,
         6,
         0,
-        Render::Meshes,
     );
 }
 
@@ -384,7 +356,6 @@ fn slot_bite_measures_the_closed_forms_and_occt() {
         1700.0,
         10,
         1,
-        Render::RefusesHoles,
     );
     acceptance(
         "slot fuse",
@@ -396,7 +367,6 @@ fn slot_bite_measures_the_closed_forms_and_occt() {
         1900.0,
         16,
         0,
-        Render::RefusesHoles,
     );
     acceptance(
         "slot common",
@@ -408,7 +378,6 @@ fn slot_bite_measures_the_closed_forms_and_occt() {
         400.0,
         6,
         0,
-        Render::Meshes,
     );
 }
 
@@ -431,7 +400,6 @@ fn groove_bite_measures_the_closed_forms_and_occt() {
         2140.0,
         10,
         1,
-        Render::RefusesHoles,
     );
     acceptance(
         "groove fuse",
@@ -443,7 +411,6 @@ fn groove_bite_measures_the_closed_forms_and_occt() {
         1940.0,
         16,
         0,
-        Render::RefusesHoles,
     );
     acceptance(
         "groove common",
@@ -455,7 +422,6 @@ fn groove_bite_measures_the_closed_forms_and_occt() {
         520.0,
         6,
         0,
-        Render::Meshes,
     );
 }
 
@@ -479,7 +445,6 @@ fn open_groove_bite_measures_the_closed_forms_and_occt() {
         1760.0,
         10,
         0,
-        Render::Meshes,
     );
     acceptance(
         "open groove fuse",
@@ -491,7 +456,6 @@ fn open_groove_bite_measures_the_closed_forms_and_occt() {
         2120.0,
         14,
         0,
-        Render::Meshes,
     );
     acceptance(
         "open groove common",
@@ -503,7 +467,6 @@ fn open_groove_bite_measures_the_closed_forms_and_occt() {
         580.0,
         6,
         0,
-        Render::Meshes,
     );
 }
 
@@ -530,7 +493,6 @@ fn flush_edge_bite_cut_reads_the_overlap_and_fuse_refuses() {
         1650.0,
         8,
         0,
-        Render::Meshes,
     );
     let why = refused(run(BooleanOp::Fuse, ob, dims));
     assert!(

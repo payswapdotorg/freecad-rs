@@ -269,27 +269,18 @@ fn cut_of_imported_sphere_by_primitive_runs_exact_through_the_round_trip() {
         (got - reference).abs() <= 1e-9 * reference,
         "the feature's exact volume {got} is the kernel's own {reference}"
     );
-    // The display channel refuses honestly: the crescent's outer face
-    // is a sphere-minus-cap complement trim, whose domain
-    // classification is the K4-2d slice — `mesh_of` returns no mesh
-    // (never a plausible-looking wrong one), the named refusal riding
-    // `try_tessellate`. The two-channel honesty contract, live.
+    // The display channel TESSELLATES — the trim-domain slice: the
+    // crescent's outer face (a sphere minus its cap — the exterior
+    // trim domain) tiles under the sagitta discipline, the section
+    // circle entering as the hole of the parameter box, so `mesh_of`
+    // returns a mesh whose volume sits within the deflection-derived
+    // bound of the exact (r = 5: 4πr²·d). The two-channel honesty
+    // contract, live — both channels answering.
+    let mesh = mesh_of(op, 0.05).expect("the complement-trimmed crescent renders");
     assert!(
-        mesh_of(op, 0.05).is_none(),
-        "no display mesh exists for the complement-trimmed crescent"
-    );
-    let tess_err = result
-        .try_tessellate(0.05)
-        .expect_err("the trim class refuses");
-    // The cap/complement refusal (K4-2d/3 slice 2's tessellator
-    // guard: a sphere face trimmed by a single closed circle — the
-    // crescent's complement face IS one — names the wire-orientation
-    // classification; the earlier interior/exterior-ambiguous message
-    // covered the same slice from the loop-bounds side.
-    assert!(
-        tess_err.contains("trim-domain classification")
-            || tess_err.contains("wire-orientation classification"),
-        "the display refusal names the slice: {tess_err}"
+        (mesh.volume() - got).abs() <= 4.0 * std::f64::consts::PI * 25.0 * 0.05,
+        "the crescent's display mesh volume {:.6} vs the exact {got:.6}",
+        mesh.volume()
     );
 
     // The save: the operand's OCCT bytes are its only truthful
@@ -799,20 +790,15 @@ fn cut_of_imported_box_by_primitive_runs_exact_through_the_round_trip() {
         (got - reference).abs() <= 1e-9 * reference,
         "the feature's exact volume {got} is the kernel's own {reference}"
     );
-    // The display channel refuses honestly: the bite patch is a
-    // spherical polygon (an arc-bounded sphere face), whose domain
-    // classification is the K4-2d slice — `mesh_of` returns no mesh,
-    // the named refusal riding `try_tessellate`.
+    // The display channel TESSELLATES — the trim-domain slice: the
+    // bite patch (an arc-bounded sphere face — the spherical
+    // polygon) tiles under the sagitta discipline; the mesh volume
+    // within the deflection-derived bound (r = 3: 4πr²·d).
+    let mesh = mesh_of(op, 0.05).expect("the polygon-patched bite renders");
     assert!(
-        mesh_of(op, 0.05).is_none(),
-        "no display mesh exists for the polygon-patched bite"
-    );
-    let tess_err = result
-        .try_tessellate(0.05)
-        .expect_err("the trim class refuses");
-    assert!(
-        tess_err.contains("spherical polygon") || tess_err.contains("K4-2d"),
-        "the display refusal names the slice: {tess_err}"
+        (mesh.volume() - got).abs() <= 4.0 * std::f64::consts::PI * 9.0 * 0.05,
+        "the bite's display mesh volume {:.6} vs the exact {got:.6}",
+        mesh.volume()
     );
 
     // The save: the operand's OCCT bytes ride out verbatim; the
@@ -1112,14 +1098,17 @@ fn offset_bite_of_imported_box_runs_exact() {
             (got - want).abs() <= 1e-9 * want,
             "{kind}: the offset-bite volume {got} is the closed form {want}"
         );
-        // The display channel refuses by name (the cap class), the
-        // two-channel contract.
-        let tess_err = result
+        // The display channel TESSELLATES — the trim-domain slice: the
+        // small-circle cap (and the complement, and the holed face) tile
+        // under the sagitta discipline. The mesh volume within the
+        // deflection-derived bound (r = 2: 4πr²·d).
+        let mesh = result
             .try_tessellate(0.05)
-            .expect_err("the cap class refuses");
+            .unwrap_or_else(|e| panic!("{kind}: the render channel tessellates: {e}"));
         assert!(
-            tess_err.contains("single closed circle") || tess_err.contains("holes"),
-            "{kind}: the display refusal names its reason: {tess_err}"
+            (mesh.volume() - got).abs() <= 4.0 * std::f64::consts::PI * 4.0 * 0.05,
+            "{kind}: the display mesh volume {:.6} vs the exact {got:.6}",
+            mesh.volume()
         );
         std::fs::remove_file(&path).ok();
     }
@@ -1719,14 +1708,18 @@ fn cut_of_imported_box_by_cylinder_primitive_runs_exact_through_the_round_trip()
         (got - reference).abs() <= 1e-9 * reference,
         "the feature's exact volume {got} is the kernel's own {reference}"
     );
-    // The display channel refuses by name — the annulus faces (the
-    // two hole-trimmed caps), the two-channel contract.
-    let tess_err = result
+    // The display channel TESSELLATES — the trim-domain slice's
+    // planar arm: the annulus faces (the two hole-trimmed caps)
+    // bridge and ear-clip; the mesh volume within the
+    // deflection-derived chord bound (r = 3 through a 5-deep slab:
+    // (4/3)·τ·r·d·h).
+    let mesh = result
         .try_tessellate(0.05)
-        .expect_err("the annulus class refuses");
+        .unwrap_or_else(|e| panic!("the annulus class tessellates: {e}"));
     assert!(
-        tess_err.contains("holes"),
-        "the display refusal names its reason: {tess_err}"
+        (mesh.volume() - got).abs() <= (4.0 / 3.0) * std::f64::consts::PI * 3.0 * 0.05 * 5.0,
+        "the through hole's display mesh volume {:.6} vs the exact {got:.6}",
+        mesh.volume()
     );
 
     // The save: the operand's OCCT bytes ride out verbatim; the

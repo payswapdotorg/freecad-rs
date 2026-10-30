@@ -34,11 +34,30 @@
 //! foreign shells), so the result is a solid boundary with outward
 //! normals.
 //!
+//! The trim-domain classification (the K4-2d/3 render slice): a
+//! face's wire traversal keeps its region on the LEFT viewed from the
+//! face's outward normal, so the walk's UV winding against the
+//! surface's own parameter orientation picks the side — the interior
+//! (the bite patches, the wavy caps) tiles as a UV polygon through
+//! the planar kernel with the curvature grid and the deflection
+//! referee; the exterior (the complement patches — the bulges, the
+//! crescent's outer face) tiles as the parameter box minus the walk,
+//! the box's pole lines and seam synthesized the way the primitives
+//! spell their own; a sphere's single closed latitude circle is the
+//! cap line case, the two half-boxes the walk direction separates.
+//! Planar faces tile exactly for every wire count — the hole wires
+//! bridge through the profile kernel's own planar-region
+//! triangulator, the hole rims entering as the shared edge samples
+//! they are.
+//!
 //! Refused by name: B-spline faces (no curvature estimate drives
-//! their interior sampling yet), hole-trimmed faces (the 2D kernel's
-//! bridging exists; the seam and stitch bookkeeping across hole wires
-//! does not), untrimmed faces (no wires bound the region), and
-//! non-positive-volume results.
+//! their interior sampling yet), hole-trimmed CURVED domains, sphere
+//! patches whose walk crosses a pole (an authored pole run whose
+//! tiling is the named next slice), a curved face keeping the
+//! exterior of its trim on a non-sphere surface (only the sphere's
+//! parameter box carries degenerate boundaries the face owns),
+//! untrimmed faces (no wires bound the region), and non-positive
+//! volume results.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +68,7 @@ use crate::profile::{
     point_in_polygon, triangulate_planar_region_keep_boundary as triangulate_planar_region, Point2,
 };
 use crate::shape::Mesh;
-use crate::topology::{Curve, ExactBRep, Surface};
+use crate::topology::{Curve, ExactBRep, Surface, TopoFace};
 
 /// The u-period of a surface's parameterization (`None` for the
 /// plane and B-splines — periodic B-splines are refused at read time,
@@ -241,6 +260,7 @@ fn subdivide(
 }
 
 /// One boundary vertex of a face's UV region.
+#[derive(Clone)]
 struct BoundaryVert {
     uv: Point2,
     p3: Vector3,
@@ -429,226 +449,40 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
             if loop_verts.len() < 3 {
                 return Err(format!("face {fi}: a degenerate boundary loop"));
             }
+            if let Some(p) = uper {
+                split_pole_jumps(&mut loop_verts, p, vmin, vmax);
+            }
             loops.push(loop_verts);
         }
 
-        // Triangulate the parameter domain with the planar kernel,
-        // then STITCH the boundary vertices it dropped. On a periodic
-        // surface the shared rim samples project to parameter-
-        // collinear runs, and the 2D ear-clip removes collinear
-        // vertices — but in 3D those points are the very vertices the
-        // neighboring face carries, so dropping them opens the shell
-        // (a T-junction whose "edge" is a 3D point). The stitch
-        // re-inserts each dropped point by splitting the triangle
-        // edge that spans it: legitimate in the parameter domain,
-        // where the point is genuinely on the segment, and proper in
-        // 3D, where the two split triangles are the deflection-bounded
-        // slivers through the rim point.
-        if loops.len() != 1 {
-            return Err(format!(
-                "face {fi}: a UV region with {} wires (holes) — hole-trimmed faces are not \
-                 tessellated by this reader yet",
-                loops.len()
-            ));
-        }
-        let loop_verts = &loops[0];
-        let n = loop_verts.len();
-        let outer: Vec<Point2> = loop_verts.iter().map(|b| b.uv).collect();
-
-        // The emit table: boundary vertices keep their shared 3D rim
-        // samples bit-exactly; interior domain vertices (curved faces
-        // only) evaluate the surface at their parameters — or, on the
-        // seam, share one evaluated point from both sides so the seam
-        // closes bit-exactly.
+        // Triangulate the parameter domain. The planar path is exact in
+        // the face's own plane for every wire count (the outer wire
+        // plus hole wires — the trim-domain slice's planar arm); the
+        // curved paths classify the trim domain by the wire's
+        // traversal first, then tile it under the sagitta discipline.
+        // Either way the boundary vertices it drops get STITCHED back
+        // below. On a periodic surface the shared rim samples project
+        // to parameter-collinear runs, and the 2D ear-clip removes
+        // collinear vertices — but in 3D those points are the very
+        // vertices the neighboring face carries, so dropping them
+        // opens the shell (a T-junction whose "edge" is a 3D point).
+        // The stitch re-inserts each dropped point by splitting the
+        // triangle edge that spans it: legitimate in the parameter
+        // domain, where the point is genuinely on the segment, and
+        // proper in 3D, where the two split triangles are the
+        // deflection-bounded slivers through the rim point.
         let (face_tris, p3): (Vec<[u32; 3]>, Vec<Vector3>) =
-            if !matches!(face.surface, Surface::Plane { .. }) {
-                // K4-2b: a curved face's domain is a monotone band — its
-                // boundary walk splits into two u-monotone chains (rim
-                // chains, pole lines, seam lines), and the curvature-
-                // respecting grid rows stack between them. The band
-                // merge tiles that stack directly, so the rim chains
-                // enter as genuine boundary edges — the neighboring
-                // face's own samples, shared bit-exactly — and the
-                // deflection referee only refines from there. No ear
-                // clip, no fan, no stitch: the slanted-panel defect
-                // cannot arise.
-                //
-                // Region inference first: the band machinery below tiles
-                // the INTERIOR of a boundary walk that bounds the
-                // face's own UV box — every K4-1/K4-2 corpus face
-                // walks its box (natural domains and seam-wrapped bands
-                // span the u period up to end-sampling slop; a partial
-                // band touches its box's u-extremes), the rim chains
-                // entering as genuine boundary edges. A loop that
-                // neither spans the period nor touches the extremes is
-                // an AMBIGUOUS trim: the same loop+box serves the cap
-                // (interior) and the complement (the sphere minus its
-                // cap — the exact booleans' outer faces), and tiling
-                // the interior unconditionally would render the wrong
-                // face as a plausible-looking mesh. A cap's loop spans
-                // at most half the period (2·atan(ρ/c) < π), so
-                // three-quarters of the period separates every
-                // box-bounding walk from every cap/complement loop with
-                // margin. The wire-orientation convention that would
-                // classify the ambiguous case is real (region on the
-                // left of the traversal, viewed from the outward
-                // normal) but its per-surface parameter-orientation
-                // signs are not yet carried here — the trim-domain
-                // classification slice (K4-2d). Until then: refuse by
-                // name, the exact channels still measuring the solid.
-                // K4-2d/3: the spherical polygon — a sphere face whose
-                // single wire is a loop of open, single-use arcs (the
-                // box×sphere bite patches: the octant behind a corner
-                // bite, the quarter behind an edge bite, their
-                // complements). The band machinery reads latitude
-                // rims, pole lines, and seam chains; a polygon domain
-                // bounded by tilted great-circle arcs is none of
-                // those, and tiling it through the band walk emits a
-                // torn mesh — a plausible-looking wrong answer. Refuse
-                // by name: the exact channels still measure it, and
-                // the trim-domain classification slice (K4-2d) is the
-                // honest widening path.
-                // The cap and its complement share one loop: a
-                // sphere face whose single wire is ONE closed circle
-                // (a latitude) bounds both the cap (loop → pole) and
-                // the complement (loop → the far pole) — the same
-                // interior/exterior ambiguity, and the wire-orientation
-                // classification that would settle it is the same
-                // K4-2d slice. The band machinery cannot tile it
-                // either: the boundary walk's two u-monotone chains
-                // COINCIDE (the full latitude), the band has no
-                // height, and nothing would be emitted — a silently
-                // open shell, worse than a refusal. Found by the
-                // K4-2d/3 offset stations (their caps and the
-                // slice-1 face station's hemisphere patch all carry
-                // exactly this trim).
-                if let Surface::Sphere { .. } = face.surface {
-                    let cap_loop = face.wires.len() == 1 && {
-                        let uses: Vec<usize> = face.wires[0]
-                            .edges
-                            .iter()
-                            .filter(|we| !brep.is_degenerate(we.edge))
-                            .map(|we| we.edge)
-                            .collect();
-                        uses.len() == 1 && {
-                            let e = &brep.edges[uses[0]];
-                            e.start == e.end
-                        }
-                    };
-                    if cap_loop {
-                        return Err(format!(
-                            "face {fi}: a sphere face trimmed by a single closed circle — the \
-                             cap and its complement share that loop (the wire-orientation \
-                             classification is the K4-2d slice); the band tessellator's two \
-                             chains would coincide and emit nothing, so this is a refusal, not \
-                             a silently open shell; the exact channels still measure it"
-                        ));
-                    }
-                }
-                if let Surface::Sphere { .. } = face.surface {
-                    let polygon = face.wires.len() == 1 && {
-                        let uses: Vec<usize> = face.wires[0]
-                            .edges
-                            .iter()
-                            .filter(|we| !brep.is_degenerate(we.edge))
-                            .map(|we| we.edge)
-                            .collect();
-                        uses.len() >= 2
-                            && uses.iter().all(|e| {
-                                brep.edges[*e].start != brep.edges[*e].end
-                                    && uses.iter().filter(|e2| *e2 == e).count() == 1
-                            })
-                    };
-                    if polygon {
-                        return Err(format!(
-                            "face {fi}: a sphere face trimmed by a loop of open arcs — the \
-                             spherical polygon (the box×sphere bite patches of K4-2d/3); the \
-                             band tessellator reads latitude rims, pole lines, and seams, and \
-                             would tear this domain — trim-domain classification is the \
-                             K4-2d slice; the exact channels still measure it"
-                        ));
-                    }
-                }
-                let loop_umin = outer.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-                let loop_umax = outer.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-                let loop_span = loop_umax - loop_umin;
-                let touch_tol = (umax - umin).max(1.0) * 1e-6;
-                let loop_bounds_box = match uper {
-                    Some(p) => {
-                        loop_span >= p - p / 4.0
-                            || (loop_umax >= umax - touch_tol && loop_umin <= umin + touch_tol)
-                    }
-                    None => loop_umax >= umax - touch_tol && loop_umin <= umin + touch_tol,
-                };
-                if !loop_bounds_box {
-                    return Err(format!(
-                        "face {fi}: a {} face whose trim loop does not bound its UV box (an \
-                         interior/exterior-ambiguous trim — the exact booleans' cap and \
-                         complement faces) — trim-domain classification is the K4-2d slice; \
-                         the exact channels still measure it",
-                        face.surface.kind_name()
-                    ));
-                }
-                let rows = grid_rows(&face.surface, &outer, deflection);
-                let mut dm = build_band_domain(loop_verts, &face.surface, rows)
-                    .map_err(|e| format!("face {fi}: {e}"))?;
-                refine_domain(&mut dm, &face.surface, deflection);
-                (dm.tris, dm.p3)
+            if matches!(face.surface, Surface::Plane { .. }) {
+                planar_region_tris(fi, &loops)?
             } else {
-                // The planar path — exact in the face's own plane: ear clip
-                // with the boundary kept, degenerate ears dropped (zero
-                // area covers nothing), and any dropped boundary points
-                // stitched back into the spanning edges.
-                let mut tris = triangulate_planar_region(&outer, &[])
-                    .map_err(|e| format!("face {fi}: the UV region did not triangulate: {e:?}"))?;
-                tris.retain(|t| {
-                    let (a, b, c) = (
-                        outer[t[0] as usize],
-                        outer[t[1] as usize],
-                        outer[t[2] as usize],
-                    );
-                    (b - a).cross2(c - a).abs() > DOMAIN_AREA_EPS
-                });
-                let mut used = vec![false; n];
-                for t in &tris {
-                    for ti in t {
-                        used[*ti as usize] = true;
-                    }
-                }
-                if !used.iter().all(|u| *u) {
-                    // A cyclic walk starting at a used anchor; each maximal
-                    // dropped run between anchors gets its spanning edge
-                    // split so the dropped points re-enter the triangulation.
-                    let mut start = 0usize;
-                    while start < n && !used[start] {
-                        start += 1;
-                    }
-                    if start == n {
-                        return Err(format!(
-                            "face {fi}: every boundary vertex was dropped by the triangulation"
-                        ));
-                    }
-                    let order: Vec<usize> = (0..n).map(|k| (start + k) % n).collect();
-                    let mut k = 0usize;
-                    while k < n {
-                        let anchor = order[k];
-                        let mut j = k + 1;
-                        let mut dropped: Vec<usize> = Vec::new();
-                        while j < n && !used[order[j]] {
-                            dropped.push(order[j]);
-                            j += 1;
-                        }
-                        let next_anchor = if j < n { order[j] } else { order[0] };
-                        if !dropped.is_empty() {
-                            split_edge_chain(&mut tris, anchor, next_anchor, &dropped);
-                        }
-                        if j >= n {
-                            break;
-                        }
-                        k = j;
-                    }
-                }
-                (tris, loop_verts.iter().map(|b| b.p3).collect())
+                let Some(loop_verts) = loops.first() else {
+                    return Err(format!(
+                        "face {fi}: a curved face carrying {} wires — hole-trimmed curved \
+                         domains are not tessellated by this reader yet",
+                        loops.len()
+                    ));
+                };
+                curved_region_tris(fi, brep, face, loop_verts, deflection)?
             };
         // One triangle per 3D panel. A domain triangle whose corners
         // collapse onto fewer than three distinct points — the pole
@@ -701,6 +535,670 @@ pub fn tessellate_brep(brep: &ExactBRep, deflection: f64) -> Result<Mesh, String
         ));
     }
     Ok(mesh)
+}
+
+// ---------------------------------------------------------------------------
+// The trim-domain classification — which side of the walk is the face
+// ---------------------------------------------------------------------------
+
+/// The signed area of a closed UV walk (the shoelace): positive CCW,
+/// negative CW — the sign carries the classification, the magnitude
+/// only the zero test (a walk that folds to a line bounds no polygon).
+fn shoelace(pts: &[Point2]) -> f64 {
+    let n = pts.len();
+    let mut s = 0.0;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        s += a.x * b.y - b.x * a.y;
+    }
+    s
+}
+
+/// Re-insert the boundary vertices the ear-clip dropped: a cyclic
+/// walk starting at a used anchor, each maximal dropped run between
+/// anchors getting its spanning triangle edge split so the dropped
+/// points re-enter the triangulation (`split_edge_chain`). One call
+/// per wire, over the wire's own vertex range of the concatenated
+/// point table.
+fn stitch_wire(
+    tris: &mut Vec<[u32; 3]>,
+    used: &[bool],
+    base: usize,
+    len: usize,
+    fi: usize,
+) -> Result<(), String> {
+    if len == 0 || used[base..base + len].iter().all(|u| !u) {
+        return Err(format!(
+            "face {fi}: every boundary vertex of a wire was dropped by the triangulation"
+        ));
+    }
+    let n = len;
+    let mut start = 0usize;
+    while start < n && !used[base + start] {
+        start += 1;
+    }
+    if start == n {
+        return Err(format!(
+            "face {fi}: every boundary vertex was dropped by the triangulation"
+        ));
+    }
+    let order: Vec<usize> = (0..n).map(|k| (start + k) % n).collect();
+    let mut k = 0usize;
+    while k < n {
+        let anchor = base + order[k];
+        let mut j = k + 1;
+        let mut dropped: Vec<usize> = Vec::new();
+        while j < n && !used[base + order[j]] {
+            dropped.push(base + order[j]);
+            j += 1;
+        }
+        let next_anchor = if j < n {
+            base + order[j]
+        } else {
+            base + order[0]
+        };
+        if !dropped.is_empty() {
+            split_edge_chain(tris, anchor, next_anchor, &dropped);
+        }
+        if j >= n {
+            break;
+        }
+        k = j;
+    }
+    Ok(())
+}
+
+/// The planar face's domain, any wire count: the outer wire plus its
+/// hole wires, bridged and ear-clipped by the profile kernel's own
+/// planar-region triangulator (the same machinery `extrude` uses for
+/// its caps — holes re-oriented and spliced through a mutually
+/// visible vertex pair). The kernel indexes the concatenated point
+/// table (outer first, then each hole in order), so the shared rim
+/// samples — the hole rims are the neighboring faces' own edge
+/// discretizations — enter the mesh bit-exactly and the shell closes
+/// across every wire. Exact in the face's own plane; the mesh volume
+/// of an annulus differs from the exact only by the circle rims'
+/// inscribed-chord deficit, the sagitta discipline's own bound.
+fn planar_region_tris(
+    fi: usize,
+    loops: &[Vec<BoundaryVert>],
+) -> Result<(Vec<[u32; 3]>, Vec<Vector3>), String> {
+    let outer: Vec<Point2> = loops[0].iter().map(|b| b.uv).collect();
+    let holes: Vec<Vec<Point2>> = loops[1..]
+        .iter()
+        .map(|w| w.iter().map(|b| b.uv).collect())
+        .collect();
+    let all: Vec<&BoundaryVert> = loops.iter().flat_map(|w| w.iter()).collect();
+    let pts: Vec<Point2> = all.iter().map(|b| b.uv).collect();
+    let mut tris = triangulate_planar_region(&outer, &holes)
+        .map_err(|e| format!("face {fi}: the UV region did not triangulate: {e:?}"))?;
+    // Zero-area triangles ride through: a collinear ear's degenerate
+    // panel is exactly what the kernel's keep-boundary discipline
+    // emitted to carry its edges (dropping it here would unpair them
+    // — the vertex is only partially unused, so the stitch below
+    // would not re-insert it); the emit stage drops the truly
+    // identical-vertex ones, and a planar face's collinear panel
+    // covers no area and no volume.
+    let mut used = vec![false; pts.len()];
+    for t in &tris {
+        for ti in t {
+            used[*ti as usize] = true;
+        }
+    }
+    if !used.iter().all(|u| *u) {
+        let mut base = 0usize;
+        for wire in loops {
+            stitch_wire(&mut tris, &used, base, wire.len(), fi)?;
+            base += wire.len();
+        }
+    }
+    let p3: Vec<Vector3> = all.iter().map(|b| b.p3).collect();
+    Ok((tris, p3))
+}
+
+/// One curved face's trim domain, classified then tiled. The
+/// classification is the wire-orientation convention every authored
+/// face carries (the `TopoFace` contract): the traversal keeps the
+/// region on the LEFT viewed from the face's OUTWARD normal, and the
+/// outward normal is `σ·(∂u×∂v)` with `σ = −1` on a reversed face —
+/// so the walk's UV winding against the parameterization's own
+/// orientation picks the side:
+///
+/// * the walk CCW (`shoelace > 0`) on an unreversed face, or CW on a
+///   reversed one — the winding matches `σ` — keeps the walk's
+///   INTERIOR: the bite patch, the cap of a wavy circle;
+/// * the winding against `σ` keeps the EXTERIOR within the surface's
+///   parameter box: the complement patch (the bulge, the crescent's
+///   outer face).
+///
+/// A sphere face whose single closed circle walks one latitude
+/// degenerates the shoelace to a line — the cap and its complement
+/// are the two half-boxes the traversal direction separates, the
+/// same convention read off the walk's u-direction.
+#[allow(clippy::too_many_arguments)]
+fn curved_region_tris(
+    fi: usize,
+    brep: &ExactBRep,
+    face: &TopoFace,
+    loop_verts: &[BoundaryVert],
+    deflection: f64,
+) -> Result<(Vec<[u32; 3]>, Vec<Vector3>), String> {
+    let surface = &face.surface;
+    let sigma = if face.reversed { -1.0 } else { 1.0 };
+    let outer: Vec<Point2> = loop_verts.iter().map(|b| b.uv).collect();
+    let [umin, umax, vmin, vmax] = face.uv_bounds;
+    let uper = u_period(surface);
+
+    // The single closed circle on a sphere: the cap/complement trim.
+    // A latitude walk (one v throughout) is the line case — the two
+    // half-boxes the walk direction separates; a wavy one is the
+    // polygon case below, classified by the shoelace like any other.
+    if let Surface::Sphere { .. } = surface {
+        let single_circle = face.wires.len() == 1 && {
+            let uses: Vec<usize> = face.wires[0]
+                .edges
+                .iter()
+                .filter(|we| !brep.is_degenerate(we.edge))
+                .map(|we| we.edge)
+                .collect();
+            uses.len() == 1 && brep.edges[uses[0]].start == brep.edges[uses[0]].end
+        };
+        if single_circle && outer.len() >= 3 {
+            let v0 = outer[0].y;
+            let vtol = 1e-9 * outer.iter().map(|p| p.y.abs()).fold(1.0, f64::max);
+            if outer.iter().all(|p| (p.y - v0).abs() <= vtol) {
+                return cap_band_tris(fi, surface, loop_verts, sigma, deflection);
+            }
+        }
+    }
+
+    // The walk's extent tests: the u-side box-bounding of the band
+    // machinery, and the full-box walk (both v-extremes too).
+    let loop_umin = outer.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let loop_umax = outer.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    let loop_vmin = outer.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+    let loop_vmax = outer.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    let loop_span = loop_umax - loop_umin;
+    let touch_tol = (umax - umin).max(vmax - vmin).max(1.0) * 1e-6;
+    let bounds_box = match uper {
+        Some(p) => {
+            loop_span >= p - p / 4.0
+                || (loop_umax >= umax - touch_tol && loop_umin <= umin + touch_tol)
+        }
+        None => loop_umax >= umax - touch_tol && loop_umin <= umin + touch_tol,
+    };
+    // A walk that bounds the FULL parameter box — both u-extremes (or
+    // the period) and both v-extremes — keeps the box itself: the
+    // primitives' own faces (the full sphere, cylinder, cone, torus),
+    // whose walks predate the wire-orientation convention and may run
+    // either way, and whose exterior would be empty anyway. The band
+    // machinery tiles it; the winding classifier is not asked.
+    let full_box = bounds_box && loop_vmin <= vmin + touch_tol && loop_vmax >= vmax - touch_tol;
+    if full_box {
+        let rows = grid_rows(surface, &[&outer], deflection);
+        let mut dm =
+            build_band_domain(loop_verts, surface, rows).map_err(|e| format!("face {fi}: {e}"))?;
+        refine_domain(&mut dm, surface, deflection);
+        return Ok((dm.tris, dm.p3));
+    }
+
+    // A walk bounding the box in u is the K4-2b band case WHATEVER
+    // its winding: every band-like face — the seam-wrapped and
+    // partial bands of the K4-1/K4-2 corpus (OCCT-authored wires
+    // carry OCCT's own orientation conventions, not this kernel's
+    // region-on-left spelling), the boolean results' strips — keeps
+    // the interior between its two u-monotone chains, and the band
+    // machinery's own seam discipline tiles it. The winding
+    // classifier is not asked about these: an exterior spanning the
+    // box in u would be empty or seam-torn, and no authored face of
+    // this kernel carries one.
+    if bounds_box {
+        let rows = grid_rows(surface, &[&outer], deflection);
+        let mut dm =
+            build_band_domain(loop_verts, surface, rows).map_err(|e| format!("face {fi}: {e}"))?;
+        refine_domain(&mut dm, surface, deflection);
+        return Ok((dm.tris, dm.p3));
+    }
+
+    // A walk carrying a run of consecutive same-3D samples — a pole
+    // line the primitives spell themselves (those left above, at the
+    // box-bounding checks) — is an AUTHORED pole-crossing patch (the
+    // edge station's quarter ball, either side of it): the tiling of
+    // an authored pole run — the band's corner merges and the
+    // referee's inserts against the welded pole vertex, the
+    // exterior's bridging around the run — is not yet trustworthy.
+    // The ear clip must never see one either: two domain vertices
+    // the emit welds into one mesh vertex would fan into each other
+    // and fold. Named, never a torn mesh; the exact channels still
+    // measure it.
+    if loop_verts.windows(2).any(|w| w[0].p3 == w[1].p3) {
+        return Err(format!(
+            "face {fi}: a sphere patch whose walk crosses a pole — the pole-run tiling for \
+             authored walks is the named next slice; the exact channels still measure it"
+        ));
+    }
+
+    // The winding classification: the authored wire's traversal keeps
+    // the region on the LEFT viewed from the face's outward normal,
+    // so the walk's UV winding against the parameterization's own
+    // orientation picks the side.
+    let wind = shoelace(&outer);
+    if wind.abs() <= 1e-9 {
+        return Err(format!(
+            "face {fi}: a {} trim walk that folds to a UV line without holding one latitude — \
+             not a region this reader can classify (the exact channels still measure it)",
+            surface.kind_name()
+        ));
+    }
+    if wind * sigma > 0.0 {
+        return polygon_tris(fi, surface, loop_verts, deflection);
+    }
+
+    // The exterior trim: the surface's parameter box minus the walk's
+    // interior — the complement patches. Only the sphere's box is the
+    // honest outer boundary here (its v-extremes are the two poles,
+    // single 3D points; its u-extremes one seam the face owns both
+    // sides of); a cylinder's or torus' v-bounds are real rims no wire
+    // of this face carries, and synthesizing them would be authoring
+    // geometry the shell does not have.
+    if !matches!(surface, Surface::Sphere { .. }) {
+        return Err(format!(
+            "face {fi}: a {} face keeping the exterior of its trim walk — the exterior trim \
+             domain is tiled for the sphere only (the parameter box's own degenerate \
+             boundaries); the exact channels still measure it",
+            surface.kind_name()
+        ));
+    }
+    sphere_exterior_tris(fi, surface, loop_verts, deflection)
+}
+
+/// The cap band — a sphere face whose single closed latitude circle
+/// bounds the cap (walk → pole) or its complement (walk → the far
+/// pole), the side read off the traversal against the outward normal:
+/// the kept region is on the walk's LEFT viewed from `σ·(∂u×∂v)`, so
+/// an eastward walk keeps the north on an unreversed face — and every
+/// sign flip (westward walk, reversed face) flips the pole. The walk
+/// row is the shared rim discretization; the pole row is synthesized
+/// at the walk's own u values, every point one evaluated 3D pole (the
+/// parameterization's equatorial noise is a per-u artifact — one
+/// Vector3, reused, is the only watertight spelling). The band merge
+/// tiles between the rows, the pole-side triangles degenerating in 3D
+// exactly as the full sphere's pole lines do; the curvature grid and
+// the deflection referee densify from there.
+fn cap_band_tris(
+    fi: usize,
+    surface: &Surface,
+    loop_verts: &[BoundaryVert],
+    sigma: f64,
+    deflection: f64,
+) -> Result<(Vec<[u32; 3]>, Vec<Vector3>), String> {
+    let outer: Vec<Point2> = loop_verts.iter().map(|b| b.uv).collect();
+    let v_lat = outer[0].y;
+    // The walk's u direction: the unwrapped closure sits exactly one
+    // period from the start, its sign the direction of travel.
+    let du = outer[outer.len() - 1].x - outer[0].x;
+    if du == 0.0 {
+        return Err(format!(
+            "face {fi}: a closed-circle trim walk with no u direction — not a latitude this \
+             reader can classify"
+        ));
+    }
+    let east = du > 0.0;
+    let north = if east { sigma > 0.0 } else { sigma < 0.0 };
+    let v_pole = if north {
+        std::f64::consts::FRAC_PI_2
+    } else {
+        -std::f64::consts::FRAC_PI_2
+    };
+    // The walk as (uv, p3) pairs, reversed together for a westward
+    // walk so the u-ascending row keeps its matching 3D samples.
+    let mut pairs: Vec<(Point2, Vector3)> = loop_verts.iter().map(|b| (b.uv, b.p3)).collect();
+    if !east {
+        pairs.reverse();
+    }
+    // One evaluated 3D pole for the whole synthesized row — the
+    // parameterization's per-u equatorial noise is an artifact.
+    let pole_p3 = surface.point(pairs[0].0.x, v_pole);
+    let mut dm = DomainMesh {
+        pts: Vec::with_capacity(2 * pairs.len()),
+        p3: Vec::with_capacity(2 * pairs.len()),
+        tris: Vec::new(),
+    };
+    let walk_idx: Vec<u32> = pairs
+        .iter()
+        .map(|&(uv, p3)| {
+            let i = dm.pts.len() as u32;
+            dm.pts.push(uv);
+            dm.p3.push(p3);
+            i
+        })
+        .collect();
+    let walk_row: Vec<Point2> = pairs.iter().map(|&(uv, _)| uv).collect();
+    let pole_idx: Vec<u32> = walk_row
+        .iter()
+        .map(|uv| {
+            let i = dm.pts.len() as u32;
+            dm.pts.push(Point2::new(uv.x, v_pole));
+            dm.p3.push(pole_p3);
+            i
+        })
+        .collect();
+    // band_merge(p, q): the lower chain first, both u-ascending.
+    if v_pole > v_lat {
+        band_merge(&mut dm, &walk_idx, &pole_idx);
+    } else {
+        band_merge(&mut dm, &pole_idx, &walk_idx);
+    }
+    // The curvature grid over the band's own box, inserted as Steiner
+    // points; the referee takes over from there.
+    let (u_lo, u_hi) = (walk_row[0].x, walk_row[walk_row.len() - 1].x);
+    let (v_lo, v_hi) = (v_lat.min(v_pole), v_lat.max(v_pole));
+    let rect = vec![
+        Point2::new(u_lo, v_lo),
+        Point2::new(u_lo, v_hi),
+        Point2::new(u_hi, v_hi),
+        Point2::new(u_hi, v_lo),
+    ];
+    for row in grid_rows(surface, &[&rect], deflection) {
+        for p in row {
+            if dm.pts.len() >= MAX_DOMAIN_VERTS {
+                break;
+            }
+            dm.insert_point(surface, p);
+        }
+    }
+    refine_domain(&mut dm, surface, deflection);
+    Ok((dm.tris, dm.p3))
+}
+
+/// The polygon domain — a curved face whose single walk is a proper
+/// UV polygon keeping its interior: the planar kernel ear-clips the
+/// domain (boundary kept, holes none), the dropped boundary points
+/// are stitched back (the rim samples are the neighboring faces'
+/// own), the curvature grid is inserted as Steiner points, and the
+/// deflection referee splits chords and panels until each misses the
+/// surface by at most the deflection. The slanted-panel defect
+/// cannot arise through a polygon triangulation the referee owns.
+fn polygon_tris(
+    fi: usize,
+    surface: &Surface,
+    loop_verts: &[BoundaryVert],
+    deflection: f64,
+) -> Result<(Vec<[u32; 3]>, Vec<Vector3>), String> {
+    let (mut tris, p3) = planar_region_tris(fi, &[loop_verts.to_vec()])?;
+    let boundary: Vec<Point2> = loop_verts.iter().map(|b| b.uv).collect();
+    let mut dm = DomainMesh {
+        pts: boundary,
+        p3,
+        tris: std::mem::take(&mut tris),
+    };
+    let rows = grid_rows(surface, &[&dm.pts.clone()], deflection);
+    for row in rows {
+        for p in row {
+            if dm.pts.len() >= MAX_DOMAIN_VERTS {
+                break;
+            }
+            dm.insert_point(surface, p);
+        }
+    }
+    refine_domain(&mut dm, surface, deflection);
+    let tris = std::mem::take(&mut dm.tris);
+    Ok((tris, dm.p3))
+}
+
+/// The exterior trim on the sphere — the parameter box minus the
+/// walk's interior (the complement patches: the fuse bulges, the
+/// crescent's outer face). The box walk is synthesized: the two seam
+/// columns (one evaluated Vector3 per level, shared by both sides —
+/// the seam is this face's own parameter cut, no neighbor carries
+/// it), the two pole lines (one 3D pole each — reusing the walk's own
+/// pole vertex when the walk touches a pole, so the shared Draft
+/// vertex welds bit-exactly). The walk enters as the hole, the
+/// profile kernel bridges it into the outer walk, and the
+/// curvature-grid-plus-referee discipline densifies from there. The
+/// period is cut clear of the walk (the seam placed in the gap the
+/// walk leaves), so the hole never touches the seam columns; a walk
+/// touching a pole line is the near-tangent case the bridging's own
+/// visibility test arbitrates honestly.
+fn sphere_exterior_tris(
+    fi: usize,
+    surface: &Surface,
+    loop_verts: &[BoundaryVert],
+    deflection: f64,
+) -> Result<(Vec<[u32; 3]>, Vec<Vector3>), String> {
+    let Surface::Sphere { radius, .. } = surface else {
+        unreachable!("the caller routes only sphere faces here")
+    };
+    let walk: Vec<Point2> = loop_verts.iter().map(|b| b.uv).collect();
+    let walk_umin = walk.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let walk_umax = walk.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    let span = walk_umax - walk_umin;
+    let period = std::f64::consts::TAU;
+    if span >= period - 1e-9 * radius.max(1.0) {
+        return Err(format!(
+            "face {fi}: the exterior of a trim walk spanning the parameter period — the \
+             complement is the pole-connected band pair this reader does not yet tile; the \
+             exact channels still measure it"
+        ));
+    }
+    // The seam sits in the gap the walk leaves around the period.
+    let u0 = walk_umin - 0.3 * (period - span);
+    let u1 = u0 + period;
+    let v_south = -std::f64::consts::FRAC_PI_2;
+    let v_north = std::f64::consts::FRAC_PI_2;
+    // The pole points: the walk's own pole vertices weld bit-exactly
+    // with the plane faces' shared corners; a pole the walk does not
+    // touch is evaluated once (the parameterization's per-u noise is
+    // an artifact — one Vector3 is the only watertight spelling).
+    let vtol = 1e-9 * radius.max(1.0);
+    let walk_pole = |v_bound: f64| -> Option<Vector3> {
+        loop_verts
+            .iter()
+            .find(|b| (b.uv.y - v_bound).abs() <= vtol)
+            .map(|b| b.p3)
+    };
+    let south_p3 = walk_pole(v_south).unwrap_or_else(|| surface.point(u0, v_south));
+    let north_p3 = walk_pole(v_north).unwrap_or_else(|| surface.point(u0, v_north));
+    // The seam column levels: the meridian is a real half great
+    // circle — its chords must be deflection-true at synthesis (the
+    // referee never splits boundary edges), so the levels step by the
+    // sphere's own arc_step.
+    let levels = cell_centers(std::f64::consts::PI, arc_step(*radius, deflection));
+    // The synthesized outer walk, CCW: south pole line east, right
+    // seam column up, north pole line west, left seam column down.
+    // The pole lines carry only their corners (every 3D point there
+    // is the pole — the fan emerges through the referee); the seam
+    // columns carry the levels, one evaluated Vector3 shared by both
+    // sides.
+    let mut outer_pts: Vec<Point2> = Vec::with_capacity(2 * levels.len() + 6);
+    let mut outer_p3: Vec<Vector3> = Vec::with_capacity(2 * levels.len() + 6);
+    let push = |uv: Point2, p3: Vector3, pts: &mut Vec<Point2>, p3s: &mut Vec<Vector3>| {
+        pts.push(uv);
+        p3s.push(p3);
+    };
+    push(
+        Point2::new(u0, v_south),
+        south_p3,
+        &mut outer_pts,
+        &mut outer_p3,
+    );
+    push(
+        Point2::new(u1, v_south),
+        south_p3,
+        &mut outer_pts,
+        &mut outer_p3,
+    );
+    for v in &levels {
+        let seam_p3 = surface.point(u0, *v);
+        push(Point2::new(u1, *v), seam_p3, &mut outer_pts, &mut outer_p3);
+    }
+    push(
+        Point2::new(u1, v_north),
+        north_p3,
+        &mut outer_pts,
+        &mut outer_p3,
+    );
+    push(
+        Point2::new(u0, v_north),
+        north_p3,
+        &mut outer_pts,
+        &mut outer_p3,
+    );
+    for v in levels.iter().rev() {
+        let seam_p3 = surface.point(u0, *v);
+        push(Point2::new(u0, *v), seam_p3, &mut outer_pts, &mut outer_p3);
+    }
+    // The walk enters as the hole, its near-pole vertices nudged a
+    // recognition-scale gap INSIDE the box: a bite that reaches a pole
+    // touches the box's v-extreme exactly (the authored vertex IS the
+    // pole), and a hole touching the outer boundary is not a region
+    // the bridging can splice. The nudge moves the derived UV alone —
+    // the authored 3D samples ride unchanged, and the sliver it opens
+    // maps to the pole's own neighborhood (every 3D point on a
+    // v-extreme edge is the pole), so the mesh is unaffected: the
+    // sliver's triangles are 3D-degenerate and dropped exactly.
+    let gap = 1e-9;
+    let hole: Vec<Point2> = walk
+        .iter()
+        .map(|p| {
+            let mut q = *p;
+            if (q.y - v_north).abs() <= vtol {
+                q.y = v_north - gap;
+            }
+            if (q.y - v_south).abs() <= vtol {
+                q.y = v_south + gap;
+            }
+            q
+        })
+        .collect();
+    let mut tris = triangulate_planar_region(&outer_pts, std::slice::from_ref(&hole))
+        .map_err(|e| format!("face {fi}: the exterior UV region did not triangulate: {e:?}"))?;
+    let pts: Vec<Point2> = outer_pts
+        .iter()
+        .copied()
+        .chain(hole.iter().copied())
+        .collect();
+    let mut used = vec![false; pts.len()];
+    for t in &tris {
+        for ti in t {
+            used[*ti as usize] = true;
+        }
+    }
+    if !used.iter().all(|u| *u) {
+        stitch_wire(&mut tris, &used, 0, outer_pts.len(), fi)?;
+        stitch_wire(&mut tris, &used, outer_pts.len(), hole.len(), fi)?;
+    }
+    let p3: Vec<Vector3> = outer_p3
+        .iter()
+        .copied()
+        .chain(loop_verts.iter().map(|b| b.p3))
+        .collect();
+    let mut dm = DomainMesh { pts, p3, tris };
+    // The curvature grid over the whole box, kept strictly inside the
+    // region (inside the outer walk, clear of every boundary).
+    let boundary: Vec<Vec<Point2>> = vec![
+        {
+            // the outer walk's own polyline, closed
+            let mut o = dm.pts[..outer_pts.len()].to_vec();
+            o.push(o[0]);
+            o
+        },
+        {
+            let mut h = dm.pts[outer_pts.len()..].to_vec();
+            h.push(h[0]);
+            h
+        },
+    ];
+    let bounds: Vec<&[Point2]> = boundary.iter().map(|b| b.as_slice()).collect();
+    for row in grid_rows(surface, &bounds, deflection) {
+        for p in row {
+            if dm.pts.len() >= MAX_DOMAIN_VERTS {
+                break;
+            }
+            dm.insert_point(surface, p);
+        }
+    }
+    refine_domain(&mut dm, surface, deflection);
+    let tris = std::mem::take(&mut dm.tris);
+    Ok((tris, dm.p3))
+}
+
+/// Post-process one built boundary walk on a u-periodic surface: a
+/// walk that passes through a POLE may arrive along one meridian and
+/// depart along another up to half a period away — the unwrap's
+/// ±half-period window cannot span that jump, so the walk's UV
+/// polygon tears (the closing edge cuts the interior, and the
+/// winding classifier reads a meaningless shoelace). Two repairs,
+/// both spelled exactly the way the full-sphere walk spells its own
+/// pole lines:
+///
+/// * **the pole split** — the pole vertex is doubled, the arrival
+///   copy keeping the arrival meridian's u and the departure copy
+///   taking the departure meridian's; the edge between them lies ON
+///   the pole (one 3D point — the degenerate top edge, the rectangle
+///   domain's own spelling). Both copies share the pole's 3D sample
+///   bit-exactly, so the emit welds them back into one mesh vertex;
+/// * **the closure re-anchor** — a torn closing edge (the walk's
+///   start representative a full period off) is healed by shifting
+///   the prefix that leads into the split by whole periods: every
+///   edge inside the prefix keeps its length, the split edge absorbs
+///   the change (it is 3D-degenerate), and the closure comes within
+///   the half-period window.
+fn split_pole_jumps(walk: &mut Vec<BoundaryVert>, period: f64, vmin: f64, vmax: f64) {
+    let half = period / 2.0;
+    let pole_tol = 1e-9 * (vmax - vmin).abs().max(1.0);
+    let at_pole = |v: f64| (v - vmax).abs() <= pole_tol || (v - vmin).abs() <= pole_tol;
+    let n = walk.len();
+    // The pole jumps: a pole sample whose successor sits more than
+    // half a period away in u (the two meridians of a pole-crossing
+    // walk).
+    let jumps: Vec<(usize, f64)> = (0..n)
+        .filter(|&i| {
+            let b = &walk[i];
+            let next = &walk[(i + 1) % n];
+            at_pole(b.uv.y) && (next.uv.x - b.uv.x).abs() > half - 1e-9
+        })
+        .map(|i| (i, walk[(i + 1) % n].uv.x))
+        .collect();
+    if jumps.is_empty() {
+        return;
+    }
+    // The closure re-anchor FIRST: a torn closing edge (the walk's
+    // start representative a full period off) heals by shifting the
+    // prefix that leads into the FIRST jump's pole sample by whole
+    // periods — every edge inside the prefix keeps its length, and
+    // the pole line spelled next absorbs the change (it is one 3D
+    // point; its u spelling is ours to choose).
+    if (walk[0].uv.x - walk[n - 1].uv.x).abs() > half {
+        let shift = ((walk[n - 1].uv.x - walk[0].uv.x) / period).round() * period;
+        if shift != 0.0 {
+            for b in walk.iter_mut().take(jumps[0].0 + 1) {
+                b.uv.x += shift;
+            }
+        }
+    }
+    // Then the runs: each jump's pole line spelled the way the
+    // full-sphere walk spells its own — a run of same-3D samples from
+    // the (possibly re-anchored) arrival meridian to the departure
+    // meridian, the intermediate u's interpolated. The band machinery
+    // reads the run exactly as it reads the primitive's own pole
+    // lines: the steps between run samples pair with degenerate
+    // 3D panels that the emit drops, and the real triangles pair
+    // locally around the one mesh vertex the pole becomes.
+    let mut out: Vec<BoundaryVert> = Vec::with_capacity(n + 8 * jumps.len());
+    for i in 0..n {
+        out.push(walk[i].clone());
+        if let Some(&(si, u_dep)) = jumps.iter().find(|&&(j, _)| j == i) {
+            let u_arr = walk[si].uv.x;
+            for k in 1..=8 {
+                out.push(BoundaryVert {
+                    uv: Point2::new(u_arr + (u_dep - u_arr) * (k as f64 / 8.0), walk[si].uv.y),
+                    p3: walk[si].p3,
+                });
+            }
+        }
+    }
+    *walk = out;
 }
 
 /// Insert the dropped boundary points `dropped` (in walk order from
@@ -863,11 +1361,15 @@ fn monotone_chains(uv: &[Point2]) -> Result<(Vec<usize>, Vec<usize>), String> {
 /// torus minor ring) and by the arc length of the periodic step where
 /// it is straight (the cylinder axis, the cone generatrix). Samples
 /// land at cell centers — half a step clear of every domain boundary —
-/// only those strictly inside the face's UV loop survive, and a run
-/// that the region punches shorter than two points is dropped (the
-/// referee re-densifies locally). Rows run bottom-up in v.
-fn grid_rows(s: &Surface, loop_pts: &[Point2], deflection: f64) -> Vec<Vec<Point2>> {
-    let Some((lo, hi)) = loop_bounds(loop_pts) else {
+/// only those strictly inside the region survive (inside the first
+/// boundary loop, outside the rest — holes; clear of them all), and a
+/// run that the region punches shorter than two points is dropped
+/// (the referee re-densifies locally). Rows run bottom-up in v.
+fn grid_rows(s: &Surface, boundary: &[&[Point2]], deflection: f64) -> Vec<Vec<Point2>> {
+    let Some(outer) = boundary.first() else {
+        return Vec::new();
+    };
+    let Some((lo, hi)) = loop_bounds(outer) else {
         return Vec::new();
     };
     let (urange, vrange) = (hi.x - lo.x, hi.y - lo.y);
@@ -942,7 +1444,9 @@ fn grid_rows(s: &Surface, loop_pts: &[Point2], deflection: f64) -> Vec<Vec<Point
             .into_iter()
             .filter(|u| {
                 let p = Point2::new(lo.x + u, lo.y + v);
-                point_in_polygon(p, loop_pts) && dist_to_loop(p, loop_pts) > margin
+                point_in_polygon(p, boundary[0])
+                    && boundary[1..].iter().all(|h| !point_in_polygon(p, h))
+                    && boundary.iter().all(|l| dist_to_loop(p, l) > margin)
             })
             .collect();
         if kept.len() < 2 {

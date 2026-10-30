@@ -30,10 +30,13 @@
 //! outcomes (whole shapes, the exact empty set, the named refusals —
 //! the rotated/oblique/near-parallel axis, the crossing and tangent
 //! section disks, the flush landing, the internal void) are asserted
-//! by name, and the render channel is honest BOTH ways — every
-//! annulus-carrying result refuses by name (hole-trimmed faces are
-//! not tessellated by this reader), while the clipped-cylinder
-//! commons and the whole-shape outcomes tessellate WATERTIGHT. The
+//! by name, and the render channel TESSELLATES every constructive
+//! result watertight — the annulus-carrying cuts and fuses through
+//! the hole-wire planar arm (the hole's circle rim samples are the
+//! shared edge discretization, so the annulus and the wall close
+//! bit-exactly, the mesh volume within the deflection-derived chord
+//! bound), the clipped-cylinder commons and the whole-shape outcomes
+//! outright. The
 //! frame contract is part of the pairing: permuted, sign-flipped, and
 //! mirrored frames run exact, and the kernel never silently snaps.
 
@@ -148,6 +151,36 @@ fn assert_watertight(name: &str, brep: &fc_part::ExactBRep) {
     }
 }
 
+/// The annulus render discipline: watertight, and the mesh volume
+/// within the deflection-derived chord bound of the exact — the
+/// hole's inscribed polygon rim and the wall's chords are the only
+/// approximations, each a circular-segment area
+/// `(2/3)·perimeter·sagitta ≤ (2/3)·τ·r·d`, projected over the
+/// prism's height.
+fn assert_renders(name: &str, brep: &fc_part::ExactBRep, r: f64, height: f64) {
+    let mesh = tessellate_brep(brep, 0.25)
+        .unwrap_or_else(|e| panic!("{name}: the render channel tessellates: {e}"));
+    let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
+    for t in &mesh.triangles {
+        for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *directed.entry((x, y)).or_default() += 1;
+        }
+    }
+    for (&(x, y), &n) in &directed {
+        assert!(
+            n == 1 && directed.get(&(y, x)).copied() == Some(1),
+            "{name}: the mesh is watertight ({x}→{y} used {n} times)"
+        );
+    }
+    let exact = brep_volume(brep).unwrap_or_else(|e| panic!("{name}: volume refused: {e}"));
+    let mv = mesh.volume();
+    let bound = (4.0 / 3.0) * PI * r * 0.25 * height;
+    assert!(
+        (mv - exact).abs() <= bound,
+        "{name}: the mesh volume {mv:.6} vs the exact {exact:.6} — the chord bound is {bound:.6}"
+    );
+}
+
 /// One constructive case: the solid's measures against the closed
 /// form AND OCCT, the face count against both, the Euler
 /// characteristic with the hole adjustment (the genus contract), and
@@ -260,25 +293,20 @@ fn through_hole_measures_the_closed_forms_and_occt() {
         3,
         0,
     );
-    // The render channel: the annulus-carrying results refuse by
-    // name, the clipped cylinder meshes watertight.
-    let err = tessellate_brep(
+    // The render channel: the annulus-carrying results tessellate
+    // watertight with the deflection-derived chord bound, the
+    // clipped cylinder watertight (its rims are the shared samples).
+    assert_renders(
+        "through cut",
         &solid(run(BooleanOp::Cut, v3(15.0, 10.0, -2.0), AZ, 3.0, 10.0)),
-        0.25,
-    )
-    .expect_err("through cut: the render channel refuses");
-    assert!(
-        err.contains("holes"),
-        "through cut: the refusal names its reason: {err}"
+        3.0,
+        5.0,
     );
-    let err = tessellate_brep(
+    assert_renders(
+        "through fuse",
         &solid(run(BooleanOp::Fuse, v3(15.0, 10.0, -2.0), AZ, 3.0, 10.0)),
-        0.25,
-    )
-    .expect_err("through fuse: the render channel refuses");
-    assert!(
-        err.contains("holes"),
-        "through fuse: the refusal names its reason: {err}"
+        3.0,
+        5.0,
     );
     assert_watertight(
         "through common",
@@ -523,12 +551,8 @@ fn flush_far_ends_contribute_nothing() {
     // OCCT's own flush-through fuse (the corpus' cut-only sibling
     // measured at the probe stage): the SAME volume and area with a
     // ninth, redundant coplanar-disk face — the minimal shell is
-    // ours. The render channel refuses (the high annulus).
-    let err = tessellate_brep(&brep, 0.25).expect_err("the flush fuse refuses");
-    assert!(
-        err.contains("holes"),
-        "the flush fuse's refusal names its reason: {err}"
-    );
+    // ours. The render channel tessellates it (the high annulus).
+    assert_renders("the flush fuse", &brep, 3.0, 5.0);
 }
 
 /// The classification tier: the whole shapes, the exact empty set,
@@ -714,7 +738,8 @@ fn the_shell_and_render_contracts_hold() {
         );
     }
     // The render channel: every annulus-carrying constructive result
-    // refuses by name.
+    // tessellates watertight (the volume bound is the dedicated
+    // discipline's own test below).
     for (name, op, oc, r, h) in [
         (
             "through cut",
@@ -734,11 +759,7 @@ fn the_shell_and_render_contracts_hold() {
         ("blind fuse", BooleanOp::Fuse, v3(15.0, 10.0, 2.0), 2.0, 5.0),
     ] {
         let brep = solid(run(op, oc, AZ, r, h));
-        let err = tessellate_brep(&brep, 0.25).expect_err("the render channel refuses");
-        assert!(
-            err.contains("holes"),
-            "{name}: the refusal names its reason: {err}"
-        );
+        assert_watertight(name, &brep);
     }
     // The commons (the clipped cylinders) and the whole-shape
     // outcomes mesh WATERTIGHT — the display channel honest for
@@ -776,4 +797,32 @@ fn the_shell_and_render_contracts_hold() {
         let brep = solid(run(op, oc, AZ, r, h));
         assert_watertight(name, &brep);
     }
+}
+
+/// The annulus mesh's approximation is deflection-true in the
+/// discipline's own sense: the hole's inscribed polygon deficit (and
+/// the wall's chord band) shrinks with the deflection — quartering
+/// the deflection quarters the volume error (the circular-segment
+/// area is linear in the sagitta).
+#[test]
+fn annulus_mesh_volume_error_shrinks_with_deflection() {
+    let brep = solid(run(BooleanOp::Cut, v3(15.0, 10.0, -2.0), AZ, 3.0, 10.0));
+    let exact = brep_volume(&brep).unwrap();
+    let err = |d: f64| {
+        (tessellate_brep(&brep, d)
+            .expect("the render channel")
+            .volume()
+            - exact)
+            .abs()
+    };
+    let coarse = err(0.25);
+    let fine = err(0.0625);
+    assert!(
+        coarse > 0.0,
+        "the coarse annulus mesh sits strictly off the exact (the chords bite)"
+    );
+    assert!(
+        fine <= coarse / 3.0,
+        "quartering the deflection must shrink the deficit ({fine:.6} vs {coarse:.6})"
+    );
 }

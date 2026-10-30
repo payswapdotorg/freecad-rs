@@ -15,9 +15,11 @@
 //!
 //! The exactness discipline: the FCBREP v2 round-trip measures
 //! bit-identically, the classification outcomes (whole, empty,
-//! refused) are asserted by name, and the tessellation refuses by name
-//! — the two-channel honesty contract (the exact channels measure;
-//! the render channel says why it will not).
+//! refused) are asserted by name, and the render channel TESSELLATES
+//! every constructive result watertight, within the deflection-derived
+//! bound — the two-channel honesty contract with both channels now
+//! answering (the trim-domain slice: the patch domains classify by
+//! the wire traversal and tile under the sagitta discipline).
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -93,8 +95,18 @@ fn occt(case: &str) -> (f64, f64) {
 
 /// One constructive case: the solid's measures against the closed
 /// form and OCCT, the face count against OCCT's own topology, the
-/// FCBREP round-trip bit-identical, and the tessellation refused by
-/// name (the two-channel contract).
+/// FCBREP round-trip bit-identical, and the render channel
+/// tessellating watertight within the deflection bound (the
+/// two-channel contract — both channels now answering).
+/// The render-channel expectation: the constructive results
+/// tessellate watertight within the deflection bound; the one
+/// pole-crossing patch class refuses by name.
+#[derive(Clone, Copy, PartialEq)]
+enum Render {
+    Meshes,
+    RefusesPoleCrossing,
+}
+
 #[allow(clippy::too_many_arguments)] // the case's own vocabulary
 fn acceptance(
     name: &str,
@@ -105,6 +117,7 @@ fn acceptance(
     want_v: f64,
     want_a: f64,
     faces: usize,
+    render: Render,
 ) {
     let brep = solid(run(op, cs, r));
     assert_eq!(brep.faces.len(), faces, "{name}: the face count");
@@ -138,16 +151,44 @@ fn acceptance(
         (rv - v).abs() <= 1e-12 * v.abs().max(1.0),
         "{name}: round-trip volume {rv:.12} vs {v:.12}"
     );
-    // The tessellation refuses by name — the render channel's honest
-    // answer for the arc-bounded patches and the holed face.
-    let err = tessellate_brep(&brep, 0.25).expect_err("the render channel refuses");
-    assert!(
-        err.contains("spherical polygon")
-            || err.contains("holes")
-            || err.contains("non-positive volume")
-            || err.contains("single closed circle"),
-        "{name}: the tessellation refusal names its reason: {err}"
-    );
+    // The render channel: the trim-domain slice's own arm — the patch
+    // domains (the spherical polygon, the cap, the complement)
+    // classify by the wire's traversal and tile under the sagitta
+    // discipline, watertight with the mesh volume within the
+    // deflection-derived bound; the one class that does not — a patch
+    // whose walk crosses a pole with a meridian jump of half a period
+    // or more — refuses by name.
+    match render {
+        Render::Meshes => {
+            let mesh = tessellate_brep(&brep, 0.25)
+                .unwrap_or_else(|e| panic!("{name}: the render channel tessellates: {e}"));
+            let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
+            for t in &mesh.triangles {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    *directed.entry((a, b)).or_default() += 1;
+                }
+            }
+            for (&(a, b), &n) in &directed {
+                assert!(
+                    n == 1 && directed.get(&(b, a)).copied() == Some(1),
+                    "{name}: the mesh is watertight ({a}→{b} used {n} times)"
+                );
+            }
+            let bound = 4.0 * PI * r * r * 0.25;
+            assert!(
+                (mesh.volume() - v).abs() <= bound,
+                "{name}: the mesh volume {:.6} vs the exact {v:.6} — the deflection bound is                  {bound:.6}",
+                mesh.volume()
+            );
+        }
+        Render::RefusesPoleCrossing => {
+            let err = tessellate_brep(&brep, 0.25).expect_err("the pole-crossing class refuses");
+            assert!(
+                err.contains("crosses a pole"),
+                "{name}: the refusal names its reason: {err}"
+            );
+        }
+    }
 }
 
 /// The corner station: the octant bite behind the corner at the
@@ -165,6 +206,7 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         3000.0 - 4.5 * PI,
         1700.0 - 9.0 * PI / 4.0,
         7,
+        Render::Meshes,
     );
     acceptance(
         "corner fuse",
@@ -175,6 +217,7 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         3000.0 + 31.5 * PI,
         1700.0 + 99.0 * PI / 4.0,
         7,
+        Render::Meshes,
     );
     acceptance(
         "corner common",
@@ -185,6 +228,7 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         4.5 * PI,
         45.0 * PI / 4.0,
         4,
+        Render::Meshes,
     );
 }
 
@@ -202,6 +246,7 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         3000.0 - 9.0 * PI,
         1700.0,
         7,
+        Render::RefusesPoleCrossing,
     );
     acceptance(
         "edge fuse",
@@ -212,6 +257,7 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         3000.0 + 27.0 * PI,
         1700.0 + 18.0 * PI,
         7,
+        Render::RefusesPoleCrossing,
     );
     acceptance(
         "edge common",
@@ -222,6 +268,7 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         9.0 * PI,
         18.0 * PI,
         3,
+        Render::RefusesPoleCrossing,
     );
 }
 
@@ -239,6 +286,7 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         3000.0 - 16.0 * PI / 3.0,
         1700.0 + 4.0 * PI,
         7,
+        Render::Meshes,
     );
     acceptance(
         "face fuse",
@@ -249,6 +297,7 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         3000.0 + 16.0 * PI / 3.0,
         1700.0 + 4.0 * PI,
         7,
+        Render::Meshes,
     );
     acceptance(
         "face common",
@@ -259,6 +308,7 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         16.0 * PI / 3.0,
         12.0 * PI,
         2,
+        Render::Meshes,
     );
 }
 
@@ -393,12 +443,12 @@ fn mirror_stations_and_rotated_frames_measure_the_same_forms() {
     );
 }
 
-/// The watertight discipline on the channel that CAN render: the
+/// The watertight discipline on the whole-shape channel: the
 /// whole-box and whole-sphere classification outcomes tessellate
-/// watertight (the plain primitives), while every constructive bite
-/// refuses by name — never a torn mesh.
+/// watertight (the plain primitives) — the constructive bites are
+/// covered by every `acceptance` call above.
 #[test]
-fn render_channel_is_watertight_or_refuses_by_name() {
+fn render_channel_is_watertight_on_the_whole_shapes() {
     let watertight = |brep: &fc_part::ExactBRep| {
         let mesh = tessellate_brep(brep, 0.25).expect("the plain solids tessellate");
         let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
@@ -488,6 +538,7 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
             3000.0 - deep_v,
             1700.0 - disk_a + deep_a,
             7,
+            Render::Meshes,
         );
         acceptance(
             &format!("offset-{tag} fuse"),
@@ -498,6 +549,7 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
             3000.0 + shallow_v,
             1700.0 - disk_a + shallow_a,
             7,
+            Render::Meshes,
         );
         acceptance(
             &format!("offset-{tag} common"),
@@ -508,6 +560,7 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
             deep_v,
             disk_a + deep_a,
             2,
+            Render::Meshes,
         );
     }
 }
@@ -528,5 +581,32 @@ fn offset_multi_face_crossings_refuse_by_name() {
     assert!(
         why.contains("crosses 2 of the box's faces"),
         "the lateral+face crossing names its count: {why}"
+    );
+}
+
+/// The patch mesh's approximation is deflection-true in the
+/// discipline's own sense: the octant ball's chord-and-panel deficit
+/// shrinks with the deflection — quartering the deflection quarters
+/// the volume error (the chord sagitta is linear in the deflection).
+#[test]
+fn patch_mesh_volume_error_shrinks_with_deflection() {
+    let octant = solid(run(BooleanOp::Common, v3(0.0, 0.0, 0.0), 3.0));
+    let exact = brep_volume(&octant).unwrap();
+    let err = |d: f64| {
+        (tessellate_brep(&octant, d)
+            .expect("the render channel")
+            .volume()
+            - exact)
+            .abs()
+    };
+    let coarse = err(0.25);
+    let fine = err(0.0625);
+    assert!(
+        coarse > 0.0,
+        "the coarse patch mesh sits strictly off the exact (the chords bite)"
+    );
+    assert!(
+        fine <= coarse / 3.0,
+        "quartering the deflection must shrink the deficit ({fine:.6} vs {coarse:.6})"
     );
 }

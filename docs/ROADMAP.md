@@ -1164,6 +1164,76 @@ behind us.
       disk's side-clipped sections), the coplanar-face merge (the
       flush landing's union), and the OCCT-authored-result reader
       widening (multi-segment NURBS arcs).
+- [x] **K4-2d/3 slice 5 (landing 2026-10-30)** the trim-domain
+      classification — the render channel closes over the constructive
+      families. **The wire-orientation convention every authored face
+      carries (the `TopoFace` contract: the traversal keeps the region
+      on the LEFT viewed from the face's OUTWARD normal, the outward
+      normal `σ·(∂u×∂v)`) is now READ by the tessellator**: the walk's
+      UV winding against the parameterization's own orientation picks
+      the side — the interior (a spherical polygon, a wavy cap) tiles
+      as a UV polygon through the profile kernel's planar-region
+      triangulator with the curvature grid inserted as Steiner points
+      and the deflection referee splitting chords and panels; the
+      exterior (a complement patch — the fuse bulge, the crescent's
+      outer face) tiles as the SPHERE's parameter box minus the walk,
+      the box walk synthesized with one evaluated seam Vector3 per
+      level shared by both sides and one 3D pole per pole line
+      (reusing the walk's own pole vertex when the bite reaches one,
+      so the shared Draft vertex welds bit-exactly), the walk entering
+      as the hole through the kernel's own bridging; a sphere's single
+      closed latitude circle is the CAP line case — the two half-boxes
+      the walk direction separates, the classified pole's row
+      synthesized at the walk's own u values and the band merge
+      fanning the degenerate side exactly as the full sphere's pole
+      lines do. **The planar path went multi-wire**: the hole wires
+      (the annuli, the rectilinear rings) bridge and ear-clip through
+      the kernel's hole-bridging triangulator, the hole rims entering
+      as the shared edge discretizations they are — the annulus and
+      the wall close bit-exactly, and a ring face's rectilinear hole
+      triangulates EXACTLY (the box×box family's every constructive
+      result now renders with the mesh volume exactly the exact
+      volume). Two latent defects the new paths flushed out, both
+      fixed: the planar retain filter dropped the collinear ear's
+      keep-boundary degenerate panel — the very triangle that carries
+      the cross-edge pairing when its vertex is only partially unused
+      (the stitch never fires) — so the emit's identical-vertex check
+      is now the single dropping point; and a walk through a pole
+      tears the u-unwrap (the two meridians up to half a period apart,
+      the ±half-period window cannot span the jump) — the
+      `split_pole_jumps` post-pass now spells the jump as a pole RUN
+      (the full sphere's own spelling) and re-anchors a torn closure
+      by shifting the prefix that leads into the run by whole periods.
+      **The box-bounding dispatch is winding-blind on purpose**: every
+      band-like walk — the K4-1/K4-2 corpus's OCCT-authored wires
+      carry OCCT's own orientation conventions, not this kernel's
+      region-on-left spelling — takes the band machinery as before
+      (the oblique-cut regression proved the point), and the
+      primitives' full-box walks (whose authored directions predate
+      the convention) are classified by extent alone. Acceptance: the
+      three boolean families' constructive results render WATERTIGHT
+      with deflection-derived volume bounds — the box×box family
+      entirely (rings exact), the box×cylinder family entirely (the
+      genus-1 through hole, the axle, the blind bores, the boss, the
+      flush far end — the annulus chord bound `(4/3)·τ·r·d·h`, with
+      the quartering convergence test), the box×sphere corner and
+      face and offset stations for all three ops (the octant patch,
+      the hemisphere cap, the small-circle caps and their complements,
+      the holed face — the patch bound `4πr²·d`, with the
+      quartering convergence test), and through the real dispatch the
+      imported-box cuts (fc-io: the crescent's period-safe complement,
+      the corner bite, the offset bite, the through hole all carrying
+      working display channels). Honest boundaries, all named: the
+      edge-station's pole-crossing patch (the quarter ball whose walk
+      jumps half a period at the pole — the authored pole-run tiling
+      is the next slice, both the patch and its complement), a curved
+      face keeping the exterior of its trim on a non-sphere surface,
+      hole-trimmed CURVED domains, and B-splines — unchanged. Suite:
+      725, none ignored. The remaining K4-2d/3 surface: the authored
+      pole-run tiling (the edge station), the crossing-disk
+      side-clipped sections, the coplanar-face merge (the flush
+      landing's union), and the OCCT-authored-result reader widening
+      (multi-segment NURBS arcs).
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

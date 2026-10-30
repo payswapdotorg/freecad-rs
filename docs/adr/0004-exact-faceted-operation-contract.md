@@ -10,7 +10,15 @@
   the cylindrical bore taxonomy, and the pairing table CLOSES over
   the three analytic classes: the catch-all refusal arm retires, the
   compiler's match exhaustiveness the proof that every pairing lands
-  somewhere). Extends
+  somewhere) **and a fourth time 2026-10-30 by the K4-2d/3 slice 5
+  landing** (the render channel's trim-domain classification — the
+  wire-orientation convention this ADR's own `TopoFace` contract
+  spells is now READ by the tessellator: the constructive results of
+  all three boolean families tessellate watertight under the sagitta
+  discipline, the annuli and rings through the planar hole-wire arm,
+  the caps, patches and complements through the winding classifier —
+  the render channel's honest refusals shrinking to the named
+  boundaries). Extends
   [`0003-geometry-kernel-strategy.md`](0003-geometry-kernel-strategy.md)
   from the kernel program into the application's operation layer; does
   not revisit the kernel decision.
@@ -224,6 +232,26 @@ This architecture lands in slices; each stays green on its own.
   outside-the-pairing-table refusal message retires with it (the
   crossing-disk boundary inherits the honest role for the
   configuration the old test pinned).
+- **Slice 5 (landed 2026-10-30, K4-2d/3):** the render channel's
+  trim-domain classification. The tessellator reads the
+  wire-orientation convention (region on the left of the traversal,
+  viewed from the face's outward normal): the walk's UV winding
+  against the parameterization's own orientation picks the side —
+  interiors tile as UV polygons (the planar kernel plus the curvature
+  grid plus the deflection referee), exteriors as the sphere's
+  parameter box minus the walk (the pole lines and the seam
+  synthesized the way the primitives spell their own), and a single
+  closed latitude circle as the cap band to the classified pole. The
+  planar path went multi-wire: the hole wires bridge through the
+  kernel's own hole-bridging triangulator, the hole rims entering as
+  the shared edge samples they are. The box×box family renders
+  entirely (rectilinear holes triangulate exactly), the box×cylinder
+  family entirely, the box×sphere corner/face/offset stations for all
+  three ops — and through the real dispatch the imported-box cuts
+  carry working display channels. Honest boundaries, named: the
+  edge-station's pole-crossing patch (the authored pole-run tiling is
+  the next slice), the exterior trim on non-sphere surfaces,
+  hole-trimmed curved domains, B-splines.
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
   results; the trim-domain classification (the crossing disk's
@@ -237,6 +265,10 @@ This architecture lands in slices; each stays green on its own.
   (sphere×sphere, cylinder×cylinder, cylinder×sphere, box×sphere at
   the boundary-skeleton and offset stations, box×box among
   frame-parallel boxes, and box×cylinder at the
+  interior-cross-section stations) are wired
+  (sphere×sphere, cylinder×cylinder, cylinder×sphere, box×sphere at
+  the boundary-skeleton and offset stations, box×box among
+  frame-parallel boxes, and box×cylinder at the
   interior-cross-section stations) are wired — the pairing table
   closed over the three analytic classes; the rest
   refuse by name — including the families' own honest boundaries
@@ -244,9 +276,12 @@ This architecture lands in slices; each stays green on its own.
   two or more faces, the oversized bite, the near-but-not-bit-exact
   station, the rotated box×box frame, the box×box coplanar fuse and
   split cut, the box×cylinder crossing and tangent disks, the
-  box×cylinder flush landing and internal void). The trim-domain
-  classification (the crossing disk's side-clipped sections) is the
-  named widening path.
+  box×cylinder flush landing and internal void) — and the RENDER
+  channel's own named boundaries (the edge-station's pole-crossing
+  patch, the exterior trim on non-sphere surfaces, hole-trimmed
+  curved domains, B-spline faces). The trim-domain classification
+  (the crossing disk's side-clipped sections, the authored pole-run
+  tiling) is the named widening path.
 - **That the mesh fallback for unsupported primitive combinations is
   exactness.** It is faceted, the representation says so, and the
   narrowing path is more exact families, not relabeling.
@@ -260,7 +295,11 @@ This architecture lands in slices; each stays green on its own.
 
 - When K4-2d/3 lands additional exact-boolean families, the dispatch
   table grows and the faceted-fallback set shrinks — by amendment to
-  this ADR, not silently. *(Exercised 2026-10-30: the K4-2d/3
+  this ADR, not silently. *(The render channel widens the same way:
+  slice 5's landing amended the render-refusal lists above — the
+  annuli, rings, caps, patches and period-safe complements now
+  tessellate, the named boundaries shrinking to the pole-run tiling
+  and the crossing-disk sections.)* *(Exercised 2026-10-30: the K4-2d/3
   landings — slice 1 and the offset-station slice 2 the same day —
   amended rules 3 and this section's lists: the box×sphere family
   above; slice 3 the same day: the box×box family, the second

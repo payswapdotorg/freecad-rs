@@ -22,7 +22,7 @@ placements, sketches) — lives in
 **Verified baseline** — v0.1.8 (`main` @ 2026-10-24, plus the
 v0.2.0 — the browser workbench; v0.2.1 makes the workbench a durable
 in-repo asset; v0.2.2 — feature patterns, the mechanical workflow):
-ten crates, **723 tests**
+ten crates, **725 tests**
 (counted 2026-10-30; per-crate counts live in
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the authoritative
 green run is CI: `cargo build` / `cargo test --workspace --locked` /
@@ -105,14 +105,22 @@ concrete terms:
   whose operand carries imported exact geometry (`TopoShape::Brep`)
   dispatches to the exact kernel families — sphere×sphere,
   cylinder×cylinder, cylinder×sphere, box×sphere (the boundary-skeleton
-  bite taxonomy and the offset cap stations), and box×box (the
-  rectilinear composition — the first family whose constructive
-  results even RENDER: the hole-free rectilinear faces tessellate
-  watertight with the mesh volume exactly the exact volume),
-  placements applied analytically —
+  bite taxonomy and the offset cap stations), box×box (the rectilinear
+  composition), and box×cylinder (the cylindrical bore taxonomy — the
+  pairing table closed over the three analytic classes), placements
+  applied analytically —
   the result carrying the exact model, measuring the kernel's own
   numbers; anything unpairable refuses with the operands and classes
-  named, never a silent tessellation of the imported geometry
+  named, never a silent tessellation of the imported geometry. The
+  render channel reads the same wire-orientation contract
+  (`docs/ROADMAP.md`, K4-2d/3 slice 5): the constructive results of
+  all three boolean families tessellate watertight under the sagitta
+  discipline — the annuli and rectilinear rings through the planar
+  hole-wire arm (a ring's hole triangulates exactly), the spherical
+  caps, patches and complements through the trim-domain
+  classification (the walk's winding picking the side, the pole lines
+  and seam synthesized the way the primitives spell their own) — with
+  the named boundaries the honest exceptions
   (`docs/adr/0004-exact-faceted-operation-contract.md`). Without
   imported exact geometry the faceted path above still runs — the
   approximation that remains is the *tessellation* itself, not the
