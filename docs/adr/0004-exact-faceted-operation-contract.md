@@ -26,7 +26,18 @@
   the patch and its complement's hole — every constructive result of
   the three boolean families now displays; the render refusals shrink
   to the named boundaries: the lune, the pole cusp, the non-sphere
-  degenerate v-extreme). Extends
+  degenerate v-extreme) **and a sixth time 2026-10-31 by the K4-2d/3
+  slice 7 landing** (the crossing-disk side-clipped sections — the
+  interior center crossing two adjacent faces whose section disks
+  cross each other's planes: the bite wraps the shared edge, the
+  box's faces NOTCHED at the rim, the sphere patch the lens between
+  two small-circle major arcs — the exact measure widening to the
+  geodesic-curvature Gauss–Bonnet for small-circle section wires,
+  the render channel tiling the lens through the exterior arm and
+  the cap-union complement through the bounded polygon; the audit
+  also surfaced and fixed the edge station's mirrored-parity cut/fuse
+  walks, latent-broken since slice 1 and caught then by the shell
+  validator as an error, never a wrong solid). Extends
   [`0003-geometry-kernel-strategy.md`](0003-geometry-kernel-strategy.md)
   from the kernel program into the application's operation layer; does
   not revisit the kernel decision.
@@ -262,8 +273,7 @@ This architecture lands in slices; each stays green on its own.
   hole-trimmed curved domains, B-splines.
 - **Later slices:** migrating the remaining mesh-result features
   (multi-fuse, mirroring, transform, PartDesign) to `Option<TopoShape>`
-  results; the trim-domain classification (the crossing disk's
-  side-clipped sections), the coplanar-face merge, and the
+  results; the coplanar-face merge and the
   OCCT-authored-result reader widening;
   PartDesign exact dispatch.
 
@@ -281,7 +291,8 @@ This architecture lands in slices; each stays green on its own.
   closed over the three analytic classes; the rest
   refuse by name — including the families' own honest boundaries
   (the off-skeleton general overlaps, the interior center crossing
-  two or more faces, the oversized bite, the near-but-not-bit-exact
+  three or more faces — or two uncrossed, through-going, or exactly
+  tangent ones — the oversized bite, the near-but-not-bit-exact
   station, the rotated box×box frame, the box×box coplanar fuse and
   split cut, the box×cylinder crossing and tangent disks, the
   box×cylinder flush landing and internal void) — and the RENDER
@@ -310,7 +321,11 @@ This architecture lands in slices; each stays green on its own.
   and the crossing-disk sections; slice 6's landing (2026-10-31)
   amended them again — the pole-run fan tiles the pole-crossing
   patches, the boundaries shrinking to the lune, the pole cusp, the
-  non-sphere degenerate v-extreme, and the crossing-disk sections.)* *(Exercised 2026-10-30: the K4-2d/3
+  non-sphere degenerate v-extreme, and the crossing-disk sections;
+  slice 7's landing (2026-10-31) amended them once more — the
+  crossing-disk lens and its complement tile, the render boundaries
+  shrinking to the lune, the pole cusp, and the non-sphere
+  degenerate v-extreme.)* *(Exercised 2026-10-30: the K4-2d/3
   landings — slice 1 and the offset-station slice 2 the same day —
   amended rules 3 and this section's lists: the box×sphere family
   above; slice 3 the same day: the box×box family, the second

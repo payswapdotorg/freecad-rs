@@ -1127,6 +1127,139 @@ fn offset_bite_of_imported_box_runs_exact() {
     }
 }
 
+/// The crossing-disk edge bite through the feature (K4-2d/3 slice 7):
+/// the sphere primitive placed inside the imported box at depths
+/// (a, b) = (1, 1.5) from two adjacent faces — the ball crossing both
+/// with the section disks crossing each other's planes, the bite
+/// wrapping the shared edge (the notched faces + the lens patch), the
+/// closed forms through the real dispatch, and the display channel
+/// tessellating the lens (the exterior trim) and its complement (the
+/// bounded polygon) under the sagitta discipline.
+#[test]
+fn crossing_disk_edge_bite_of_imported_box_runs_exact() {
+    // The hand forms (the same derivation the fc-part acceptance test
+    // documents): the footprints as disk-minus-segment, the lens by
+    // Gauss–Bonnet with the small-circle geodesic curvature, and the
+    // volume by the divergence identity.
+    let (r, a, b): (f64, f64, f64) = (2.0, 1.0, 1.5);
+    let rho_p = (r * r - a * a).sqrt();
+    let rho_q = (r * r - b * b).sqrt();
+    let h = (r * r - a * a - b * b).sqrt();
+    let seg =
+        |rho: f64, cut: f64| rho * rho * (cut / rho).acos() - cut * (rho * rho - cut * cut).sqrt();
+    let a_fp = std::f64::consts::PI * rho_p * rho_p - seg(rho_p, b);
+    let a_fq = std::f64::consts::PI * rho_q * rho_q - seg(rho_q, a);
+    // The junction turns (the box's inward frame, u_p = x̂, u_q = ẑ,
+    // a_e = ŷ — the parity cancels in the turns).
+    let (up, uq, ae) = (
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    );
+    let unit = |v: Vector3| v * (1.0 / v.length());
+    let tau = |t_in: Vector3, t_out: Vector3, p: Vector3| {
+        let v_hat = unit(p);
+        v_hat.dot(&t_in.cross(&t_out)).atan2(t_in.dot(&t_out))
+    };
+    let tau_m = tau(
+        unit(uq * h - ae * b),
+        unit(ae * a - up * h),
+        Vector3::new(-a, -h, -b),
+    );
+    let tau_p = tau(
+        unit(ae * a + up * h),
+        unit((ae * b + uq * h) * -1.0),
+        Vector3::new(-a, h, -b),
+    );
+    let dphi_p = std::f64::consts::PI + 2.0 * b.atan2(h);
+    let dphi_q = std::f64::consts::PI + 2.0 * a.atan2(h);
+    let a_lens =
+        r * r * (2.0 * std::f64::consts::PI - tau_m - tau_p + a / r * dphi_p + b / r * dphi_q);
+    let v_bite = (a * a_fp + b * a_fq + r * a_lens) / 3.0;
+    let want_cut = 3000.0 - v_bite;
+    let want_fuse = 3000.0 + 4.0 * std::f64::consts::PI * r * r * r / 3.0 - v_bite;
+    let want_common = v_bite;
+    for (kind, want) in [
+        ("Part::Cut", want_cut),
+        ("Part::Fuse", want_fuse),
+        ("Part::Common", want_common),
+    ] {
+        let path = temp_path("box-edge-offset");
+        let boxbrp = brp_fixture("box");
+        // The sphere at (1, 10, 1.5) — depths (1, 1.5) from the x=0
+        // and z=0 faces, r = 2 crossing both, the disks crossing
+        // (a² + b² = 3.25 < 4).
+        let xml = format!(
+            r#"
+<Document SchemaVersion="4" ProgramVersion="test" FileVersion="1">
+ <Objects Count="3" Dependencies="1">
+  <Object type="Part::Feature" name="Import" id="1"/>
+  <Object type="Part::Sphere" name="Ball" id="2"/>
+  <Object type="{kind}" name="Op" id="3"/>
+ </Objects>
+ <ObjectData Count="3">
+  <Object name="Import">
+   <Properties Count="1">
+    <Property name="Shape" type="Part::PropertyPartShape">
+     <Part file="ImportShape.brp"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="Ball">
+   <Properties Count="2">
+    <Property name="Radius" type="App::PropertyFloat">
+     <Float value="2"/>
+    </Property>
+    <Property name="Placement" type="App::PropertyPlacement">
+     <PropertyPlacement Px="1" Py="10" Pz="1.5" Q0="0" Q1="0" Q2="0" Q3="1"/>
+    </Property>
+   </Properties>
+  </Object>
+  <Object name="Op">
+   <Properties Count="2">
+    <Property name="Base" type="App::PropertyLink">
+     <Link value="Import"/>
+    </Property>
+    <Property name="Tool" type="App::PropertyLink">
+     <Link value="Ball"/>
+    </Property>
+   </Properties>
+  </Object>
+ </ObjectData>
+</Document>
+"#,
+        );
+        craft_fcstd(&path, &xml, &[("ImportShape.brp", &boxbrp)]);
+        let (mut doc, _) = load_document(&path).expect("loads");
+        doc.recompute_all().expect("recompute executes");
+        let result = shape_of(doc.get_by_name("Op").unwrap()).expect("computed");
+        assert_eq!(
+            result.kind_name(),
+            "Brep",
+            "{kind}: the crossing-disk bite carries the exact model"
+        );
+        let got = result.try_volume().expect("measures exactly");
+        assert!(
+            (got - want).abs() <= 1e-9 * want,
+            "{kind}: the crossing-disk volume {got} is the closed form {want}"
+        );
+        // The display channel TESSELLATES — the trim-domain slice's
+        // two arms: the lens as the EXTERIOR of the walk's UV image
+        // (the box minus the bounded interior), the cap-union
+        // complement as the bounded polygon. The mesh volume within
+        // the deflection-derived bound (r = 2: 4πr²·d).
+        let mesh = result
+            .try_tessellate(0.05)
+            .unwrap_or_else(|e| panic!("{kind}: the render channel tessellates: {e}"));
+        assert!(
+            (mesh.volume() - got).abs() <= 4.0 * std::f64::consts::PI * 4.0 * 0.05,
+            "{kind}: the display mesh volume {:.6} vs the exact {got:.6}",
+            mesh.volume()
+        );
+        std::fs::remove_file(&path).ok();
+    }
+}
+
 /// An imported-box document with a `Part::Box` primitive tool: the
 /// corpus box (30×20×5) as Base, the placed primitive as Tool.
 fn import_box_tool_xml(kind: &str, l: f64, w: f64, h: f64, px: f64, py: f64, pz: f64) -> String {

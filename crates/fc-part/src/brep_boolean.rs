@@ -5114,8 +5114,12 @@ pub fn box_sphere_boolean(
             // (dims[k] − d(k) < r) — strict, tangency being the
             // contained arm's own boundary. Exactly ONE crossing is
             // the offset face station (the small-circle section,
-            // K4-2d/3 slice 2); the ball reaching two faces or more
-            // is the general overlap this family does not construct.
+            // K4-2d/3 slice 2); exactly TWO on ADJACENT faces whose
+            // section disks cross each other's planes (a² + b² < r²)
+            // is the offset EDGE station (the crossing-disk
+            // side-clipped bite wrapping the shared edge, K4-2d/3
+            // slice 7); anything else is a general overlap this
+            // family does not construct, each refusing by name.
             let crossings: Vec<(usize, u8)> = (0..3)
                 .flat_map(|k| {
                     let mut c = Vec::new();
@@ -5128,16 +5132,60 @@ pub fn box_sphere_boolean(
                     c
                 })
                 .collect();
-            if crossings.len() == 1 {
-                let (n, sig_n) = crossings[0];
-                offset_face_station(op, o, axes, dims, cs, r, n, sig_n)
-            } else {
-                Ok(refused(&format!(
-                    "the sphere crosses {} of the box's faces from an interior center — the \
-                     general spherical section is not constructed in this family (one crossed \
-                     face is the offset bite; two or more have no single-section construction)",
-                    crossings.len()
-                )))
+            match crossings.len() {
+                1 => {
+                    let (n, sig_n) = crossings[0];
+                    offset_face_station(op, o, axes, dims, cs, r, n, sig_n)
+                }
+                2 => {
+                    let (n0, s0) = crossings[0];
+                    let (n1, s1) = crossings[1];
+                    if n0 == n1 {
+                        Ok(refused(
+                            "the ball crosses both faces of the box's slab from an interior \
+                             center (the through-going two-mouth section on one axis) — not \
+                             constructed in this family",
+                        ))
+                    } else {
+                        // Adjacent faces (two faces on distinct axes
+                        // share a box edge). The crossing-disk test:
+                        // the sections cross each other's planes iff
+                        // a² + b² < r² — exact arithmetic, the tangent
+                        // equality the degenerate lens's own boundary.
+                        let depth = |(n, s): (usize, u8)| {
+                            if s == 1 {
+                                dims[n] - d[n]
+                            } else {
+                                d[n]
+                            }
+                        };
+                        let a = depth((n0, s0));
+                        let b = depth((n1, s1));
+                        let rr = a * a + b * b;
+                        if rr > r * r {
+                            Ok(refused(&format!(
+                                "the ball crosses two adjacent faces from an interior center \
+                                 but the section disks do not cross each other's planes \
+                                 (a² + b² = {rr:.6} > r² = {}) — the separate two-mouth \
+                                 sections are not constructed in this family",
+                                r * r
+                            )))
+                        } else if rr == r * r {
+                            Ok(refused(
+                                "the two section circles are tangent on the shared box edge \
+                                 (a² + b² = r²) — the degenerate lens is not constructed, and \
+                                 this kernel never silently snaps it to the edge bite",
+                            ))
+                        } else {
+                            offset_edge_station(op, o, axes, dims, cs, r, [n0, n1], [s0, s1])
+                        }
+                    }
+                }
+                n => Ok(refused(&format!(
+                    "the sphere crosses {n} of the box's faces from an interior center — the \
+                     corner-ward general overlap is not constructed in this family (one crossed \
+                     face is the offset bite; two crossing disks the edge wrap)",
+                ))),
             }
         }
     }
@@ -5575,6 +5623,426 @@ fn offset_face_station(
             });
             draft.finish()?
         }
+    };
+    Ok(BooleanOutcome {
+        kind: BooleanOutcomeKind::Solid(brep),
+    })
+}
+
+/// The OFFSET EDGE station (K4-2d/3 slice 7): the center strictly
+/// inside the box, the ball crossing exactly TWO ADJACENT faces whose
+/// section disks CROSS each other's planes (`a² + b² < r²`, the
+/// depths `a`, `b` from the two crossed faces) — the crossing-disk
+/// side-clipped bite wrapping the shared box edge. Each face's
+/// section is a small circle (`ρ_p = √(r² − a²)` on face `p`) clipped
+/// by the other face's plane into a segment-bounded footprint; the
+/// two circles meet at the two points `P±` ON the shared edge (at
+/// along-edge offsets `±h`, `h = √(r² − a² − b²)`); the sphere patch
+/// is the **lens** `{p ≥ −a, q ≥ −b}` between the two MAJOR arcs —
+/// the bigon the measure's polygon reader reads exactly by
+/// Gauss–Bonnet with the small-circle geodesic curvature.
+///
+/// * **Cut** — the box with the bite removed: the four untouched
+///   faces + the two faces NOTCHED at the shared edge (the rim
+///   detouring through each face's major arc) + the REVERSED lens;
+/// * **Fuse** — the box plus the outside part of the ball (the two
+///   overlapping caps): the SAME notched faces + the unreversed
+///   cap-union patch (the lens's complement on the same wire — Cut
+///   and Fuse differ only in the flag, the K3c-2 discipline);
+/// * **Common** — the bite itself: the two flat footprints (the
+///   segment-clipped disks, sharing the edge chord in opposite
+///   directions) + the unreversed lens.
+///
+/// The caller (the classification's crossing count) guarantees the
+/// two crossings on distinct axes with `a² + b² < r²` strictly and no
+/// crossing along the edge axis; the station defends its own
+/// contract: the strict depths, the strict crossing, and the
+/// along-edge pole clearance (the lens spans the ball's full
+/// `±r` along the edge — the exact pole tangency on an end face is
+/// refused by name, never silently emitted as a self-touching shell).
+#[allow(clippy::too_many_arguments)] // the box frame is the vocabulary
+fn offset_edge_station(
+    op: BooleanOp,
+    o: Vector3,
+    axes: [Vector3; 3],
+    dims: [f64; 3],
+    cs: Vector3,
+    r: f64,
+    on: [usize; 2],
+    sig_on: [u8; 2],
+) -> Result<BooleanOutcome, String> {
+    let [p, q] = on; // the two crossed axes
+    let e = 3 - p - q; // the shared edge's axis
+    let d = |k: usize| v3(cs.x - o.x, cs.y - o.y, cs.z - o.z).dot(&axes[k]);
+    // The inward directions of the two crossed faces and the center's
+    // depths from them — exact arithmetic on the input parameters.
+    let u_p = if sig_on[0] == 1 {
+        v3(-axes[p].x, -axes[p].y, -axes[p].z)
+    } else {
+        axes[p]
+    };
+    let u_q = if sig_on[1] == 1 {
+        v3(-axes[q].x, -axes[q].y, -axes[q].z)
+    } else {
+        axes[q]
+    };
+    let a = if sig_on[0] == 1 { dims[p] - d(p) } else { d(p) };
+    let b = if sig_on[1] == 1 { dims[q] - d(q) } else { d(q) };
+    // The station's own contract, defended: strict crossings (the
+    // caller's count guarantees them), the crossing disks, and the
+    // along-edge pole clearance.
+    if !(a > 0.0 && a < r && b > 0.0 && b < r) {
+        return Err(format!(
+            "the offset edge station demands 0 < depths < r, got a = {a}, b = {b} (r = {r})"
+        ));
+    }
+    let rr = a * a + b * b;
+    if rr >= r * r {
+        return Err(format!(
+            "the offset edge station demands crossing section disks (a² + b² < r²), got \
+             a² + b² = {rr} vs r² = {r}²"
+        ));
+    }
+    let t = d(e);
+    if !(t > r && dims[e] - t > r) {
+        return Ok(refused(
+            "the bite touches the box's along-edge face at the sphere's pole — the exact \
+             pole tangency is not constructed in this family (a self-touching shell, refused \
+             by name rather than emitted)",
+        ));
+    }
+    let a_e = axes[e];
+    let neg_a_e = v3(-a_e.x, -a_e.y, -a_e.z);
+    // The canonical station points: the feet of the sphere's center on
+    // the two face planes (the section circles' centers), the section
+    // radii, the half-chord on the shared edge, and the two crossing
+    // points P± — one fixed accumulation order each, every face
+    // referencing the same bits.
+    let f_p = v3(cs.x - a * u_p.x, cs.y - a * u_p.y, cs.z - a * u_p.z);
+    let f_q = v3(cs.x - b * u_q.x, cs.y - b * u_q.y, cs.z - b * u_q.z);
+    let rho_p = (r * r - a * a).sqrt();
+    let rho_q = (r * r - b * b).sqrt();
+    let h = (r * r - a * a - b * b).sqrt();
+    if !(rho_p > 0.0 && rho_q > 0.0 && h > 0.0) {
+        return Err("the offset edge section degenerated (ρ or h = 0)".into());
+    }
+    let edge_foot = v3(
+        cs.x - a * u_p.x - b * u_q.x,
+        cs.y - a * u_p.y - b * u_q.y,
+        cs.z - a * u_p.z - b * u_q.z,
+    );
+    let a_pt = v3(
+        edge_foot.x - h * a_e.x,
+        edge_foot.y - h * a_e.y,
+        edge_foot.z - h * a_e.z,
+    );
+    let b_pt = v3(
+        edge_foot.x + h * a_e.x,
+        edge_foot.y + h * a_e.y,
+        edge_foot.z + h * a_e.z,
+    );
+    // The local-to-global corner mapping: local (se along the edge,
+    // sp along u_p, sq along u_q).
+    let s_edge = |se: u8, sp: u8, sq: u8| -> [u8; 3] {
+        let mut s = [0u8, 0, 0];
+        s[e] = se;
+        s[p] = if u_p == axes[p] { sp } else { 1 - sp };
+        s[q] = if u_q == axes[q] { sq } else { 1 - sq };
+        s
+    };
+    let corner = |se: u8, sp: u8, sq: u8| box_corner(o, axes, dims, s_edge(se, sp, sq));
+    // The frame parity: (a_e × u_p) · u_q = ±1 — the two face frames'
+    // handedness against their outward normals, both signs constructed.
+    let par = a_e.cross(&u_p).dot(&u_q);
+    // The sphere patch's own parameterization: the edge direction as
+    // the axis — both section circles then read as bounded-u curves
+    // (no latitude wraparound), the lens as the exterior of the walk's
+    // UV image and its complement as the bounded interior, each tiling
+    // through the trim-domain classifier's own arms.
+    let sphere_surface = Surface::Sphere {
+        center: cs,
+        axis: a_e,
+        ref_dir: u_p,
+        radius: r,
+    };
+    // The two MAJOR arcs, authored in the directions the bitten faces'
+    // walks use them (the parity swap keeps the all-forward cycle the
+    // lens's region-on-left walk for both box handednesses — the
+    // slice-1 small theorem, extended): arc_p through the +u_q side of
+    // circle_p (a_pt → b_pt when par > 0), arc_q through the +u_p side
+    // of circle_q (b_pt → a_pt when par > 0). Each sweep is the major
+    // one, π + 2·atan2(depth, h) — the multi-segment NURBS chain the
+    // classical arc authoring spells for sweeps past π.
+    let arcs = |draft: &mut Draft| -> [ArcChain; 2] {
+        let sweep_p = std::f64::consts::PI + 2.0 * b.atan2(h);
+        let arc_p = draft.arc(
+            f_p,
+            u_q,
+            if par > 0.0 { a_e } else { neg_a_e },
+            rho_p,
+            if par > 0.0 { a_pt } else { b_pt },
+            if par > 0.0 { b_pt } else { a_pt },
+            (-h).atan2(-b),
+            sweep_p,
+        );
+        let sweep_q = std::f64::consts::PI + 2.0 * a.atan2(h);
+        let arc_q = draft.arc(
+            f_q,
+            if par > 0.0 { a_e } else { neg_a_e },
+            u_p,
+            rho_q,
+            if par > 0.0 { b_pt } else { a_pt },
+            if par > 0.0 { a_pt } else { b_pt },
+            (-a).atan2(h),
+            sweep_q,
+        );
+        [arc_p, arc_q]
+    };
+    // The four untouched faces: far-p, far-q, and the two e-ends.
+    let untouched = |draft: &mut Draft| {
+        for (k, high) in [
+            (p, u_p == axes[p]),
+            (q, u_q == axes[q]),
+            (e, false),
+            (e, true),
+        ] {
+            let n_out = if high {
+                axes[k]
+            } else {
+                v3(-axes[k].x, -axes[k].y, -axes[k].z)
+            };
+            let span: Vec<usize> = (0..3).filter(|&m| m != k).collect();
+            let (ia, ib) = if axes[span[0]].cross(&axes[span[1]]).dot(&n_out) > 0.0 {
+                (span[0], span[1])
+            } else {
+                (span[1], span[0])
+            };
+            let s_of = |a: u8, b: u8| -> [u8; 3] {
+                let mut s = [0u8, 0, 0];
+                s[k] = high as u8;
+                s[ia] = a;
+                s[ib] = b;
+                s
+            };
+            rect_face(
+                draft,
+                box_corner(o, axes, dims, s_of(0, 0)),
+                box_corner(o, axes, dims, s_of(1, 0)),
+                box_corner(o, axes, dims, s_of(1, 1)),
+                box_corner(o, axes, dims, s_of(0, 1)),
+                n_out,
+                axes[ia],
+                axes[ib],
+                dims[ia],
+                dims[ib],
+            );
+        }
+    };
+
+    // ---- Cut / Fuse ------------------------------------------------
+    let bite_solid = |negate: bool, reversed: bool| -> Result<ExactBRep, String> {
+        let mut draft = Draft::new();
+        let [arc_p, arc_q] = arcs(&mut draft);
+        // F_p: the notched face — the CCW rim walk detouring through
+        // the major arc on the shared-edge side.
+        {
+            let n_out = v3(-u_p.x, -u_p.y, -u_p.z);
+            let c00 = corner(0, 0, 0);
+            let c10 = corner(1, 0, 0);
+            let c11 = corner(1, 0, 1);
+            let c01 = corner(0, 0, 1);
+            let (e_a, la, lb) = if par > 0.0 {
+                (a_e, dims[e], dims[q])
+            } else {
+                (u_q, dims[q], dims[e])
+            };
+            let mut uses: Vec<WireEdge> = Vec::new();
+            let mut walk = |from: Vector3, to: Vector3, uses: &mut Vec<WireEdge>| {
+                let s = draft.seam(from, to);
+                uses.push(WireEdge {
+                    edge: s.0,
+                    forward: s.1,
+                });
+            };
+            if par > 0.0 {
+                // c00 → a_pt → arc → b_pt → c10 → c11 → c01 → c00.
+                walk(c00, a_pt, &mut uses);
+                uses.extend(chain_uses(&arc_p, true));
+                walk(b_pt, c10, &mut uses);
+                walk(c10, c11, &mut uses);
+                walk(c11, c01, &mut uses);
+                walk(c01, c00, &mut uses);
+            } else {
+                // c00 → c01 → c11 → c10 → b_pt → arc → a_pt → c00.
+                walk(c00, c01, &mut uses);
+                walk(c01, c11, &mut uses);
+                walk(c11, c10, &mut uses);
+                walk(c10, b_pt, &mut uses);
+                uses.extend(chain_uses(&arc_p, true));
+                walk(a_pt, c00, &mut uses);
+            }
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [0.0, la, 0.0, lb],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // F_q: the notched face, the mirrored walk.
+        {
+            let n_out = v3(-u_q.x, -u_q.y, -u_q.z);
+            let c00 = corner(0, 0, 0);
+            let c10 = corner(0, 1, 0);
+            let c11 = corner(1, 1, 0);
+            let c01 = corner(1, 0, 0);
+            let (e_a, la, lb) = if par > 0.0 {
+                (u_p, dims[p], dims[e])
+            } else {
+                (a_e, dims[e], dims[p])
+            };
+            let mut uses: Vec<WireEdge> = Vec::new();
+            let mut walk = |from: Vector3, to: Vector3, uses: &mut Vec<WireEdge>| {
+                let s = draft.seam(from, to);
+                uses.push(WireEdge {
+                    edge: s.0,
+                    forward: s.1,
+                });
+            };
+            if par > 0.0 {
+                // c00 → c10 → c11 → c01 → b_pt → arc → a_pt → c00.
+                walk(c00, c10, &mut uses);
+                walk(c10, c11, &mut uses);
+                walk(c11, c01, &mut uses);
+                walk(c01, b_pt, &mut uses);
+                uses.extend(chain_uses(&arc_q, true));
+                walk(a_pt, c00, &mut uses);
+            } else {
+                // c00 → a_pt → arc → b_pt → c01 → c11 → c10 → c00.
+                walk(c00, a_pt, &mut uses);
+                uses.extend(chain_uses(&arc_q, true));
+                walk(b_pt, c01, &mut uses);
+                walk(c01, c11, &mut uses);
+                walk(c11, c10, &mut uses);
+                walk(c10, c00, &mut uses);
+            }
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: c00,
+                    normal: n_out,
+                    x_dir: e_a,
+                },
+                uv_bounds: [0.0, la, 0.0, lb],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        untouched(&mut draft);
+        // The patch on the NEGATIVE cycle (the lens's region-on-left
+        // walk is the all-forward positive cycle; Cut and Fuse share
+        // the negative cycle and differ only in the flag).
+        let chains = vec![arc_p, arc_q];
+        let v_start = draft.vertex(if par > 0.0 { a_pt } else { b_pt });
+        let order = arc_cycle_order(&draft, &chains, v_start);
+        let cycle: Vec<&ArcChain> = order.iter().map(|&ci| &chains[ci]).collect();
+        draft
+            .faces
+            .push(patch_face(sphere_surface.clone(), &cycle, negate, reversed));
+        draft.finish()
+    };
+
+    // ---- Common: the bite itself (two footprints + the lens) ------
+    let bite_itself = || -> Result<ExactBRep, String> {
+        let mut draft = Draft::new();
+        let [arc_p, arc_q] = arcs(&mut draft);
+        let v_a = draft.vertex(a_pt);
+        let v_b = draft.vertex(b_pt);
+        // The footprint on face p: the segment-clipped disk — the edge
+        // chord and the major arc, the region on the left against
+        // −u_p (the chord toward +u_q's side, the arc closing around).
+        // The UV box: the disk's own ±ρ square in the face's frame —
+        // the rational arcs lie in their control hulls, both inside.
+        {
+            let e_a = if par > 0.0 { a_e } else { u_q };
+            let mut uses: Vec<WireEdge> = Vec::new();
+            if par > 0.0 {
+                // a_pt → chord → b_pt → arc → a_pt.
+                let (ce, cf) = draft.seam(a_pt, b_pt);
+                uses.push(WireEdge {
+                    edge: ce,
+                    forward: cf,
+                });
+                uses.extend(draft.chain_use_between(&arc_p, v_b, v_a));
+            } else {
+                // b_pt → chord → a_pt → arc → b_pt.
+                let (ce, cf) = draft.seam(b_pt, a_pt);
+                uses.push(WireEdge {
+                    edge: ce,
+                    forward: cf,
+                });
+                uses.extend(draft.chain_use_between(&arc_p, v_a, v_b));
+            }
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: f_p,
+                    normal: v3(-u_p.x, -u_p.y, -u_p.z),
+                    x_dir: e_a,
+                },
+                uv_bounds: [-rho_p, rho_p, -rho_p, rho_p],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // The footprint on face q: the mirrored walk.
+        {
+            let e_a = if par > 0.0 { u_p } else { a_e };
+            let mut uses: Vec<WireEdge> = Vec::new();
+            if par > 0.0 {
+                // b_pt → chord → a_pt → arc → b_pt.
+                let (ce, cf) = draft.seam(b_pt, a_pt);
+                uses.push(WireEdge {
+                    edge: ce,
+                    forward: cf,
+                });
+                uses.extend(draft.chain_use_between(&arc_q, v_a, v_b));
+            } else {
+                // a_pt → chord → b_pt → arc → a_pt.
+                let (ce, cf) = draft.seam(a_pt, b_pt);
+                uses.push(WireEdge {
+                    edge: ce,
+                    forward: cf,
+                });
+                uses.extend(draft.chain_use_between(&arc_q, v_b, v_a));
+            }
+            draft.faces.push(TopoFace {
+                surface: Surface::Plane {
+                    origin: f_q,
+                    normal: v3(-u_q.x, -u_q.y, -u_q.z),
+                    x_dir: e_a,
+                },
+                uv_bounds: [-rho_q, rho_q, -rho_q, rho_q],
+                wires: vec![TopoWire { edges: uses }],
+                reversed: false,
+            });
+        }
+        // The lens on the POSITIVE cycle.
+        let chains = vec![arc_p, arc_q];
+        let v_start = draft.vertex(if par > 0.0 { a_pt } else { b_pt });
+        let order = arc_cycle_order(&draft, &chains, v_start);
+        let cycle: Vec<&ArcChain> = order.iter().map(|&ci| &chains[ci]).collect();
+        draft
+            .faces
+            .push(patch_face(sphere_surface.clone(), &cycle, false, false));
+        draft.finish()
+    };
+
+    let brep = match op {
+        BooleanOp::Cut => bite_solid(true, true)?,
+        BooleanOp::Fuse => bite_solid(true, false)?,
+        BooleanOp::Common => bite_itself()?,
     };
     Ok(BooleanOutcome {
         kind: BooleanOutcomeKind::Solid(brep),
@@ -6078,11 +6546,14 @@ fn edge_station(
                 walk(c11, c01, &mut uses);
                 walk(c01, c00, &mut uses);
             } else {
-                // c00 → c10 → c11 → c01 → b_pt → arc → a_pt → c00.
-                walk(c00, c10, &mut uses);
-                walk(c10, c11, &mut uses);
-                walk(c11, c01, &mut uses);
-                walk(c01, b_pt, &mut uses);
+                // c00 → c01 → c11 → c10 → b_pt → arc → a_pt → c00 —
+                // the (u_q, a_e) frame walks the shared edge LAST
+                // (c10 → c00, the −a_e direction), the detour
+                // splitting it at b_pt/a_pt.
+                walk(c00, c01, &mut uses);
+                walk(c01, c11, &mut uses);
+                walk(c11, c10, &mut uses);
+                walk(c10, b_pt, &mut uses);
                 uses.extend(chain_uses(&arc_p, true));
                 walk(a_pt, c00, &mut uses);
             }
@@ -6127,13 +6598,16 @@ fn edge_station(
                 uses.extend(chain_uses(&arc_q, true));
                 walk(a_pt, c00, &mut uses);
             } else {
-                // c00 → a_pt → arc → b_pt → c10 → c11 → c01 → c00.
+                // c00 → a_pt → arc → b_pt → c01 → c11 → c10 → c00 —
+                // the (a_e, u_p) frame walks the shared edge FIRST
+                // (c00 → c01, the +a_e direction), the detour
+                // splitting it at a_pt/b_pt.
                 walk(c00, a_pt, &mut uses);
                 uses.extend(chain_uses(&arc_q, true));
-                walk(b_pt, c10, &mut uses);
-                walk(c10, c11, &mut uses);
-                walk(c11, c01, &mut uses);
-                walk(c01, c00, &mut uses);
+                walk(b_pt, c01, &mut uses);
+                walk(c01, c11, &mut uses);
+                walk(c11, c10, &mut uses);
+                walk(c10, c00, &mut uses);
             }
             draft.faces.push(TopoFace {
                 surface: Surface::Plane {

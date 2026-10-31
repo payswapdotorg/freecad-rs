@@ -1282,6 +1282,67 @@ behind us.
       sections, the coplanar-face merge (the flush landing's union),
       and the OCCT-authored-result reader widening (multi-segment
       NURBS arcs).
+- [x] **K4-2d/3 slice 7 (landing 2026-10-31)** the crossing-disk
+      side-clipped sections — the interior center whose ball crosses
+      TWO ADJACENT faces with the section disks crossing each other's
+      planes (`a² + b² < r²`, the depths from the two crossed faces).
+      The routing's crossing count now splits the two-crossing case
+      honestly: same-axis (the through-going two-mouth slab span)
+      refuses; adjacent-but-uncrossed (`a² + b² > r²`, two separate
+      full-disk footprints and a band patch) refuses by name; the
+      exact tangency (`a² + b² = r²` — bit-exact, one degenerate
+      crossing point) refuses, never snapped; three crossings refuse
+      with the count. The construction: each crossed face's section
+      disk (`ρ = √(r² − δ²)`) is side-clipped by the other face's
+      plane into a **segment-bounded footprint** (the disk minus the
+      circular segment beyond the shared edge's chord), the two
+      section circles meeting at the two points P± ON the shared edge
+      (`h = √(r² − a² − b²)` the half-chord); the box faces become
+      NOTCHED (the rim's covered segment replaced by each face's
+      MAJOR arc — a single simply-connected wire, the hole opened out
+      through the side); the sphere patch is the **LENS** `{p ≥ −a,
+      q ≥ −b}` between the two major arcs — the same wire bounding
+      the cap-union complement, Cut and Fuse differing only in the
+      reversed flag (the K3c-2 discipline); the Common is the two flat
+      footprints (sharing the edge chord in opposite directions) plus
+      the unreversed lens. **The measure widened**: the spherical
+      polygon reader now reads ANY wire of arcs that are section
+      circles of the face's sphere, great or small — the area by
+      Gauss–Bonnet WITH the geodesic curvature (`∫k_g ds = (δ/r)·Δφ`,
+      the plane depth along the traversal axis; great circles carry
+      δ = 0 and the classical excess falls out, the full circle
+      recovers the cap identity), the vector area's Stokes integral
+      per arc gaining the offset term `½δ·(â × chord)` (the chord
+      terms of a chain's segments telescoping into the whole arc's) —
+      the slice-1 patches read bit-stably through it. **A real latent
+      defect fell out of the audit**: the edge station's MIRRORED
+      parity (`(a_e × u_p)·u_q = −1`) cut/fuse walks were authored
+      against the wrong corner order — the detour legs ran diagonally
+      across the face, the shell validator catching it as an error
+      ("edge used by 1 face wires", never a wrong solid) — untested
+      because the mirror test only ran Common there; fixed (the
+      `(u_q, a_e)` frame walks the shared edge LAST, the `(a_e, u_p)`
+      FIRST) with the y-edge cut/fuse pinned in the mirror test. The
+      corpus grew `edge_offset`/`edge_offset_high` (the two frame
+      handednesses), regenerated with OCCT's ADAPTIVE
+      `BRepGProp` integration (the default fixed-order Gauss
+      undershoots the two-plane section trims by ~1.5e-6 — the
+      geometry exact, the quadrature coarse; the older cases move
+      ≤8.5e-15 relative). Acceptance: `tests/box_sphere_boolean.rs`
+      (+2 — both handednesses × the three ops against the hand closed
+      forms (the segment footprints, the Gauss–Bonnet lens, the
+      divergence-identity volume) AND OCCT's own numbers, the face
+      counts 7/7/3 matching OCCT's topology, the FCBREP round-trip
+      bit-identical, the render channel WATERTIGHT within the patch
+      bound — the lens tiling through the exterior arm (the walk's UV
+      image bounded under the edge-direction axis, the complement
+      through the bounded polygon), the lens mesh's deflection
+      convergence, the sharpened refusals) and `tests/exact_boolean.rs`
+      (+1 — the crossing-disk bite through the real dispatch, all
+      three ops with working display channels). Suite: 729, none
+      ignored. The remaining K4-2d/3 surface: the coplanar-face merge
+      (the flush landing's union), and the OCCT-authored-result reader
+      widening (multi-segment NURBS arcs).
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)

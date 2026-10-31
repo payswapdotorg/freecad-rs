@@ -1192,32 +1192,55 @@ fn arc_geom_of(brep: &ExactBRep, edge: usize) -> Result<Option<ArcGeom>, String>
 /// One recognized arc of the spherical polygon, in the wire's
 /// TRAVERSAL direction.
 struct PolyArc {
-    /// The traversal-signed great-circle normal (`p × ṗ`, unit).
-    normal: Vector3,
-    /// The sweep angle in `(0, 2π)`.
+    /// The arc's own stored rotation axis (the sweep runs CCW around
+    /// it, unit).
+    axis: Vector3,
+    /// The section circle's radius `ρ` (`ρ² + δ² = r²`).
+    radius: f64,
+    /// The sweep angle in `(0, 2π)`, stored CCW around `axis`.
     sweep: f64,
+    /// The traversal sign: `+1` forward (CCW around `axis`), `−1`
+    /// backward.
+    eps: f64,
+    /// The circle plane's signed offset from the sphere center along
+    /// `axis` — the geodesic curvature's carrier.
+    depth: f64,
     /// The unit traversal tangent at the departure vertex.
     t_out: Vector3,
     /// The unit traversal tangent at the arrival vertex.
     t_in: Vector3,
+    /// The walk's entry point (the vector-area chord start).
+    p_in: Vector3,
+    /// The walk's exit point (the vector-area chord end).
+    p_out: Vector3,
 }
 
 /// The spherical polygon: a sphere face whose single wire is a
-/// closed loop of open arcs, each a **great circle** of the face's
-/// own sphere — the box×sphere bite patches of K4-2d/3 (the octant
-/// behind a corner bite, the quarter behind an edge bite, their
-/// complements), and any other such patch. The reading is exact, in
-/// closed form:
+/// closed loop of open arcs, each a **section circle** of the face's
+/// own sphere — great (the box×sphere bite patches of K4-2d/3: the
+/// octant behind a corner bite, the quarter behind an edge bite,
+/// their complements) or small (the crossing-disk lens between two
+/// small-circle sections, K4-2d/3 slice 7: the offset edge bite
+/// wrapping a box edge, its cap-union complement). The reading is
+/// exact, in closed form:
 ///
-/// * the **area** is the spherical excess via Gauss–Bonnet — geodesic
-///   arcs carry no geodesic curvature, so `A = r²·(2π − s·Στᵢ)` with
-///   `τᵢ` the signed exterior turn at each vertex (right-hand around
-///   the unit radial `v̂ᵢ`) and `s = +1` unreversed / `−1` reversed
-///   (the traversal is the region-on-left walk against the face's
-///   OUTWARD normal — the negative orientation w.r.t. the radial when
-///   the face is reversed);
+/// * the **area** is Gauss–Bonnet with the geodesic curvature the
+///   small-circle sections carry: `A = r²·(2π − s·(Στᵢ + Σ∫k_g ds))`
+///   with `τᵢ` the signed exterior turn at each vertex (right-hand
+///   around the unit radial `v̂ᵢ`) and each arc's line integral
+///   `∫k_g ds = (δ/r)·Δφ` — the plane depth `δ` along the axis the
+///   walk runs CCW around, `Δφ` the swept angle; great circles carry
+///   `δ = 0` and the classical excess `A = r²·(2π − s·Στᵢ)` falls
+///   out, while the full circle recovers the cap identity
+///   `A = 2πr(r − δ)`; `s = +1` unreversed / `−1` reversed (the
+///   traversal is the region-on-left walk against the face's
+///   OUTWARD normal — the negative orientation w.r.t. the radial
+///   when the face is reversed);
 /// * the **vector area** (outward-of-sphere oriented) is the Stokes
-///   line integral `½∮ p×dp = ½r²·Σ ±Θₖ·n̂ₖ` per arc, sign-corrected
+///   line integral `½∮ p×dp` per arc: the sector term
+///   `½ρ²·(±Θₖ)·âₖ` plus the offset term `½δ·(âₖ × chord)` (the
+///   small circle's center off the sphere's — `½ρ·δ·â×(û₁ − û₀)`
+///   with `û` the unit radials at the walk's ends), sign-corrected
 ///   by the same `s`;
 /// * the **flux** of `p·n̂` is `σ·(c·V + r·A)` — `p = c + r·v̂` on the
 ///   sphere, `p·n̂ = c·n̂ + r` against the solid's outward normal
@@ -1260,8 +1283,10 @@ fn sphere_polygon(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<Option<(f64, f
             return Ok(None); // a closed circle — the cap/band business
         }
     }
-    // Recognize every arc; each must be a great circle of THIS sphere
-    // (its center is the sphere's center, its radius the sphere's).
+    // Recognize every arc; each must be a section circle of THIS
+    // sphere, great or small: its center the foot of the sphere's
+    // center on its plane (the radial residual vanishes), its radius
+    // satisfying ρ² + δ² = r².
     let mut arcs: Vec<PolyArc> = Vec::with_capacity(uses.len());
     for &(e, fwd) in &uses {
         let g = match arc_geom_of(brep, e)? {
@@ -1269,22 +1294,40 @@ fn sphere_polygon(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<Option<(f64, f
             None => return Ok(None), // not an arc this reader knows
         };
         let off = v3(g.center.x - c.x, g.center.y - c.y, g.center.z - c.z);
-        if off.length() > tol || (g.radius - r).abs() > tol * r.max(1.0) {
+        let depth = off.dot(&g.normal);
+        let radial = v3(
+            off.x - g.normal.x * depth,
+            off.y - g.normal.y * depth,
+            off.z - g.normal.z * depth,
+        );
+        if radial.length() > tol
+            || (g.radius * g.radius + depth * depth - r * r).abs() > tol * r.max(1.0)
+        {
             return Err(format!(
-                "face {i}: a spherical-polygon edge whose circle is not a great circle of \
-                 the face's sphere (center off by {}, radius off by {}) — refusing rather \
-                 than reading a small circle as a great one",
-                off.length(),
-                (g.radius - r).abs()
+                "face {i}: a spherical-polygon edge whose circle is not a section of the face's \
+                 sphere (center off by {}, plane-depth residual {}) — refusing rather than \
+                 reading a foreign circle",
+                radial.length(),
+                (g.radius * g.radius + depth * depth - r * r).abs()
             ));
         }
         let eps = if fwd { 1.0 } else { -1.0 };
         let neg = |v: Vector3| v3(-v.x, -v.y, -v.z);
+        let (vi_in, vi_out) = if fwd {
+            (brep.edges[e].start, brep.edges[e].end)
+        } else {
+            (brep.edges[e].end, brep.edges[e].start)
+        };
         arcs.push(PolyArc {
-            normal: v3(g.normal.x * eps, g.normal.y * eps, g.normal.z * eps),
+            axis: g.normal,
+            radius: g.radius,
             sweep: g.sweep,
+            eps,
+            depth,
             t_out: if fwd { g.t_start } else { neg(g.t_end) },
             t_in: if fwd { g.t_end } else { neg(g.t_start) },
+            p_in: brep.vertices[vi_in].point,
+            p_out: brep.vertices[vi_out].point,
         });
     }
     // The junction turns: at each vertex where arc k arrives and arc
@@ -1325,22 +1368,44 @@ fn sphere_polygon(ctx: FaceRef<'_>, c: Vector3, r: f64) -> Result<Option<(f64, f
         sum_tau += v_hat.dot(&cross).atan2(t_in.dot(&t_out));
     }
     let s = sigma;
-    let area = r * r * (2.0 * pi - s * sum_tau);
+    // Gauss–Bonnet with the geodesic curvature: each small-circle
+    // section at plane depth δ contributes (δ/r)·Δφ along the walk
+    // (zero for the great circles the slice-1 patches carry).
+    let mut sum_kg = 0.0;
+    for arc in &arcs {
+        sum_kg += arc.eps * arc.depth * arc.sweep / r;
+    }
+    let area = r * r * (2.0 * pi - s * (sum_tau + sum_kg));
     if !(area > 0.0 && area < 4.0 * pi * r * r) {
         return Err(format!(
             "face {i}: the spherical-polygon wire does not bound a patch (area {area:.6} \
-             outside (0, 4πr²)) — the turn angles do not close a simple region"
+             outside (0, 4πr²)) — the turn angles and curvatures do not close a simple region"
         ));
     }
     // The vector area, outward-of-sphere oriented: the traversal
     // integral sign-corrected by s (reversed faces traverse the
-    // negative orientation w.r.t. the radial).
+    // negative orientation w.r.t. the radial). Per arc: the sector
+    // ½ρ²·Δφ·â plus the offset ½δ·(â × chord) — the chord terms of a
+    // chain's segments telescope into the whole arc's chord.
     let mut v_vec = v3(0.0, 0.0, 0.0);
     for arc in &arcs {
+        let dphi = arc.eps * arc.sweep;
+        let chord = v3(
+            arc.p_out.x - arc.p_in.x,
+            arc.p_out.y - arc.p_in.y,
+            arc.p_out.z - arc.p_in.z,
+        );
+        let off_term = arc.axis.cross(&chord);
         v_vec = v3(
-            v_vec.x + 0.5 * r * r * arc.sweep * arc.normal.x,
-            v_vec.y + 0.5 * r * r * arc.sweep * arc.normal.y,
-            v_vec.z + 0.5 * r * r * arc.sweep * arc.normal.z,
+            v_vec.x
+                + 0.5 * (arc.radius * arc.radius * dphi) * arc.axis.x
+                + 0.5 * arc.depth * off_term.x,
+            v_vec.y
+                + 0.5 * (arc.radius * arc.radius * dphi) * arc.axis.y
+                + 0.5 * arc.depth * off_term.y,
+            v_vec.z
+                + 0.5 * (arc.radius * arc.radius * dphi) * arc.axis.z
+                + 0.5 * arc.depth * off_term.z,
         );
     }
     let v_vec = v3(s * v_vec.x, s * v_vec.y, s * v_vec.z);

@@ -15,6 +15,12 @@ configurations of the K4-2d/3 taxonomy:
 * `face_offset` / `face_offset_high` — the center at depth δ
               inside, the ball crossing exactly one face: the bite
               is a small-circle cap (slice 2);
+* `edge_offset` / `edge_offset_high` — the center inside at depths
+              (a, b) from two ADJACENT faces, the ball crossing both
+              with the section disks crossing each other's planes
+              (a² + b² < r²): the bite wraps the shared edge, the
+              sphere patch the lens between the two major arcs
+              (slice 7 — the crossing-disk side-clipped sections);
 * `inside`  — the sphere entirely inside the box (containment);
 * `disjoint`— no contact;
 * `engulf`  — the box entirely inside the sphere.
@@ -67,6 +73,13 @@ CONFIGS = [
     # small-circle cap: V = π(δ+r)²(2r−δ)/3, A = π(r²−δ²) + 2πr(δ+r).
     ("face_offset", (15.0, 10.0, 1.5), 2.0),
     ("face_offset_high", (15.0, 10.0, 3.5), 2.0),
+    # K4-2d/3 slice 7 — the offset edge stations: the center inside at
+    # depths (a, b) = (1, 1.5) from two adjacent faces (r = 2, a²+b² =
+    # 3.25 < 4): the section disks cross each other's planes and the
+    # bite wraps the shared edge. The low-low edge (x=0, z=0) and the
+    # mirrored low-high edge (x=0, z=5).
+    ("edge_offset", (1.0, 10.0, 1.5), 2.0),
+    ("edge_offset_high", (1.0, 10.0, 3.5), 2.0),
 ]
 
 
@@ -101,8 +114,14 @@ def save(shape, name, props, diagnostics=False):
         print(f"{name}: BRepTools.Write failed", file=sys.stderr)
         sys.exit(1)
     v, a = GProp_GProps(), GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape, v)
-    BRepGProp.SurfaceProperties_s(shape, a)
+    # The ADAPTIVE integration (eps = 1e-12): the default fixed-order
+    # Gauss undershoots the two-plane section trims by ~1.5e-6 (the
+    # edge_offset lens) — the authored geometry is exact, only the
+    # default quadrature coarse. On the older corpus cases the two
+    # agree to 8.5e-15 relative, so the switch moves nothing but the
+    # last-bit noise.
+    BRepGProp.VolumeProperties_s(shape, v, 1e-12, True)
+    BRepGProp.SurfaceProperties_s(shape, a, 1e-12, True)
     entry = {
         "volume": v.Mass(),
         "area": a.Mass(),

@@ -386,11 +386,31 @@ fn mirror_stations_and_rotated_frames_measure_the_same_forms() {
         (brep_volume(&brep).unwrap() - (3000.0 - 4.5 * PI)).abs() <= 1e-9,
         "the far-corner cut measures the octant form"
     );
-    // An edge on the y-axis pair at (0, 12, 0).
+    // An edge on the y-axis pair at (0, 12, 0) — the MIRRORED frame
+    // handedness (the parity the slice-7 audit found latent-broken in
+    // the edge station's cut/fuse walks: the wrong corner order left
+    // the detour legs running diagonally across the face, the shell
+    // validator catching it as an error — never a wrong solid). All
+    // three ops now construct the quarter forms on that parity.
     let brep = solid(run(BooleanOp::Common, v3(0.0, 12.0, 0.0), 3.0));
     assert!(
         (brep_volume(&brep).unwrap() - 9.0 * PI).abs() <= 1e-9,
         "the y-edge common measures the quarter form"
+    );
+    let brep = solid(run(BooleanOp::Cut, v3(0.0, 12.0, 0.0), 3.0));
+    assert!(
+        (brep_volume(&brep).unwrap() - (3000.0 - 9.0 * PI)).abs() <= 1e-9,
+        "the y-edge cut measures the quarter form (the mirrored parity)"
+    );
+    let a = brep_area(&brep).unwrap();
+    assert!(
+        (a - (1700.0 - 9.0 * PI + 9.0 * PI)).abs() <= 1e-9,
+        "the y-edge cut area measures the notched form ({a})"
+    );
+    let brep = solid(run(BooleanOp::Fuse, v3(0.0, 12.0, 0.0), 3.0));
+    assert!(
+        (brep_volume(&brep).unwrap() - (3000.0 + 27.0 * PI)).abs() <= 1e-9,
+        "the y-edge fuse measures the quarter complement form (the mirrored parity)"
     );
     // A rotated box (a quarter turn about z, the corner at (5, −3)):
     // axes (ŷ, −x̂, ẑ), the same dimensions, the corner station at
@@ -412,6 +432,90 @@ fn mirror_stations_and_rotated_frames_measure_the_same_forms() {
     assert!(
         (brep_volume(&brep).unwrap() - 16.0 * PI / 3.0).abs() <= 1e-9,
         "the rotated-frame face common measures the half-ball form"
+    );
+    // The crossing-disk edge bite in the rotated frame: the center one
+    // unit along +ŷ and 1.5 up ẑ from the corner, ten along −x̂ —
+    // depths (1, 1.5) from the +ŷ and +ẑ faces (the shared edge along
+    // −x̂), r = 2 — the same crossing-disk lens forms as the
+    // axis-aligned corpus case.
+    let cs2 = v3(5.0 - 10.0, -3.0 + 1.0, 1.5);
+    let lens_v = {
+        // The hand form (the same derivation as the acceptance test,
+        // the depths swapped to the rotated faces): the footprints,
+        // the lens, the divergence identity.
+        let (r, a, b) = (2.0f64, 1.0f64, 1.5f64);
+        let rho_p = (r * r - a * a).sqrt();
+        let rho_q = (r * r - b * b).sqrt();
+        let h = (r * r - a * a - b * b).sqrt();
+        let seg = |rho: f64, cut: f64| {
+            rho * rho * (cut / rho).acos() - cut * (rho * rho - cut * cut).sqrt()
+        };
+        let a_fp = PI * rho_p * rho_p - seg(rho_p, b);
+        let a_fq = PI * rho_q * rho_q - seg(rho_q, a);
+        // The tangents in the rotated frame's inward directions
+        // (u_p = +ŷ, u_q = +ẑ, a_e = −x̂) — the same component pattern.
+        let (upx, upy, upz) = (0.0, 1.0, 0.0);
+        let (uqx, uqy, uqz) = (0.0, 0.0, 1.0);
+        let (aex, aey, aez) = (-1.0, 0.0, 0.0);
+        let unit = |(x, y, z): (f64, f64, f64)| {
+            let n = (x * x + y * y + z * z).sqrt();
+            (x / n, y / n, z / n)
+        };
+        let dot = |u: (f64, f64, f64), v: (f64, f64, f64)| u.0 * v.0 + u.1 * v.1 + u.2 * v.2;
+        let cross = |u: (f64, f64, f64), v: (f64, f64, f64)| {
+            (
+                u.1 * v.2 - u.2 * v.1,
+                u.2 * v.0 - u.0 * v.2,
+                u.0 * v.1 - u.1 * v.0,
+            )
+        };
+        let tau = |t_in: (f64, f64, f64), t_out: (f64, f64, f64), p: (f64, f64, f64)| {
+            let v_hat = unit(p);
+            dot(v_hat, cross(t_in, t_out)).atan2(dot(t_in, t_out))
+        };
+        // The crossing points P± in WORLD coordinates (the basis
+        // tuple spelling would only coincide with the axis-aligned
+        // frame's).
+        let p_m = (
+            -a * upx - b * uqx - h * aex,
+            -a * upy - b * uqy - h * aey,
+            -a * upz - b * uqz - h * aez,
+        );
+        let p_p = (
+            -a * upx - b * uqx + h * aex,
+            -a * upy - b * uqy + h * aey,
+            -a * upz - b * uqz + h * aez,
+        );
+        let tau_m = tau(
+            unit((h * uqx - b * aex, h * uqy - b * aey, h * uqz - b * aez)),
+            unit((a * aex - h * upx, a * aey - h * upy, a * aez - h * upz)),
+            p_m,
+        );
+        let tau_p = tau(
+            unit((a * aex + h * upx, a * aey + h * upy, a * aez + h * upz)),
+            unit((
+                -(b * aex + h * uqx),
+                -(b * aey + h * uqy),
+                -(b * aez + h * uqz),
+            )),
+            p_p,
+        );
+        let dphi_p = PI + 2.0 * b.atan2(h);
+        let dphi_q = PI + 2.0 * a.atan2(h);
+        let a_lens = r * r * (2.0 * PI - tau_m - tau_p + a / r * dphi_p + b / r * dphi_q);
+        (a * a_fp + b * a_fq + r * a_lens) / 3.0
+    };
+    let out = run_frame(BooleanOp::Common, o, ry, neg_rx, z, cs2, 2.0);
+    let brep = solid(out);
+    assert!(
+        (brep_volume(&brep).unwrap() - lens_v).abs() <= 1e-9,
+        "the rotated-frame crossing-disk common measures the lens form"
+    );
+    let out = run_frame(BooleanOp::Cut, o, ry, neg_rx, z, cs2, 2.0);
+    let brep = solid(out);
+    assert!(
+        (brep_volume(&brep).unwrap() - (3000.0 - lens_v)).abs() <= 1e-9,
+        "the rotated-frame crossing-disk cut measures the notched form"
     );
 }
 
@@ -535,21 +639,198 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
 }
 
 /// The offset boundaries, refusing by name: a ball crossing TWO
-/// faces (bottom and top, or a lateral beside the face) has no
-/// single-section construction — the count named, never a guess.
+/// faces has a construction only when the two are ADJACENT and their
+/// section disks CROSS each other's planes — the through-going slab
+/// span, the non-crossing separate sections, the exact tangency, the
+/// corner-ward three-face overlap, and the along-edge pole touch each
+/// refuse with the reason, never a guess.
 #[test]
 fn offset_multi_face_crossings_refuse_by_name() {
-    // The center mid-height, r spanning the slab: bottom AND top.
+    // The center mid-height, r spanning the slab: bottom AND top —
+    // the through-going two-mouth section on one axis.
     let why = refused(run(BooleanOp::Cut, v3(15.0, 10.0, 2.5), 4.0));
     assert!(
-        why.contains("crosses 2 of the box's faces"),
-        "the two-face crossing names its count: {why}"
+        why.contains("crosses both faces of the box's slab"),
+        "the through-slab crossing names itself: {why}"
     );
-    // A lateral crossing beside the face bite.
-    let why = refused(run(BooleanOp::Cut, v3(1.0, 10.0, 1.5), 2.0));
+    // Two adjacent crossings whose disks do NOT cross (a² + b² =
+    // 1 + 2.25 = 3.25 > r² = 3.24): the separate two-mouth sections.
+    let why = refused(run(BooleanOp::Cut, v3(1.0, 10.0, 1.5), 1.8));
     assert!(
-        why.contains("crosses 2 of the box's faces"),
-        "the lateral+face crossing names its count: {why}"
+        why.contains("do not cross each other's planes"),
+        "the non-crossing two-face case names itself: {why}"
+    );
+    // The exact tangency a² + b² = r² — with exactly representable
+    // operands (0.75² + 1² = 0.5625 + 1 = 1.5625 = 1.25²): the
+    // degenerate lens, refused, never snapped to the edge bite.
+    let why = refused(run(BooleanOp::Cut, v3(0.75, 10.0, 1.0), 1.25));
+    assert!(
+        why.contains("tangent on the shared box edge"),
+        "the tangent disks name the degeneracy: {why}"
+    );
+    // Three crossings near a corner: the corner-ward general overlap.
+    let why = refused(run(BooleanOp::Cut, v3(1.0, 1.0, 1.5), 2.0));
+    assert!(
+        why.contains("crosses 3 of the box's faces"),
+        "the three-face crossing names its count: {why}"
+    );
+    // The along-edge pole tangency: the lens spans ±r along the edge,
+    // and d(e) == r puts the pole exactly ON the end face.
+    let why = refused(run(BooleanOp::Cut, v3(1.0, 2.0, 1.5), 2.0));
+    assert!(
+        why.contains("touches the box's along-edge face at the sphere's pole"),
+        "the pole tangency names itself: {why}"
+    );
+}
+
+/// The crossing-disk edge bite (K4-2d/3 slice 7): the center inside
+/// at depths (a, b) = (1, 1.5) from two adjacent faces, r = 2 — the
+/// section disks cross each other's planes (a² + b² = 3.25 < 4), the
+/// bite wraps the shared edge. Both edges (the low-low and the
+/// mirrored low-high — the two frame handednesses), all three ops,
+/// against the hand-derived closed forms AND real OCCT's own numbers.
+///
+/// The hand forms, derived from the input parameters alone (the box's
+/// inward frame, the sphere's center as the origin; the two corpus
+/// cases share them — the frame parities cancel in every term):
+///
+/// * the **footprints** — each face's section disk (ρ_p = √(r² − a²))
+///   clipped by the other face's plane into the disk minus the
+///   circular segment beyond a chord at the other depth:
+///   `A_fp = πρ_p² − (ρ_p²·arccos(b/ρ_p) − b·√(ρ_p² − b²))`;
+/// * the **lens** `{p ≥ −a, q ≥ −b}` — Gauss–Bonnet with the
+///   small-circle geodesic curvature, the walk the construction
+///   authors (the region on the left viewed from outside; each
+///   section plane sits at offset −depth along its walk's CCW axis,
+///   so the curvature integrals are negative and the depths enter
+///   positively): `A_lens = r²(2π − τ₋ − τ₊ + (a/r)·Δφ_p +
+///   (b/r)·Δφ_q)` with the MAJOR-arc sweeps `Δφ_p = π + 2·atan2(b,
+///   h)`, `Δφ_q = π + 2·atan2(a, h)` (`h = √(r² − a² − b²)` — the
+///   half-chord on the shared edge), and the exterior turns at the
+///   crossing points P± from the circles' CCW-around-axis tangents
+///   `â × r̂` there;
+/// * the **volume** — the divergence identity over the bite's own
+///   boundary: `V_bite = (a·A_fp + b·A_fq + r·A_lens)/3` (the flat
+///   faces at constant `p·n̂` = the depths, the sphere at `p·n̂ = r`).
+#[test]
+fn edge_offset_bite_measures_the_closed_forms_and_occt() {
+    let r = 2.0;
+    let (a, b): (f64, f64) = (1.0, 1.5); // the depths from the x-face and the z-face
+    let rho_p = (r * r - a * a).sqrt(); // the section circle on the x-face
+    let rho_q = (r * r - b * b).sqrt(); // the section circle on the z-face
+    let h = (r * r - a * a - b * b).sqrt(); // the half-chord along the edge
+    let seg =
+        |rho: f64, cut: f64| rho * rho * (cut / rho).acos() - cut * (rho * rho - cut * cut).sqrt();
+    let a_fp = PI * rho_p * rho_p - seg(rho_p, b); // the x-face footprint
+    let a_fq = PI * rho_q * rho_q - seg(rho_q, a); // the z-face footprint
+                                                   // The junction tangents in the box's inward frame (u_p = x̂, u_q =
+                                                   // ẑ, a_e = ŷ): at P− the arc_p arrival (h·u_q − b·a_e)/ρ_p and the
+                                                   // arc_q departure (a·a_e − h·u_p)/ρ_q; at P+ the arc_q arrival
+                                                   // (a·a_e + h·u_p)/ρ_q and the arc_p departure −(b·a_e + h·u_q)/ρ_p.
+    let (u_p, u_q, a_e) = (AX, AZ, AY);
+    let p_m = v3(-a, -h, -b);
+    let p_p = v3(-a, h, -b);
+    let unit = |v: Vector3| v * (1.0 / v.length());
+    let tau = |t_in: Vector3, t_out: Vector3, p: Vector3| {
+        let v_hat = unit(p);
+        v_hat.dot(&t_in.cross(&t_out)).atan2(t_in.dot(&t_out))
+    };
+    let t_pm_in = unit(v3(
+        h * u_q.x - b * a_e.x,
+        h * u_q.y - b * a_e.y,
+        h * u_q.z - b * a_e.z,
+    ));
+    let t_pm_out = unit(v3(
+        a * a_e.x - h * u_p.x,
+        a * a_e.y - h * u_p.y,
+        a * a_e.z - h * u_p.z,
+    ));
+    let tau_m = tau(t_pm_in, t_pm_out, p_m);
+    let t_pp_in = unit(v3(
+        a * a_e.x + h * u_p.x,
+        a * a_e.y + h * u_p.y,
+        a * a_e.z + h * u_p.z,
+    ));
+    let t_pp_out = unit(v3(
+        -(b * a_e.x + h * u_q.x),
+        -(b * a_e.y + h * u_q.y),
+        -(b * a_e.z + h * u_q.z),
+    ));
+    let tau_p = tau(t_pp_in, t_pp_out, p_p);
+    let dphi_p = PI + 2.0 * b.atan2(h);
+    let dphi_q = PI + 2.0 * a.atan2(h);
+    let a_lens = r * r * (2.0 * PI - tau_m - tau_p + a / r * dphi_p + b / r * dphi_q);
+    // The divergence identity and the area sums.
+    let v_bite = (a * a_fp + b * a_fq + r * a_lens) / 3.0;
+    let ball_v = 4.0 * PI * r * r * r / 3.0;
+    let ball_a = 4.0 * PI * r * r;
+    let box_a = 2.0 * (30.0 * 20.0 + 30.0 * 5.0 + 20.0 * 5.0);
+    // The low-low edge: the center at (1, 10, 1.5) — depths (1, 1.5)
+    // from x=0 and z=0 (one frame handedness); the mirrored low-high
+    // edge: the center at (1, 10, 3.5) — depths (1, 1.5) from x=0 and
+    // z=5 (the other). Both construct the same closed forms.
+    for (tag, cs) in [
+        ("low-low", v3(1.0, 10.0, 1.5)),
+        ("low-high", v3(1.0, 10.0, 3.5)),
+    ] {
+        acceptance(
+            &format!("edge-offset-{tag} cut"),
+            "box_sphere_cut_edge_offset",
+            BooleanOp::Cut,
+            cs,
+            r,
+            3000.0 - v_bite,
+            box_a - a_fp - a_fq + a_lens,
+            7,
+        );
+        acceptance(
+            &format!("edge-offset-{tag} fuse"),
+            "box_sphere_fuse_edge_offset",
+            BooleanOp::Fuse,
+            cs,
+            r,
+            3000.0 + ball_v - v_bite,
+            box_a - a_fp - a_fq + ball_a - a_lens,
+            7,
+        );
+        acceptance(
+            &format!("edge-offset-{tag} common"),
+            "box_sphere_common_edge_offset",
+            BooleanOp::Common,
+            cs,
+            r,
+            v_bite,
+            a_fp + a_fq + a_lens,
+            3,
+        );
+    }
+}
+
+/// The lens mesh's approximation is deflection-true in the referee's
+/// own sense: the crossing-disk bite's chord-and-panel deficit shrinks
+/// with the deflection — quartering the deflection quarters the volume
+/// error (the chord sagitta is linear in the deflection), the same
+/// discipline as the octant patch and the pole-run fan.
+#[test]
+fn lens_mesh_volume_error_shrinks_with_deflection() {
+    let bite = solid(run(BooleanOp::Common, v3(1.0, 10.0, 1.5), 2.0));
+    let exact = brep_volume(&bite).unwrap();
+    let err = |d: f64| {
+        (tessellate_brep(&bite, d)
+            .expect("the render channel")
+            .volume()
+            - exact)
+            .abs()
+    };
+    let coarse = err(0.25);
+    let fine = err(0.0625);
+    assert!(
+        coarse > 0.0,
+        "the coarse lens mesh sits strictly off the exact (the chords bite)"
+    );
+    assert!(
+        fine <= coarse / 3.0,
+        "quartering the deflection must shrink the deficit ({fine:.6} vs {coarse:.6})"
     );
 }
 
