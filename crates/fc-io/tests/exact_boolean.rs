@@ -896,6 +896,19 @@ fn edge_and_face_bites_of_imported_box_run_exact() {
         (got - want).abs() <= 1e-9 * want,
         "the edge-bite volume {got} is the closed form {want}"
     );
+    // The display channel TESSELLATES — the pole-run fan: the patch's
+    // boundary arc crosses the sphere's pole (the quarter ball's walk
+    // jumps half a period at it), and the fan around the collapsed
+    // hub tiles it watertight under the sagitta discipline. The mesh
+    // volume within the deflection-derived bound (r = 3: 4πr²·d).
+    let mesh = result
+        .try_tessellate(0.05)
+        .unwrap_or_else(|e| panic!("the edge bite's render channel tessellates: {e}"));
+    assert!(
+        (mesh.volume() - got).abs() <= 4.0 * std::f64::consts::PI * 9.0 * 0.05,
+        "the edge bite's display mesh volume {:.6} vs the exact {got:.6}",
+        mesh.volume()
+    );
     std::fs::remove_file(&path).ok();
 
     // The face station: the primitive placed at (15, 10, 0) — the

@@ -45,19 +45,23 @@
 //! the box's pole lines and seam synthesized the way the primitives
 //! spell their own; a sphere's single closed latitude circle is the
 //! cap line case, the two half-boxes the walk direction separates.
-//! Planar faces tile exactly for every wire count — the hole wires
-//! bridge through the profile kernel's own planar-region
-//! triangulator, the hole rims entering as the shared edge samples
-//! they are.
+//! A walk CROSSING a pole (the edge station's quarter ball — the
+//! boundary arc through the pole, spelled as a pole run) tiles as
+//! the pole-run fan: the run collapses to one hub vertex and the
+//! region fans from it, the cap's own pole spelling read off the
+//! walk, both for the patch and for its complement's hole. Planar
+//! faces tile exactly for every wire count — the hole wires bridge
+//! through the profile kernel's own planar-region triangulator, the
+//! hole rims entering as the shared edge samples they are.
 //!
 //! Refused by name: B-spline faces (no curvature estimate drives
 //! their interior sampling yet), hole-trimmed CURVED domains, sphere
-//! patches whose walk crosses a pole (an authored pole run whose
-//! tiling is the named next slice), a curved face keeping the
-//! exterior of its trim on a non-sphere surface (only the sphere's
-//! parameter box carries degenerate boundaries the face owns),
-//! untrimmed faces (no wires bound the region), and non-positive
-//! volume results.
+//! patches whose walk crosses BOTH poles (a lune — the fan tiles one
+//! crossing) or touches one as a cusp (a pole run with no meridian
+//! jump), a curved face keeping the exterior of its trim on a
+//! non-sphere surface (only the sphere's parameter box carries
+//! degenerate boundaries the face owns), untrimmed faces (no wires
+//! bound the region), and non-positive volume results.
 
 use std::collections::{HashMap, HashSet};
 
@@ -656,6 +660,12 @@ fn planar_region_tris(
     Ok((tris, p3))
 }
 
+/// The sphere's parameterization spells its poles at `v = ±π/2` —
+/// the latitude test every pole-run decision shares.
+fn at_pole_latitude(v: f64) -> bool {
+    (v.abs() - std::f64::consts::FRAC_PI_2).abs() <= 1e-9
+}
+
 /// One curved face's trim domain, classified then tiled. The
 /// classification is the wire-orientation convention every authored
 /// face carries (the `TopoFace` contract): the traversal keeps the
@@ -760,24 +770,6 @@ fn curved_region_tris(
         return Ok((dm.tris, dm.p3));
     }
 
-    // A walk carrying a run of consecutive same-3D samples — a pole
-    // line the primitives spell themselves (those left above, at the
-    // box-bounding checks) — is an AUTHORED pole-crossing patch (the
-    // edge station's quarter ball, either side of it): the tiling of
-    // an authored pole run — the band's corner merges and the
-    // referee's inserts against the welded pole vertex, the
-    // exterior's bridging around the run — is not yet trustworthy.
-    // The ear clip must never see one either: two domain vertices
-    // the emit welds into one mesh vertex would fan into each other
-    // and fold. Named, never a torn mesh; the exact channels still
-    // measure it.
-    if loop_verts.windows(2).any(|w| w[0].p3 == w[1].p3) {
-        return Err(format!(
-            "face {fi}: a sphere patch whose walk crosses a pole — the pole-run tiling for \
-             authored walks is the named next slice; the exact channels still measure it"
-        ));
-    }
-
     // The winding classification: the authored wire's traversal keeps
     // the region on the LEFT viewed from the face's outward normal,
     // so the walk's UV winding against the parameterization's own
@@ -791,6 +783,25 @@ fn curved_region_tris(
         ));
     }
     if wind * sigma > 0.0 {
+        // An authored pole run (the walk crossing a pole — the edge
+        // station's quarter ball) tiles as the fan around the pole;
+        // every other interior walk is the polygon case. A
+        // degenerate-sample run on a non-sphere surface (a cone's
+        // apex spelling) keeps the named refusal — only the sphere's
+        // pole runs have a fan.
+        if loop_verts
+            .windows(2)
+            .any(|w| w[0].p3 == w[1].p3 && at_pole_latitude(w[0].uv.y))
+        {
+            if !matches!(surface, Surface::Sphere { .. }) {
+                return Err(format!(
+                    "face {fi}: a {} patch whose walk crosses its degenerate v-extreme — only \
+                     the sphere's pole runs tile (the fan); the exact channels still measure it",
+                    surface.kind_name()
+                ));
+            }
+            return pole_fan_tris(fi, surface, loop_verts, deflection);
+        }
         return polygon_tris(fi, surface, loop_verts, deflection);
     }
 
@@ -911,6 +922,135 @@ fn cap_band_tris(
     Ok((dm.tris, dm.p3))
 }
 
+/// Collapse the walk's pole run to ONE hub vertex. A pole run — a
+/// maximal stretch of same-3D samples AT a pole latitude — is the
+/// walk's crossing of a pole (the boundary arc through it: one
+/// meridian up, the pole, the other meridian down), spelled by the
+/// walk builder as one 3D point spanning a u-range; every panel
+/// touching the run's interior samples would weld into a two-pole
+/// fold, so the tiling never sees them. The hub keeps the run's own
+/// p3 (the pole), its u the run's MIDPOINT — deliberately off both
+/// crossing meridians, so no fan panel degenerates onto a meridian
+/// line and loses the shared rim samples the neighboring faces
+/// carry. A walk with no pole run rides unchanged (a duplicated
+/// sample elsewhere — a zero-length wire edge's spelling — is not a
+/// run); exactly one run tiles (a both-poles lune refuses by name);
+/// a run with no meridian jump is a cusp this reader refuses.
+fn collapse_pole_run(fi: usize, loop_verts: &[BoundaryVert]) -> Result<Vec<BoundaryVert>, String> {
+    let mut walk: Vec<BoundaryVert> = loop_verts.to_vec();
+    // A pole run straddling the walk's closure (the pole's 3D point at
+    // both ends) rotates interior first.
+    let n = walk.len();
+    if n > 1 && walk[0].p3 == walk[n - 1].p3 && at_pole_latitude(walk[0].uv.y) {
+        let p = walk[0].p3;
+        let trail = walk.iter().rev().take_while(|b| b.p3 == p).count();
+        walk.rotate_right(trail);
+    }
+    let n = walk.len();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && walk[j + 1].p3 == walk[i].p3 {
+            j += 1;
+        }
+        // A same-3D stretch anywhere off the pole latitudes is a
+        // spelling artifact (a zero-length wire edge), not a pole run.
+        if j > i && at_pole_latitude(walk[i].uv.y) {
+            runs.push((i, j));
+        }
+        i = j + 1;
+    }
+    if runs.is_empty() {
+        return Ok(walk);
+    }
+    if runs.len() > 1 {
+        return Err(format!(
+            "face {fi}: a sphere patch whose walk crosses {} poles — the pole-run fan tiles \
+             one crossing; the lune refuses (the exact channels still measure it)",
+            runs.len()
+        ));
+    }
+    let (i0, i1) = runs[0];
+    let (u_arr, u_dep) = (walk[i0].uv.x, walk[i1].uv.x);
+    if (u_arr - u_dep).abs() <= 1e-9 {
+        return Err(format!(
+            "face {fi}: a pole run with no meridian jump — a cusp at the pole this reader \
+             does not tile (the exact channels still measure it)"
+        ));
+    }
+    if n - (i1 - i0 + 1) < 2 {
+        return Err(format!(
+            "face {fi}: a pole run leaving fewer than two real boundary samples — not a \
+             region this reader can tile (the exact channels still measure it)"
+        ));
+    }
+    let mut out: Vec<BoundaryVert> = Vec::with_capacity(n - (i1 - i0));
+    out.push(BoundaryVert {
+        uv: Point2::new(0.5 * (u_arr + u_dep), walk[i0].uv.y),
+        p3: walk[i0].p3,
+    });
+    out.extend(walk[i1 + 1..].iter().chain(walk[..i0].iter()).cloned());
+    Ok(out)
+}
+
+/// The pole-run fan — a sphere patch whose walk CROSSES a pole (the
+/// edge station's quarter ball). The run collapses to one hub vertex
+/// ([`collapse_pole_run`]), and the whole region tiles as the fan
+/// from the hub over the walk's remaining samples — the CAP's own
+/// spelling read off the walk. Every boundary sample is a fan corner
+/// (the shared rim discretizations ride bit-exactly: no ear-clip
+/// pass, nothing dropped, no stitch); the fan's radial edges pair
+/// between consecutive panels; the two fan boundary edges through
+/// the hub are the pole-adjacent arc chords themselves. The
+/// curvature grid and the deflection referee densify from there —
+/// the panels wrapping the pole refine until each misses the surface
+/// by at most the deflection, the polar sector's coverage carried by
+/// the refined pole-adjacent panels exactly the way the cap's fan
+/// carries its own pole.
+fn pole_fan_tris(
+    fi: usize,
+    surface: &Surface,
+    loop_verts: &[BoundaryVert],
+    deflection: f64,
+) -> Result<(Vec<[u32; 3]>, Vec<Vector3>), String> {
+    let walk = collapse_pole_run(fi, loop_verts)?;
+    let mut dm = DomainMesh {
+        pts: Vec::with_capacity(walk.len()),
+        p3: Vec::with_capacity(walk.len()),
+        tris: Vec::new(),
+    };
+    dm.pts.push(walk[0].uv);
+    dm.p3.push(walk[0].p3);
+    let hub_idx = 0u32;
+    let chain: Vec<u32> = walk[1..]
+        .iter()
+        .map(|b| {
+            let idx = dm.pts.len() as u32;
+            dm.pts.push(b.uv);
+            dm.p3.push(b.p3);
+            idx
+        })
+        .collect();
+    for pair in chain.windows(2) {
+        emit_band_tri(&mut dm, [hub_idx, pair[0], pair[1]]);
+    }
+    // The curvature grid over the fan polygon, inserted as Steiner
+    // points; the referee takes over from there.
+    let boundary: Vec<Point2> = dm.pts.clone();
+    for row in grid_rows(surface, &[&boundary], deflection) {
+        for p in row {
+            if dm.pts.len() >= MAX_DOMAIN_VERTS {
+                break;
+            }
+            dm.insert_point(surface, p);
+        }
+    }
+    refine_domain(&mut dm, surface, deflection);
+    let tris = std::mem::take(&mut dm.tris);
+    Ok((tris, dm.p3))
+}
+
 /// The polygon domain — a curved face whose single walk is a proper
 /// UV polygon keeping its interior: the planar kernel ear-clips the
 /// domain (boundary kept, holes none), the dropped boundary points
@@ -953,12 +1093,15 @@ fn polygon_tris(
 /// the seam is this face's own parameter cut, no neighbor carries
 /// it), the two pole lines (one 3D pole each — reusing the walk's own
 /// pole vertex when the walk touches a pole, so the shared Draft
-/// vertex welds bit-exactly). The walk enters as the hole, the
-/// profile kernel bridges it into the outer walk, and the
-/// curvature-grid-plus-referee discipline densifies from there. The
-/// period is cut clear of the walk (the seam placed in the gap the
-/// walk leaves), so the hole never touches the seam columns; a walk
-/// touching a pole line is the near-tangent case the bridging's own
+/// vertex welds bit-exactly). The walk enters as the hole — a
+/// pole-run walk collapsed to its hub first (the run's samples
+/// would weld the bridging's panels along the hole's top edge into
+/// two-pole folds) — and the profile kernel bridges it into the
+/// outer walk, the curvature-grid-plus-referee discipline
+/// densifying from there. The period is cut clear of the walk (the
+/// seam placed in the gap the walk leaves), so the hole never
+/// touches the seam columns; a walk touching a pole line without
+/// crossing it is the near-tangent case the bridging's own
 /// visibility test arbitrates honestly.
 fn sphere_exterior_tris(
     fi: usize,
@@ -1048,16 +1191,22 @@ fn sphere_exterior_tris(
         let seam_p3 = surface.point(u0, *v);
         push(Point2::new(u0, *v), seam_p3, &mut outer_pts, &mut outer_p3);
     }
-    // The walk enters as the hole, its near-pole vertices nudged a
-    // recognition-scale gap INSIDE the box: a bite that reaches a pole
-    // touches the box's v-extreme exactly (the authored vertex IS the
-    // pole), and a hole touching the outer boundary is not a region
-    // the bridging can splice. The nudge moves the derived UV alone —
-    // the authored 3D samples ride unchanged, and the sliver it opens
-    // maps to the pole's own neighborhood (every 3D point on a
-    // v-extreme edge is the pole), so the mesh is unaffected: the
-    // sliver's triangles are 3D-degenerate and dropped exactly.
+    // The walk enters as the hole — a pole-run walk collapsed to its
+    // hub first ([`collapse_pole_run`]): the run's interior samples
+    // would weld the bridging's panels along the hole's top edge into
+    // two-pole folds, dropping the arc's pole-adjacent edges with
+    // them. Every near-pole vertex is then nudged a recognition-scale
+    // gap INSIDE the box: a bite that reaches a pole touches the box's
+    // v-extreme exactly (the authored vertex IS the pole), and a hole
+    // touching the outer boundary is not a region the bridging can
+    // splice. The nudge moves the derived UV alone — the authored 3D
+    // samples ride unchanged, and the sliver it opens maps to the
+    // pole's own neighborhood (every 3D point on a v-extreme edge is
+    // the pole), so the mesh is unaffected: the sliver's triangles
+    // are 3D-degenerate and dropped exactly.
     let gap = 1e-9;
+    let hole_walk = collapse_pole_run(fi, loop_verts)?;
+    let walk: Vec<Point2> = hole_walk.iter().map(|b| b.uv).collect();
     let hole: Vec<Point2> = walk
         .iter()
         .map(|p| {
@@ -1091,7 +1240,7 @@ fn sphere_exterior_tris(
     let p3: Vec<Vector3> = outer_p3
         .iter()
         .copied()
-        .chain(loop_verts.iter().map(|b| b.p3))
+        .chain(hole_walk.iter().map(|b| b.p3))
         .collect();
     let mut dm = DomainMesh { pts, p3, tris };
     // The curvature grid over the whole box, kept strictly inside the
@@ -1151,12 +1300,16 @@ fn split_pole_jumps(walk: &mut Vec<BoundaryVert>, period: f64, vmin: f64, vmax: 
     let n = walk.len();
     // The pole jumps: a pole sample whose successor sits more than
     // half a period away in u (the two meridians of a pole-crossing
-    // walk).
+    // walk). A real departure only: the successor a different 3D
+    // point (steps inside an already-spelled run — the degenerate
+    // pole lines — share the pole's p3 and are not jumps). Smaller
+    // jumps stay unspelled: their walks close fine, and the polygon
+    // path's tiling is the finer rendering for them.
     let jumps: Vec<(usize, f64)> = (0..n)
         .filter(|&i| {
             let b = &walk[i];
             let next = &walk[(i + 1) % n];
-            at_pole(b.uv.y) && (next.uv.x - b.uv.x).abs() > half - 1e-9
+            at_pole(b.uv.y) && b.p3 != next.p3 && (next.uv.x - b.uv.x).abs() > half - 1e-9
         })
         .map(|i| (i, walk[(i + 1) % n].uv.x))
         .collect();

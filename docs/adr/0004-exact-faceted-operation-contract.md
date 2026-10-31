@@ -18,7 +18,15 @@
   discipline, the annuli and rings through the planar hole-wire arm,
   the caps, patches and complements through the winding classifier —
   the render channel's honest refusals shrinking to the named
-  boundaries). Extends
+  boundaries) **and a fifth time 2026-10-31 by the K4-2d/3 slice 6
+  landing** (the authored pole-run tiling — a sphere patch whose
+  boundary arc crosses a pole renders watertight through the
+  pole-run fan: the run collapses to one hub vertex and the region
+  fans from it, the cap's own pole spelling read off the walk, both
+  the patch and its complement's hole — every constructive result of
+  the three boolean families now displays; the render refusals shrink
+  to the named boundaries: the lune, the pole cusp, the non-sphere
+  degenerate v-extreme). Extends
   [`0003-geometry-kernel-strategy.md`](0003-geometry-kernel-strategy.md)
   from the kernel program into the application's operation layer; does
   not revisit the kernel decision.
@@ -299,7 +307,10 @@ This architecture lands in slices; each stays green on its own.
   slice 5's landing amended the render-refusal lists above — the
   annuli, rings, caps, patches and period-safe complements now
   tessellate, the named boundaries shrinking to the pole-run tiling
-  and the crossing-disk sections.)* *(Exercised 2026-10-30: the K4-2d/3
+  and the crossing-disk sections; slice 6's landing (2026-10-31)
+  amended them again — the pole-run fan tiles the pole-crossing
+  patches, the boundaries shrinking to the lune, the pole cusp, the
+  non-sphere degenerate v-extreme, and the crossing-disk sections.)* *(Exercised 2026-10-30: the K4-2d/3
   landings — slice 1 and the offset-station slice 2 the same day —
   amended rules 3 and this section's lists: the box×sphere family
   above; slice 3 the same day: the box×box family, the second

@@ -98,15 +98,6 @@ fn occt(case: &str) -> (f64, f64) {
 /// FCBREP round-trip bit-identical, and the render channel
 /// tessellating watertight within the deflection bound (the
 /// two-channel contract — both channels now answering).
-/// The render-channel expectation: the constructive results
-/// tessellate watertight within the deflection bound; the one
-/// pole-crossing patch class refuses by name.
-#[derive(Clone, Copy, PartialEq)]
-enum Render {
-    Meshes,
-    RefusesPoleCrossing,
-}
-
 #[allow(clippy::too_many_arguments)] // the case's own vocabulary
 fn acceptance(
     name: &str,
@@ -117,7 +108,6 @@ fn acceptance(
     want_v: f64,
     want_a: f64,
     faces: usize,
-    render: Render,
 ) {
     let brep = solid(run(op, cs, r));
     assert_eq!(brep.faces.len(), faces, "{name}: the face count");
@@ -152,43 +142,32 @@ fn acceptance(
         "{name}: round-trip volume {rv:.12} vs {v:.12}"
     );
     // The render channel: the trim-domain slice's own arm — the patch
-    // domains (the spherical polygon, the cap, the complement)
-    // classify by the wire's traversal and tile under the sagitta
-    // discipline, watertight with the mesh volume within the
-    // deflection-derived bound; the one class that does not — a patch
-    // whose walk crosses a pole with a meridian jump of half a period
-    // or more — refuses by name.
-    match render {
-        Render::Meshes => {
-            let mesh = tessellate_brep(&brep, 0.25)
-                .unwrap_or_else(|e| panic!("{name}: the render channel tessellates: {e}"));
-            let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
-            for t in &mesh.triangles {
-                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                    *directed.entry((a, b)).or_default() += 1;
-                }
-            }
-            for (&(a, b), &n) in &directed {
-                assert!(
-                    n == 1 && directed.get(&(b, a)).copied() == Some(1),
-                    "{name}: the mesh is watertight ({a}→{b} used {n} times)"
-                );
-            }
-            let bound = 4.0 * PI * r * r * 0.25;
-            assert!(
-                (mesh.volume() - v).abs() <= bound,
-                "{name}: the mesh volume {:.6} vs the exact {v:.6} — the deflection bound is                  {bound:.6}",
-                mesh.volume()
-            );
-        }
-        Render::RefusesPoleCrossing => {
-            let err = tessellate_brep(&brep, 0.25).expect_err("the pole-crossing class refuses");
-            assert!(
-                err.contains("crosses a pole"),
-                "{name}: the refusal names its reason: {err}"
-            );
+    // domains (the spherical polygon, the cap, the complement, the
+    // pole-run fan) classify by the wire's traversal and tile under
+    // the sagitta discipline, watertight with the mesh volume within
+    // the deflection-derived bound. Every constructive result of this
+    // family renders — the pole-crossing patches (the edge station's
+    // quarter ball, either side) through the pole-run fan.
+    let mesh = tessellate_brep(&brep, 0.25)
+        .unwrap_or_else(|e| panic!("{name}: the render channel tessellates: {e}"));
+    let mut directed: HashMap<(u32, u32), usize> = HashMap::new();
+    for t in &mesh.triangles {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *directed.entry((a, b)).or_default() += 1;
         }
     }
+    for (&(a, b), &n) in &directed {
+        assert!(
+            n == 1 && directed.get(&(b, a)).copied() == Some(1),
+            "{name}: the mesh is watertight ({a}→{b} used {n} times)"
+        );
+    }
+    let bound = 4.0 * PI * r * r * 0.25;
+    assert!(
+        (mesh.volume() - v).abs() <= bound,
+        "{name}: the mesh volume {:.6} vs the exact {v:.6} — the deflection bound is                  {bound:.6}",
+        mesh.volume()
+    );
 }
 
 /// The corner station: the octant bite behind the corner at the
@@ -206,7 +185,6 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         3000.0 - 4.5 * PI,
         1700.0 - 9.0 * PI / 4.0,
         7,
-        Render::Meshes,
     );
     acceptance(
         "corner fuse",
@@ -217,7 +195,6 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         3000.0 + 31.5 * PI,
         1700.0 + 99.0 * PI / 4.0,
         7,
-        Render::Meshes,
     );
     acceptance(
         "corner common",
@@ -228,13 +205,14 @@ fn corner_bite_measures_the_closed_forms_and_occt() {
         4.5 * PI,
         45.0 * PI / 4.0,
         4,
-        Render::Meshes,
     );
 }
 
 /// The edge station: the quarter ball behind the edge point (12, 0, 0)
 /// — the area of the cut is the box's own (two half-disks out, the
-/// quarter patch in).
+/// quarter patch in). The patch's boundary arc crosses the sphere's
+/// pole (a meridian jump of exactly half a period) — the pole-run fan
+/// renders it watertight, both the patch and its complement.
 #[test]
 fn edge_bite_measures_the_closed_forms_and_occt() {
     acceptance(
@@ -246,7 +224,6 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         3000.0 - 9.0 * PI,
         1700.0,
         7,
-        Render::RefusesPoleCrossing,
     );
     acceptance(
         "edge fuse",
@@ -257,7 +234,6 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         3000.0 + 27.0 * PI,
         1700.0 + 18.0 * PI,
         7,
-        Render::RefusesPoleCrossing,
     );
     acceptance(
         "edge common",
@@ -268,7 +244,6 @@ fn edge_bite_measures_the_closed_forms_and_occt() {
         9.0 * PI,
         18.0 * PI,
         3,
-        Render::RefusesPoleCrossing,
     );
 }
 
@@ -286,7 +261,6 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         3000.0 - 16.0 * PI / 3.0,
         1700.0 + 4.0 * PI,
         7,
-        Render::Meshes,
     );
     acceptance(
         "face fuse",
@@ -297,7 +271,6 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         3000.0 + 16.0 * PI / 3.0,
         1700.0 + 4.0 * PI,
         7,
-        Render::Meshes,
     );
     acceptance(
         "face common",
@@ -308,7 +281,6 @@ fn face_bite_measures_the_closed_forms_and_occt() {
         16.0 * PI / 3.0,
         12.0 * PI,
         2,
-        Render::Meshes,
     );
 }
 
@@ -538,7 +510,6 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
             3000.0 - deep_v,
             1700.0 - disk_a + deep_a,
             7,
-            Render::Meshes,
         );
         acceptance(
             &format!("offset-{tag} fuse"),
@@ -549,7 +520,6 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
             3000.0 + shallow_v,
             1700.0 - disk_a + shallow_a,
             7,
-            Render::Meshes,
         );
         acceptance(
             &format!("offset-{tag} common"),
@@ -560,7 +530,6 @@ fn offset_face_bite_measures_the_closed_forms_and_occt() {
             deep_v,
             disk_a + deep_a,
             2,
-            Render::Meshes,
         );
     }
 }
@@ -608,5 +577,32 @@ fn patch_mesh_volume_error_shrinks_with_deflection() {
     assert!(
         fine <= coarse / 3.0,
         "quartering the deflection must shrink the deficit ({fine:.6} vs {coarse:.6})"
+    );
+}
+
+/// The pole-run fan's approximation is deflection-true the same way:
+/// the edge station's quarter ball (the patch whose boundary arc
+/// crosses the pole) carries the same shrinking deficit — the fan's
+/// refinement is the referee's own discipline, not a fixed coarseness.
+#[test]
+fn pole_fan_mesh_volume_error_shrinks_with_deflection() {
+    let quarter = solid(run(BooleanOp::Common, v3(12.0, 0.0, 0.0), 3.0));
+    let exact = brep_volume(&quarter).unwrap();
+    let err = |d: f64| {
+        (tessellate_brep(&quarter, d)
+            .expect("the render channel")
+            .volume()
+            - exact)
+            .abs()
+    };
+    let coarse = err(0.25);
+    let fine = err(0.0625);
+    assert!(
+        coarse > 0.0,
+        "the coarse fan mesh sits strictly off the exact (the chords bite)"
+    );
+    assert!(
+        fine <= coarse / 3.0,
+        "quartering the deflection must shrink the fan's deficit ({fine:.6} vs {coarse:.6})"
     );
 }

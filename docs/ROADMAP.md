@@ -1234,6 +1234,54 @@ behind us.
       side-clipped sections, the coplanar-face merge (the flush
       landing's union), and the OCCT-authored-result reader widening
       (multi-segment NURBS arcs).
+- [x] **K4-2d/3 slice 6 (landing 2026-10-31)** the authored pole-run
+      tiling — the render channel's last constructive refusal
+      retired. A sphere patch whose boundary arc CROSSES a pole (the
+      edge station's quarter ball: the arc through the pole — one
+      meridian up, the pole, the other meridian down — the walk
+      builder spells the crossing as a pole run, `split_pole_jumps`
+      spelling a jump of half a period or more) tiles as **the
+      pole-run fan — the CAP's own pole spelling read off the walk**:
+      the run collapses to ONE hub vertex (`collapse_pole_run`; its u
+      the run's MIDPOINT, deliberately off both crossing meridians —
+      a hub on a meridian's u-line would degenerate the fan panels
+      over that meridian's consecutive samples onto a line and silently
+      drop the shared rim discretization the neighboring face
+      carries), and the whole region tiles as the fan from the hub
+      over the walk's remaining samples. Every boundary sample is a
+      fan corner — no ear-clip pass, nothing dropped, no stitch; the
+      fan's radial edges pair between consecutive panels; the two fan
+      boundary edges through the hub are the pole-adjacent arc chords
+      themselves; the curvature grid and the deflection referee
+      densify from there, the panels wrapping the pole refining until
+      each misses the surface by at most the deflection. The
+      complement (the fuse's bulge) collapses the run the same way
+      BEFORE the exterior path's nudge: the run's samples as the
+      hole's top edge would weld the bridging's panels along it into
+      two-pole folds, dropping the arc's pole-adjacent edges with
+      them (the defect measured first: ten unpaired directed edges).
+      Two hazards the empirics caught, both closed: the collapse's
+      closure-rotation misread the crescent's duplicated start sample
+      (a zero-length wire edge's spelling) as a run — the run
+      detection and the rotation now both demand the pole latitude
+      `v = ±π/2`; and a degenerate run on a non-sphere surface (a
+      cone's apex spelling) keeps the named refusal — only the
+      sphere's pole runs have a fan. Routing the corner station (its
+      walk's jump is a quarter period) through the fan was measured
+      and rejected: coarser mesh, no honesty gain — small jumps stay
+      unspelled and the polygon path keeps them. Acceptance: the edge
+      station × the three booleans renders WATERTIGHT within the
+      patch bound `4πr²·d` (the quarter-ball fan mesh's volume error
+      shrinking with the deflection — its own quartering convergence
+      test), and through the real dispatch the imported-box edge bite
+      carries a working display channel. Honest boundaries, all
+      named: a walk crossing BOTH poles (a lune — the fan tiles one
+      crossing), a pole run with no meridian jump (a cusp), and a
+      non-sphere degenerate v-extreme. Suite: 726, none ignored. The
+      remaining K4-2d/3 surface: the crossing-disk side-clipped
+      sections, the coplanar-face merge (the flush landing's union),
+      and the OCCT-authored-result reader widening (multi-segment
+      NURBS arcs).
 - [ ] **K5** fillets, chamfers, offsets
 
 ## Non-goals (explicit)
